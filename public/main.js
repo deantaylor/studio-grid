@@ -1,0 +1,3216 @@
+const WS_URL = `ws://${location.host}`;
+const WIDTH = 16;
+const HEIGHT = 8;
+const CELL_SIZE = 32;
+const CELL_GAP = 12;
+const CANVAS_WIDTH = WIDTH * CELL_SIZE + (WIDTH - 1) * CELL_GAP;
+const CANVAS_HEIGHT = HEIGHT * CELL_SIZE + (HEIGHT - 1) * CELL_GAP;
+const BASE_WINDOW_WIDTH = 860;
+const BASE_WINDOW_HEIGHT = window.innerHeight || document.documentElement.clientHeight || 640;
+const OFF_COLOR = "#ececec";
+const ON_COLOR_DEFAULT = "#ff8e8e";
+let onColor = ON_COLOR_DEFAULT;
+const LABEL_COLOR = (getComputedStyle(document.documentElement).getPropertyValue("--panel-strong") || "#424242").trim() || "#424242";
+const LABEL_FONT = "400 8px 'Inter', sans-serif";
+const STEP_ROWS = 7;
+const STEP_ON = 8;
+const STEP_MICRO = 6;
+const PLAYHEAD = 10;
+const PATTERN_ACTIVE = 12;
+const PATTERN_INACTIVE = 4;
+const DEVICE_ACTIVE = 15;
+const DEVICE_PRESENT = 8;
+const BASE_PITCH = 60;
+
+let ws;
+let midiAccess;
+let midiOut = null; // for current page only
+let tempo = 120;
+let swing = 50;
+let running = false;
+let tickTimer = null;
+let currentPage = 1;
+let currentPattern = 1;
+let baseDivision = 16; // denominator of base note (1/16)
+let playheads = Array(9).fill(0);
+let deviceHeld = false;
+let midiSettings = Array.from({ length: 9 }, () => ({ outId: "", channel: 1 }));
+
+const canvas = document.getElementById("grid");
+// fix canvas size for 40px cells with 16px gaps
+canvas.width = CANVAS_WIDTH;
+canvas.height = CANVAS_HEIGHT;
+canvas.style.width = `${CANVAS_WIDTH}px`;
+canvas.style.height = `${CANVAS_HEIGHT}px`;
+const ctx = canvas.getContext("2d");
+const logEl = document.getElementById("log");
+const wsStatus = document.getElementById("ws-status");
+const midiStatus = document.getElementById("midi-status");
+const tempoInput = document.getElementById("tempo");
+const tempoLabelTop = document.getElementById("tempo-label-top");
+const tempoBlock = document.getElementById("tempo-block");
+const swingInput = document.getElementById("swing");
+const swingLabelTop = document.getElementById("swing-label-top");
+const swingBlock = document.getElementById("swing-block");
+const midiSel = document.getElementById("midi-out");
+const midiChan = document.getElementById("midi-chan");
+const tabs = document.getElementById("page-tabs");
+const clockSourceSel = document.getElementById("clock-source");
+const clockInputSel = document.getElementById("clock-input");
+const clockToggleBtn = document.getElementById("clock-toggle-btn");
+const clockOutToggle = document.getElementById("clock-out-enable");
+const clockOutPortSel = document.getElementById("clock-out-port");
+const baseNoteLenSel = document.getElementById("base-note-length");
+const scaleRootSel = document.getElementById("scale-root");
+const scaleModeSel = document.getElementById("scale-mode");
+const settingsTempoInput = document.getElementById("settings-tempo");
+const settingsScaleRootSel = document.getElementById("settings-scale-root");
+const settingsScaleModeSel = document.getElementById("settings-scale-mode");
+const transposeDisplay = document.getElementById("transpose-value");
+const transposeDec = document.getElementById("transpose-dec");
+const transposeInc = document.getElementById("transpose-inc");
+// legacy device pill (optional)
+const devicePill = document.getElementById("device-pill") || null;
+const settingsBtn = document.getElementById("settings-btn");
+const settingsModal = document.getElementById("settings-modal");
+const settingsBackdrop = document.getElementById("settings-backdrop");
+const settingsClose = document.getElementById("settings-close");
+const settingsSaveCfg = document.getElementById("settings-save-config");
+const settingsRestoreCfg = document.getElementById("settings-restore-default");
+const showLogToggle = document.getElementById("show-log");
+const autoFillToggle = document.getElementById("auto-fill");
+const autoLoadToggle = document.getElementById("auto-load-set");
+const allowMDExternalToggle = document.getElementById("allow-md-external");
+const patternControlLatchToggle = document.getElementById("pattern-control-latch");
+const mdBaseSweepInput = document.getElementById("md-base-sweep");
+const monoSlidePadInput = document.getElementById("mono-slide-pad");
+const uiScaleSel = document.getElementById("ui-scale");
+const ledInputs = {
+  step_on: document.getElementById("led-step-on"),
+  step_micro: document.getElementById("led-step-micro"),
+  step_accent: document.getElementById("led-step-accent"),
+  playhead: document.getElementById("led-playhead"),
+  pattern_active: document.getElementById("led-pat-active"),
+  pattern_pending: document.getElementById("led-pat-pending"),
+  pattern_inactive: document.getElementById("led-pat-inactive"),
+  device_present: document.getElementById("led-dev-present"),
+  device_active: document.getElementById("led-dev-active"),
+};
+const patternRow = document.getElementById("pattern-row");
+const patternSelect = document.getElementById("pattern-select");
+const patternLengthBtns = document.querySelectorAll("[data-pattern-length]");
+const patternScaleToggle = document.getElementById("pattern-scale-toggle");
+const barRow = document.getElementById("bar-row");
+const drumInputs = Array.from(document.querySelectorAll(".drum-note-input"));
+const followBtn = document.getElementById("follow-btn");
+const copyPatternBtn = document.getElementById("copy-pattern-btn");
+const copyBarBtn = document.getElementById("copy-bar-btn");
+const pasteBtn = document.getElementById("paste-btn");
+const clearBtn = document.getElementById("clear-btn");
+const confirmModal = document.getElementById("confirm-modal");
+const confirmClose = document.getElementById("confirm-close");
+const confirmClearCancel = document.getElementById("confirm-clear-cancel");
+const confirmClearPattern = document.getElementById("confirm-clear-pattern");
+const confirmClearBar = document.getElementById("confirm-clear-bar");
+const seqModal = document.getElementById("seq-modal");
+const seqClose = document.getElementById("seq-close");
+const seqOk = document.getElementById("seq-ok");
+const seqKeep = document.getElementById("seq-keep");
+const seqCancel = document.getElementById("seq-cancel");
+let pendingSeqType = null;
+const seqTypeSel = document.getElementById("seq-type");
+const mdTrackSel = document.getElementById("md-track");
+const ccNumberInput = document.getElementById("cc-number");
+const newSetBtn = document.getElementById("new-set");
+const newSetModal = document.getElementById("new-set-modal");
+const newSetClose = document.getElementById("new-set-close");
+const newSetConfirm = document.getElementById("new-set-confirm");
+const newSetCancel = document.getElementById("new-set-cancel");
+const keepDeviceNamesToggle = document.getElementById("keep-device-names");
+const keepMidiSettingsToggle = document.getElementById("keep-midi-settings");
+const colorModal = document.getElementById("color-modal");
+const colorClose = document.getElementById("color-close");
+const colorOptions = document.getElementById("color-options");
+let colorModalPage = null;
+const defaultColorTrigger = document.getElementById("default-color-trigger");
+const defaultColorModal = document.getElementById("default-color-modal");
+const defaultColorModalOptions = document.getElementById("default-color-options");
+const defaultColorClose = document.getElementById("default-color-close");
+const renameModal = document.getElementById("rename-modal");
+const renameInput = document.getElementById("rename-input");
+const renameSave = document.getElementById("rename-save");
+const renameCancel = document.getElementById("rename-cancel");
+let renameTargetPage = null;
+const exportTd3Btn = document.getElementById("export-td3");
+const td3Modal = document.getElementById("td3-modal");
+const td3Backdrop = document.getElementById("td3-backdrop");
+const td3GroupInput = document.getElementById("td3-group");
+const td3PatternInput = document.getElementById("td3-pattern");
+const td3Close = document.getElementById("td3-close");
+const td3Cancel = document.getElementById("td3-cancel");
+const td3Confirm = document.getElementById("td3-confirm");
+const td3ActionModal = document.getElementById("td3-action-modal");
+const td3ActionClose = document.getElementById("td3-action-close");
+const td3ImportBtn = document.getElementById("td3-import-btn");
+const td3ExportBtn = document.getElementById("td3-export-btn");
+const td3ScaleModal = document.getElementById("td3-scale-modal");
+const td3ScaleClose = document.getElementById("td3-scale-close");
+const td3ScaleFit = document.getElementById("td3-scale-fit");
+const td3ScaleSwitch = document.getElementById("td3-scale-switch");
+const td3ScaleMessage = document.getElementById("td3-scale-message");
+const NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
+const formatRoot = (root) => NOTE_NAMES[((Number(root) || 0) % 12 + 12) % 12];
+const formatScaleStr = (scale) => {
+  if (!scale) return "major (C)";
+  const mode = scale.mode || "major";
+  return `${mode} (${formatRoot(scale.root)})`;
+};
+const td3ReplaceModal = document.getElementById("td3-replace-modal");
+const td3ReplaceConfirm = document.getElementById("td3-replace-confirm");
+const td3ReplaceCancel = document.getElementById("td3-replace-cancel");
+
+const DEVICE_COLOR_PALETTE = ["#d7ff73", "#ff8e8e", "#9ad7ff", "#f0c674", "#c6b8ff"];
+const BASE_DEFAULT_DEVICE_COLOR = "#ffe070";
+let defaultDeviceColor = BASE_DEFAULT_DEVICE_COLOR;
+const AUTO_MDTONAL_COLOR = ON_COLOR_DEFAULT;
+
+// context menu for device tabs
+const deviceMenu = document.getElementById("device-menu");
+const menuRename = document.getElementById("menu-rename");
+const menuColor = document.getElementById("menu-color");
+let menuTargetPage = null;
+const noteMenu = document.getElementById("note-menu");
+const noteMenuAccent = document.getElementById("note-menu-accent");
+const noteMenuSlide = document.getElementById("note-menu-slide");
+let noteMenuTarget = null;
+let pendingNoteMenu = null;
+const octaveControls = document.createElement("div");
+octaveControls.className = "note-octave-controls";
+octaveControls.innerHTML = `
+  <button type="button" data-delta="1" aria-label="Raise octave">↑</button>
+  <button type="button" data-delta="-1" aria-label="Lower octave">↓</button>
+`;
+document.body.append(octaveControls);
+const octaveUpBtn = octaveControls.querySelector('[data-delta="1"]');
+const octaveDownBtn = octaveControls.querySelector('[data-delta="-1"]');
+let hoveredStep = null;
+let octaveHoverTimer = null;
+let isOverOctaveControls = false;
+let pendingOctaveHover = null;
+let octaveHideTimer = null;
+let lastOctaveTarget = null;
+let remoteOctaveTimer = null;
+let recentOctaveOverlay = null;
+let octaveOverlayLock = false;
+let tempoDisplayMode = "input";
+
+const formatTempoDisplay = (val) => {
+  const num = Math.max(20, Math.min(300, Number(val) || tempo));
+  return (Math.round(num * 10) / 10).toFixed(1);
+};
+
+// mirror key controls into settings modal inputs/selects
+const initialTempoDisplay = formatTempoDisplay(tempo);
+if (tempoInput) tempoInput.value = initialTempoDisplay;
+if (settingsTempoInput) settingsTempoInput.value = initialTempoDisplay;
+if (swingInput) swingInput.value = swing;
+
+// unified setters so either UI (main or settings) keeps things in sync
+function updateTempo(val, opts = {}) {
+  const broadcast = opts.broadcast !== false;
+  const next = Math.max(20, Math.min(300, Number(val) || tempo));
+  tempo = next;
+  const display = formatTempoDisplay(next);
+  if (tempoInput) tempoInput.value = display;
+  if (settingsTempoInput) settingsTempoInput.value = display;
+  if (broadcast) {
+    ws?.readyState === WebSocket.OPEN && ws.send(JSON.stringify({ type: "tempo", bpm: tempo }));
+  }
+}
+
+function lockTempoPrecision(opts = {}) {
+  // Snap tempo to one decimal and optionally broadcast to the server
+  const rounded = Number(formatTempoDisplay(tempo));
+  updateTempo(rounded, { ...opts, broadcast: opts.broadcast !== false });
+}
+function updateSwing(val, opts = {}) {
+  const broadcast = opts.broadcast !== false;
+  const swingVal = Math.max(50, Math.min(80, Number(val) || swing));
+  swing = swingVal;
+  if (swingInput) swingInput.value = swingVal;
+  if (broadcast) {
+    ws?.readyState === WebSocket.OPEN && ws.send(JSON.stringify({ type: "set_swing", swing: swingVal }));
+  }
+}
+
+// Help catch missing DOM elements early without breaking runtime
+function logMissingDom(ids) {
+  ids.forEach((id) => {
+    if (!document.getElementById(id)) {
+      console.warn(`[ui] missing element: #${id}`);
+    }
+  });
+}
+
+logMissingDom([
+  "grid",
+  "page-tabs",
+  "transport-toggle",
+  "follow-btn",
+  "pattern-select",
+  "pattern-length-toggle",
+  "pattern-scale-toggle",
+  "pattern-row",
+  "bar-row",
+  "copy-pattern-btn",
+  "copy-bar-btn",
+  "paste-btn",
+  "clear-btn",
+  "seq-type",
+  "midi-out",
+  "midi-chan",
+  "transpose-dec",
+  "transpose-inc",
+  "transpose-value",
+  "md-track",
+  "export-td3",
+  "td3-modal",
+  "td3-group",
+  "td3-pattern",
+  "td3-confirm"
+]);
+
+let frames = Array.from({ length: 9 }, () => new Array(WIDTH * HEIGHT).fill(0));
+let overlays = Array.from({ length: 9 }, () => []);
+let transposes = Array.from({ length: 9 }, () => 0);
+let scale = { root: 0, mode: "major" };
+let deviceNames = Array.from({ length: 9 }, (_, i) => (i === 0 ? null : `${i}`));
+let deviceNotes = Array.from({ length: 9 }, (_, i) => (i === 0 ? null : ""));
+let clockSource = "external"; // default to external clock
+let clockInputs = [];
+let clockInputId = "IAC Driver Bus 2";
+let clockOutEnabled = false;
+let clockOutPortId = "";
+let deviceColors = Array(9).fill(defaultDeviceColor);
+deviceColors[0] = "";
+let deviceColorOverrides = Array(9).fill(false);
+let activePatterns = Array.from({ length: 9 }, () => 1);
+let pendingPatterns = Array.from({ length: 9 }, () => null);
+let patternLengths = Array.from({ length: 9 }, () => Array(9).fill(16));
+let patternTimeScales = Array.from({ length: 9 }, () => Array(9).fill(1));
+// pattern lengths not tracked client-side
+const DEFAULT_LED_LEVELS = {
+  step_on: 8,
+  step_micro: 10, // align with step_on; micro timing disabled
+  step_accent: 14,
+  playhead: 15,
+  pattern_active: 12,
+  pattern_pending: 6,
+  pattern_inactive: 4,
+  device_present: 8,
+  device_active: 15
+};
+let ledLevels = { ...DEFAULT_LED_LEVELS };
+let midiClockIn = null;
+let midiClockCount = 0;
+let clockPulseTimes = [];
+let lastTempoPush = 0;
+let lastTempoMs = 0;
+let lastTempoVal = 120;
+let uiScale = 1.5;
+// pattern lengths not tracked client-side
+let barViews = Array.from({ length: 9 }, () => Array(9).fill(0));
+let barPlayheads = Array.from({ length: 9 }, () => Array(9).fill(null));
+let followEnabled = false;
+let patternClipboard = null;
+let barClipboard = null;
+let lastCopyType = null; // "pattern" | "bar"
+let autoFillBars = true;
+let allowMDExternal = false;
+let mdSlideSpeed = 0.6;
+let mdSlideCurve = 1.0;
+let mdBaseSweep = 80;
+let monoSlidePad = 0.1; // fraction of a step to trim slide gates
+let sequencerTypes = Array.from({ length: 9 }, () => "mono");
+let gridConnected = null;
+const LOCAL_CONFIG_KEY = "studio_grid_config";
+let pendingTd3Import = null; // { data, page }
+const DEFAULT_DRUMS = [36, 38, 41, 43, 45, 47, 55]; // C1..G1 bottom->top
+let drumNotes = Array.from({ length: 9 }, () => DEFAULT_DRUMS.slice());
+const DEFAULT_CC = 1;
+let ccNumbers = Array.from({ length: 9 }, (_, i) => (i === 0 ? null : DEFAULT_CC));
+let mdTracks = Array.from({ length: 9 }, () => 1);
+let ccNumberEditing = false;
+let appliedLocalSnapshot = false;
+let cachedConfig = null;
+let autoLoadSet = false;
+let patternControlLatch = false;
+let resetNamesOnNextState = false;
+const TM1_NAME = "Elektron TM-1";
+
+const SCALE_ROOTS = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
+
+function normalizeDeviceNames(names) {
+  return Array.from({ length: 9 }, (_, i) => {
+    if (i === 0) return null;
+    const raw = names ? names[i] : null;
+    const str = raw == null ? "" : String(raw).trim();
+    return str.length ? str : `${i}`;
+  });
+}
+
+function buildScaleSelectors() {
+  const targetRoots = scaleRootSel ? scaleRootSel : settingsScaleRootSel;
+  if (targetRoots) {
+    targetRoots.innerHTML = "";
+    SCALE_ROOTS.forEach((name, idx) => {
+      const opt = new Option(name, idx);
+      targetRoots.append(opt);
+    });
+    // clone to the other selector if present
+    if (scaleRootSel && settingsScaleRootSel && targetRoots === scaleRootSel) {
+      settingsScaleRootSel.innerHTML = scaleRootSel.innerHTML;
+    }
+    if (settingsScaleRootSel && scaleRootSel && targetRoots === settingsScaleRootSel) {
+      scaleRootSel.innerHTML = settingsScaleRootSel.innerHTML;
+    }
+  }
+
+  const modes = [
+    "major", "minor", "dorian", "mixolydian", "lydian",
+    "phrygian", "locrian", "harmonic_minor", "melodic_minor",
+    "whole_tone", "chromatic"
+  ];
+  const targetModes = scaleModeSel ? scaleModeSel : settingsScaleModeSel;
+  if (targetModes) {
+    targetModes.innerHTML = "";
+    modes.forEach((m) => {
+      const label = m.replace("_", " ").replace(/\b\w/g, (c) => c.toUpperCase());
+      const opt = new Option(label, m);
+      targetModes.append(opt);
+    });
+    if (scaleModeSel && settingsScaleModeSel && targetModes === scaleModeSel) {
+      settingsScaleModeSel.innerHTML = scaleModeSel.innerHTML;
+    }
+    if (settingsScaleModeSel && scaleModeSel && targetModes === settingsScaleModeSel) {
+      scaleModeSel.innerHTML = settingsScaleModeSel.innerHTML;
+    }
+  }
+}
+
+function connectWS() {
+  ws = new WebSocket(WS_URL);
+  ws.onopen = () => {
+    if (wsStatus) wsStatus.textContent = "WS: connected";
+    log("WS connected");
+    ws.send(JSON.stringify({ type: "subscribe_midi" }));
+    // push saved config (LED/clock/log/auto-fill) if we have it
+    pushSavedConfigToServer();
+    // optionally auto-load last set if enabled
+    if (!appliedLocalSnapshot && autoLoadSet) {
+      try {
+        const raw = localStorage.getItem("studio_grid_last_snapshot");
+        if (raw) {
+          const snap = JSON.parse(raw);
+          ws.send(JSON.stringify({ type: "import_state", snapshot: snap }));
+          appliedLocalSnapshot = true;
+          log("Restoring last saved set");
+        }
+      } catch (e) {
+        console.warn("Failed to load last set", e);
+      }
+    }
+  };
+  ws.onerror = (e) => {
+    if (wsStatus) wsStatus.textContent = "WS: error";
+    log("WS error — is the server running?");
+    console.error(e);
+  };
+  ws.onclose = () => {
+    if (wsStatus) wsStatus.textContent = "WS: closed";
+    log("WS closed; retrying");
+    setTimeout(connectWS, 2000);
+  };
+  ws.onmessage = (ev) => {
+    const msg = JSON.parse(ev.data);
+    if (msg.type === "log") {
+      log(msg.message);
+    } else if (msg.type === "led_frame") {
+      const incoming = msg.frame;
+      if (Array.isArray(incoming)) {
+        const page = currentPage;
+        frames[page] = incoming.slice();
+      }
+      renderFrame(frames[currentPage]);
+    } else if (msg.type === "scale") {
+      if (msg.scale) scale = msg.scale;
+      applyScaleUI();
+    } else if (msg.type === "state") {
+      tempo = msg.tempo || tempo;
+      swing = msg.swing || swing;
+      baseDivision = msg.baseDivision || baseDivision;
+      midiSettings = msg.midi || midiSettings;
+      if (typeof msg.monoSlidePad === "number") {
+        monoSlidePad = Math.max(0, Math.min(0.5, Number(msg.monoSlidePad)));
+      }
+      if (msg.transposes) transposes = msg.transposes;
+      if (msg.sequencerTypes) sequencerTypes = msg.sequencerTypes;
+      if (msg.scale) scale = msg.scale;
+      if (resetNamesOnNextState) {
+        deviceNames = normalizeDeviceNames(null);
+        resetNamesOnNextState = false;
+      } else if (msg.names) {
+        deviceNames = normalizeDeviceNames(msg.names);
+      }
+      if (msg.notes) deviceNotes = msg.notes;
+      if (Array.isArray(msg.colors)) {
+        deviceColors = msg.colors.slice(0, 9);
+        deviceColors[0] = "";
+        deviceColorOverrides = deviceColors.map((c, idx) => {
+          if (idx === 0 || !c) return false;
+          return c.toLowerCase() !== defaultDeviceColor.toLowerCase();
+        });
+      } else if (!deviceColorOverrides.some(Boolean)) {
+        deviceColors = Array(9).fill(defaultDeviceColor);
+        deviceColors[0] = "";
+      }
+      if (msg.drumNotes) drumNotes = msg.drumNotes.map((d, idx) => (idx === 0 ? null : (Array.isArray(d) ? d.slice(0, 7) : DEFAULT_DRUMS.slice())));
+      if (msg.ccNumbers) ccNumbers = msg.ccNumbers.map((c, idx) => (idx === 0 ? null : (Number.isFinite(c) ? c : DEFAULT_CC)));
+      if (msg.activePatterns) activePatterns = msg.activePatterns;
+      if (msg.pendingPatterns) pendingPatterns = msg.pendingPatterns;
+      if (msg.patternLengths) patternLengths = msg.patternLengths;
+      if (msg.patternTimeScales) patternTimeScales = msg.patternTimeScales;
+      if (msg.barViews) barViews = msg.barViews;
+      if (msg.barPlayheads) barPlayheads = msg.barPlayheads;
+      if (typeof msg.follow === "boolean") followEnabled = msg.follow;
+      if (typeof msg.autoFill === "boolean") autoFillBars = msg.autoFill;
+      if (typeof msg.patternControlLatch === "boolean") patternControlLatch = msg.patternControlLatch;
+      if (msg.clockSource) clockSource = msg.clockSource;
+      if (typeof msg.clockOut === "boolean") clockOutEnabled = msg.clockOut;
+      if (msg.clockOutDevice) clockOutPortId = msg.clockOutDevice;
+      if (msg.ledLevels) ledLevels = { ...ledLevels, ...msg.ledLevels };
+      if (msg.clockInput) clockInputId = msg.clockInput;
+      if (msg.mdTracks) {
+        mdTracks = msg.mdTracks.map((t, idx) => {
+          if (idx === 0) return null;
+          const val = Number.isFinite(t) ? t : 1;
+          return Math.max(1, Math.min(16, Math.round(val)));
+        });
+      }
+      if (Array.isArray(msg.octaveOverlays)) {
+        overlays = Array.from({ length: 9 }, (_, idx) => {
+          const list = Array.isArray(msg.octaveOverlays[idx]) ? msg.octaveOverlays[idx] : [];
+          return list
+            .filter((o) => Number.isFinite(o?.x) && Number.isFinite(o?.y) && Number.isFinite(o?.octave) && o.octave !== 0)
+            .map((o) => ({
+              x: o.x,
+              y: o.y,
+              text: o.octave > 0 ? `+${o.octave}` : `${o.octave}`,
+              ts: Date.now()
+            }));
+        });
+      }
+      updatePage(msg.currentPage || currentPage, { fromServer: true });
+      updateTempo(tempo, { broadcast: false });
+      updateSwing(swing, { broadcast: false });
+      applyScaleUI();
+      applyPageTranspose();
+      applyClockSourceUI();
+      applyClockOutUI();
+      applySeqTypeUI();
+      applyDrumNotesUI();
+      applyLedSettingsUI();
+      applyBaseNoteLenUI();
+      applyPatternScaleUI();
+      applyMdSlideSpeedUI();
+      applyPatternControlLatchUI();
+      if (typeof msg.gridConnected === "boolean") {
+        handleGridStatus(msg.gridConnected);
+      }
+    } else if (msg.type === "page_change") {
+      updatePage(msg.page || currentPage, { fromServer: true });
+    } else if (msg.type === "grid_status") {
+      handleGridStatus(!!msg.connected);
+    } else if (msg.type === "tempo") {
+      tempo = msg.bpm || tempo;
+      updateTempo(tempo, { broadcast: false });
+      applySeqTypeUI();
+    } else if (msg.type === "swing") {
+      swing = msg.swing || swing;
+      updateSwing(swing, { broadcast: false });
+    } else if (msg.type === "octave_overlay") {
+      handleOctaveOverlayMessage(msg);
+    } else if (msg.type === "accent_overlay") {
+      handleAccentOverlayMessage(msg);
+    } else if (msg.type === "slide_overlay") {
+      handleSlideOverlayMessage(msg);
+    } else if (msg.type === "step_state") {
+      handleStepStateMessage(msg);
+    } else if (msg.type === "transpose") {
+      if (typeof msg.page === "number") transposes[msg.page] = msg.transpose;
+      applyPageTranspose();
+    } else if (msg.type === "seq_type") {
+      if (typeof msg.page === "number" && msg.seqType) {
+        sequencerTypes[msg.page] = msg.seqType;
+        applySeqTypeUI();
+      }
+    } else if (msg.type === "md_track") {
+      if (typeof msg.page === "number") {
+        const val = Math.max(1, Math.min(16, Math.round(Number(msg.track) || mdTracks[msg.page] || 1)));
+        mdTracks[msg.page] = val;
+        applyMDTonalUI();
+      }
+    } else if (msg.type === "mono_slide_pad") {
+      monoSlidePad = Math.max(0, Math.min(0.5, Number(msg.value) || monoSlidePad));
+      applyMdSlideSpeedUI();
+    } else if (msg.type === "device_name") {
+      if (typeof msg.page === "number") deviceNames[msg.page] = msg.name || `Device ${msg.page}`;
+      renderTabs();
+    } else if (msg.type === "device_note") {
+      if (typeof msg.page === "number") deviceNotes[msg.page] = msg.note || "";
+      applyDeviceBadge();
+    } else if (msg.type === "device_color") {
+      if (typeof msg.page === "number") {
+        const incoming = msg.color || defaultDeviceColor;
+        deviceColors[msg.page] = incoming;
+        const isDefault = incoming.toLowerCase() === defaultDeviceColor.toLowerCase();
+        deviceColorOverrides[msg.page] = !isDefault;
+      }
+      applyDeviceBadge();
+      renderPatternRow();
+      renderFrame(frames[currentPage]);
+    } else if (msg.type === "clock_source") {
+      clockSource = msg.source || clockSource;
+      applyClockSourceUI();
+    } else if (msg.type === "clock_inputs") {
+      if (Array.isArray(msg.inputs) && msg.inputs.length) {
+        clockInputs = msg.inputs;
+        if (msg.selected) clockInputId = msg.selected;
+        populateClockInputs();
+      }
+    } else if (msg.type === "clock_out") {
+      clockOutEnabled = !!msg.enabled;
+      applyClockOutUI();
+    } else if (msg.type === "clock_out_device") {
+      clockOutPortId = msg.id || "";
+      applyClockOutUI();
+    } else if (msg.type === "clock_status") {
+      const status = msg.data || {};
+      if (typeof status.running === "boolean") setRunningState(status.running);
+      if (status.clockSource) clockSource = status.clockSource;
+      if (status.clockInput) clockInputId = status.clockInput;
+      applyClockSourceUI();
+    } else if (msg.type === "pattern_status") {
+      if (typeof msg.page === "number") {
+        activePatterns[msg.page] = msg.active ?? activePatterns[msg.page];
+        pendingPatterns[msg.page] = msg.pending ?? null;
+        if (msg.page === currentPage) {
+          if (typeof msg.active === "number") {
+            currentPattern = msg.active;
+          }
+          applyPatternSelectUI();
+          renderPatternRow();
+          applyPatternLengthUI();
+          applyPatternScaleUI();
+          renderBarRow();
+        }
+      }
+    } else if (msg.type === "pattern_length") {
+      if (typeof msg.page === "number" && typeof msg.pattern === "number") {
+        if (!patternLengths[msg.page]) patternLengths[msg.page] = [];
+        patternLengths[msg.page][msg.pattern] = msg.length;
+        if (msg.page === currentPage) {
+          applyPatternLengthUI();
+          renderBarRow();
+        }
+      }
+    } else if (msg.type === "pattern_time_scale") {
+      if (typeof msg.page === "number" && typeof msg.pattern === "number") {
+        if (!patternTimeScales[msg.page]) patternTimeScales[msg.page] = [];
+        patternTimeScales[msg.page][msg.pattern] = msg.scale || 1;
+        if (msg.page === currentPage) {
+          applyPatternScaleUI();
+        }
+      }
+    } else if (msg.type === "bar_view") {
+      if (typeof msg.page === "number" && typeof msg.pattern === "number") {
+        if (!barViews[msg.page]) barViews[msg.page] = [];
+        barViews[msg.page][msg.pattern] = msg.bar;
+        if (msg.page === currentPage) renderBarRow();
+      }
+    } else if (msg.type === "bar_playhead") {
+      if (typeof msg.page === "number" && typeof msg.pattern === "number") {
+        if (!barPlayheads[msg.page]) barPlayheads[msg.page] = [];
+        barPlayheads[msg.page][msg.pattern] = msg.bar;
+        if (msg.page === currentPage) renderBarRow();
+      }
+    } else if (msg.type === "follow") {
+      followEnabled = !!msg.enabled;
+      applyFollowUI();
+    } else if (msg.type === "auto_fill") {
+      autoFillBars = !!msg.enabled;
+      applyAutoFillUI();
+    } else if (msg.type === "copy_pattern") {
+      patternClipboard = msg.data;
+      lastCopyType = "pattern";
+      log("Pattern copied");
+      showToast("Pattern copied");
+    } else if (msg.type === "copy_bar") {
+      barClipboard = msg.data;
+      lastCopyType = "bar";
+      log("Bar copied");
+      showToast("Bar copied");
+    } else if (msg.type === "export_state") {
+      const payload = msg.data || {};
+      downloadJSON(payload, "Untitled.sgridset");
+    } else if (msg.type === "export_td3") {
+      if (msg.data) {
+        downloadBase64Binary(msg.data, "td3_pattern.seq");
+        log("TD-3 export ready");
+      } else {
+        log("TD-3 export failed: no data");
+      }
+    } else if (msg.type === "td3_import_preview") {
+      if (!pendingTd3Import) return;
+      if (msg.empty) {
+        showToast("TD-3 pattern is empty");
+        log("TD-3 import skipped: pattern is empty");
+        pendingTd3Import = null;
+        hideTd3BackdropIfIdle();
+        return;
+      }
+      const detected = msg.detectedScale || { root: 0, mode: "major" };
+      const current = msg.currentScale || { root: 0, mode: "major" };
+      const differs = !!msg.differs;
+      if (differs) {
+        const detStr = formatScaleStr(detected);
+        const curStr = formatScaleStr(current);
+        openTd3ScaleModal(`Detected ${detStr}. Current scale is ${curStr}. Switch or fit?`);
+      } else {
+        finalizeTd3Import("fit_current");
+      }
+    } else if (msg.type === "td3_import_applied") {
+      showToast("TD-3 pattern imported");
+      log("TD-3 pattern applied");
+    } else if (msg.type === "led_levels") {
+      if (msg.levels) ledLevels = { ...ledLevels, ...msg.levels };
+      applyLedSettingsUI();
+    } else if (msg.type === "pattern_lengths") {
+      // pattern lengths no longer handled client-side
+    } else if (msg.type === "midi_note") {
+      const { page, pitch, vel, durMs, delayMs, chan } = msg;
+      sendMIDI(page, pitch, vel, durMs, delayMs, chan);
+    } else if (msg.type === "midi_cc") {
+      const { page, cc, value, delayMs, chan } = msg;
+      sendMIDICC(page, cc, value, delayMs, chan);
+    } else if (msg.type === "midi_clock") {
+      const pulses = Math.max(0, Math.round(msg.pulses || 0));
+      if (pulses > 0) sendMidiClock(pulses);
+    } else if (msg.type === "midi_clock_start") {
+      sendMidiClockTransport("start");
+    } else if (msg.type === "midi_clock_stop") {
+      sendMidiClockTransport("stop");
+    } else if (msg.type === "base_division") {
+      baseDivision = msg.division || baseDivision;
+      applyBaseNoteLenUI();
+    }
+  };
+}
+
+async function initMIDI() {
+  try {
+    midiAccess = await navigator.requestMIDIAccess({ sysex: true });
+    if (midiStatus) midiStatus.textContent = "MIDI: ok";
+    refreshMIDIDevices();
+    midiAccess.onstatechange = refreshMIDIDevices;
+  } catch (e) {
+    if (midiStatus) midiStatus.textContent = "MIDI: unavailable";
+    log("WebMIDI blocked or unsupported");
+  }
+}
+
+function refreshMIDIDevices() {
+  if (!midiSel) return;
+  const prevSelectedId = midiSel.value || (midiOut && midiOut.id) || "";
+  const prevClockOutId = clockOutPortId;
+  midiSel.innerHTML = "";
+  midiSel.append(new Option("None", ""));
+  if (clockOutPortSel) {
+    clockOutPortSel.innerHTML = "";
+    clockOutPortSel.append(new Option("None", ""));
+  }
+  let firstOut = null;
+  let preferredOut = null;
+  const preferredOutName = "IAC Driver Bus 1";
+  const outs = [];
+  const ins = [];
+  let tm1Out = null;
+  midiAccess?.outputs.forEach((out) => {
+    const opt = new Option(out.name, out.id);
+    midiSel.append(opt);
+    if (clockOutPortSel) {
+      clockOutPortSel.append(new Option(out.name, out.id));
+    }
+    if (!firstOut) firstOut = out;
+    if (!preferredOut && out.name.includes(preferredOutName)) preferredOut = out;
+    if (!tm1Out && out.name.includes("Elektron TM-1")) tm1Out = out;
+    outs.push(out.name);
+  });
+  midiAccess?.inputs.forEach((input) => {
+    ins.push({ id: input.id, name: input.name });
+  });
+  clockInputs = ins;
+  if (!clockInputId && ins.length) clockInputId = ins[0].id;
+  populateClockInputs();
+  // attach to selected clock input if using external clock
+  if (clockSource === "external" && clockInputId) {
+    attachClockInput(clockInputId);
+  }
+  if (clockOutPortSel) {
+    const candidateOut = (prevClockOutId && midiAccess?.outputs.get(prevClockOutId)) ? prevClockOutId : "";
+    if (candidateOut) {
+      clockOutPortId = candidateOut;
+      clockOutPortSel.value = candidateOut;
+    } else {
+      clockOutPortId = "";
+      clockOutPortSel.value = "";
+    }
+  }
+  midiSel.onchange = () => {
+    midiOut = midiAccess.outputs.get(midiSel.value) || null;
+    log(midiOut ? `MIDI out selected: ${midiOut.name}` : "MIDI out cleared");
+    midiSettings[currentPage].outId = midiOut ? midiOut.id : "";
+    sendMidiConfig();
+    updateTd3ExportVisibility();
+  };
+  // Restore previous or per-page selection if available
+  const cfgId = midiSettings[currentPage]?.outId || "";
+  const targetId = midiAccess?.outputs.get(cfgId)
+    ? cfgId
+    : (midiAccess?.outputs.get(prevSelectedId)
+      ? prevSelectedId
+      : (preferredOut ? preferredOut.id : ""));
+  if (targetId && midiAccess?.outputs.get(targetId)) {
+    midiSel.value = targetId;
+    midiOut = midiAccess.outputs.get(targetId);
+  } else if (firstOut && !midiOut) {
+    midiSel.value = "";
+    midiOut = null;
+  }
+  // Force TM-1 when MDTonal and external override is disabled
+  enforceMDMidiOut(tm1Out);
+  updateTd3ExportVisibility();
+  if (midiStatus) midiStatus.textContent = `MIDI: ${midiAccess ? midiAccess.outputs.size : 0} outputs`;
+  if (outs.length) log(`Available MIDI outs: ${outs.join(", ")}`);
+  // if preferred clock input present, pick it and force external clock
+  const preferredClock = clockInputs.find((i) => i.name.includes("IAC Driver Bus 2"));
+  if (preferredClock) {
+    clockInputId = preferredClock.id;
+    populateClockInputs();
+    clockSource = "external";
+    ws?.readyState === WebSocket.OPEN && ws.send(JSON.stringify({ type: "set_clock_source", source: "external" }));
+    ws?.readyState === WebSocket.OPEN && ws.send(JSON.stringify({ type: "set_clock_input", name: clockInputId }));
+    attachClockInput(clockInputId);
+    applyClockSourceUI();
+  }
+}
+
+function start() {
+  if (clockSource === "external") {
+    log("Start is controlled by external clock");
+    return;
+  }
+  ws?.send(JSON.stringify({ type: "start" }));
+  setRunningState(true);
+}
+function stop() {
+  if (clockSource === "external") {
+    log("Stop is controlled by external clock");
+    return;
+  }
+  ws?.send(JSON.stringify({ type: "stop" }));
+  setRunningState(false);
+}
+
+function setRunningState(isRunning) {
+  running = !!isRunning;
+  const transportBtn = document.getElementById("transport-toggle");
+  if (!transportBtn) return;
+  const icon = transportBtn.querySelector("i");
+  transportBtn.title = running ? "Stop" : "Play";
+  transportBtn.setAttribute("aria-pressed", running);
+  transportBtn.classList.toggle("active", running);
+  if (icon) icon.className = running ? "iconoir-pause" : "iconoir-play";
+}
+
+function toggleTransport() {
+  if (running) {
+    stop();
+  } else {
+    start();
+  }
+}
+
+function sendMIDISafe(out, bytes, ts) {
+  if (!out || !Array.isArray(bytes) || !bytes.length) return;
+  const status = bytes[0] & 0xf0;
+  if (status === 0xc0) {
+    console.warn("Blocked program change message", bytes);
+    return;
+  }
+  out.send(bytes, ts);
+}
+
+function sendMIDI(page, pitch, vel, durMs, delayMs, chan) {
+  const cfg = midiSettings[page] || midiSettings[currentPage] || {};
+  const out = cfg.outId && midiAccess?.outputs.get(cfg.outId);
+  const channel = (chan && Number.isFinite(chan)) ? chan : (cfg.channel || 1);
+  if (!out) {
+    // log suppressed to avoid spam
+    return;
+  }
+  const statusOn = 0x90 + (channel - 1);
+  const statusOff = 0x80 + (channel - 1);
+  const now = window.performance.now();
+  const onTs = now + Math.max(0, delayMs);
+  const offTs = now + Math.max(0, delayMs + durMs);
+  sendMIDISafe(out, [statusOn, pitch, vel], onTs);
+  sendMIDISafe(out, [statusOff, pitch, 0], offTs);
+}
+
+function sendMIDICC(page, cc, value, delayMs, chan) {
+  const cfg = midiSettings[page] || midiSettings[currentPage] || {};
+  const out = cfg.outId && midiAccess?.outputs.get(cfg.outId);
+  const channel = (chan && Number.isFinite(chan)) ? chan : (cfg.channel || 1);
+  if (!out) return;
+  const status = 0xb0 + (channel - 1);
+  const now = window.performance.now();
+  const ts = now + Math.max(0, delayMs || 0);
+  const ccNum = Math.max(0, Math.min(127, Math.round(cc || 0)));
+  const ccVal = Math.max(0, Math.min(127, Math.round(value || 0)));
+  sendMIDISafe(out, [status, ccNum, ccVal], ts);
+}
+
+function sendMidiClock(pulses) {
+  if (!clockOutEnabled) return;
+  const out =
+    (clockOutPortId && midiAccess?.outputs.get(clockOutPortId)) ||
+    ((midiSettings[currentPage] || {}).outId && midiAccess?.outputs.get(midiSettings[currentPage].outId));
+  if (!out) return;
+  const div = Math.max(1, baseDivision || 16);
+  const stepMs = (60000 / tempo) * 4 / div;
+  const spacing = stepMs / Math.max(1, pulses);
+  const now = window.performance.now();
+  for (let i = 0; i < pulses; i++) {
+    sendMIDISafe(out, [0xf8], now + spacing * i);
+  }
+}
+
+function sendMidiClockTransport(kind) {
+  if (!clockOutEnabled) return;
+  const out =
+    (clockOutPortId && midiAccess?.outputs.get(clockOutPortId)) ||
+    ((midiSettings[currentPage] || {}).outId && midiAccess?.outputs.get(midiSettings[currentPage].outId));
+  if (!out) return;
+  const status = kind === "start" ? 0xfa : (kind === "stop" ? 0xfc : null);
+  if (status == null) return;
+  sendMIDISafe(out, [status], window.performance.now());
+}
+
+function renderFrame(frame) {
+  const deviceColor = getDeviceDisplayColor(currentPage);
+  onColor = deviceColor || ON_COLOR_DEFAULT;
+  const safeFrame = Array.isArray(frame) ? frame : new Array(WIDTH * HEIGHT).fill(0);
+  if (!Array.isArray(frame)) frames[currentPage] = safeFrame;
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  safeFrame.forEach((level, idx) => {
+    const x = idx % WIDTH;
+    const y = Math.floor(idx / WIDTH);
+    const px = x * (CELL_SIZE + CELL_GAP);
+    const py = y * (CELL_SIZE + CELL_GAP);
+    if (level <= 0) {
+      ctx.fillStyle = OFF_COLOR;
+    } else {
+      const t = Math.min(1, level / 15);
+      ctx.fillStyle = lerpColor(OFF_COLOR, onColor || ON_COLOR_DEFAULT, t);
+    }
+    if (typeof ctx.roundRect === "function") {
+      ctx.beginPath();
+      ctx.roundRect(px, py, CELL_SIZE, CELL_SIZE, 2);
+      ctx.fill();
+    } else {
+      ctx.fillRect(px, py, CELL_SIZE, CELL_SIZE);
+    }
+  });
+
+  // overlays
+  const now = Date.now();
+  const currentOverlays = overlays[currentPage] || [];
+  // keep numeric octave overlays persistent; only age out non-numeric markers
+  const filtered = currentOverlays.filter((o) => {
+    const level = safeFrame[o.y * WIDTH + o.x] || 0;
+    if (level <= 0) return false;
+    const isNumeric = /^[-+]?\d/.test(o.text);
+    if (isNumeric) return true;
+    return (now - (o.ts || now)) < 1500;
+  });
+  overlays[currentPage] = filtered;
+  overlays[currentPage].forEach((o) => {
+    ctx.save();
+    const px = o.x * (CELL_SIZE + CELL_GAP);
+    const py = o.y * (CELL_SIZE + CELL_GAP);
+    ctx.translate(px, py);
+    ctx.fillStyle = LABEL_COLOR;
+    ctx.font = LABEL_FONT;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText(o.text, CELL_SIZE / 2, CELL_SIZE / 2);
+    ctx.restore();
+  });
+}
+
+function setFrame(frame, x, y, level) {
+  frame[y * WIDTH + x] = level;
+}
+
+function lerpColor(hex1, hex2, t) {
+  const c1 = hexToRgb(hex1);
+  const c2 = hexToRgb(hex2);
+  const r = Math.round(c1.r + (c2.r - c1.r) * t);
+  const g = Math.round(c1.g + (c2.g - c1.g) * t);
+  const b = Math.round(c1.b + (c2.b - c1.b) * t);
+  return `rgb(${r}, ${g}, ${b})`;
+}
+
+function hexToRgb(hex) {
+  const h = hex.replace("#", "");
+  const int = parseInt(h, 16);
+  return {
+    r: (int >> 16) & 255,
+    g: (int >> 8) & 255,
+    b: int & 255
+  };
+}
+
+function log(msg) {
+  const line = `[${new Date().toISOString()}] ${msg}`;
+  logEl.textContent = `${line}\n${logEl.textContent}`.slice(0, 4000);
+}
+
+// UI wiring
+if (tempoInput) {
+  const commitTempo = () => updateTempo(tempoInput.value);
+  const nudgeTempo = (delta) => {
+    const cur = Number(tempoInput.value);
+    const safe = Number.isFinite(cur) ? Math.round(cur + delta) : Math.round(tempo);
+    tempoInput.value = safe;
+    commitTempo();
+  };
+  tempoInput.step = "1";
+  tempoInput.onchange = commitTempo;
+  tempoInput.onblur = commitTempo;
+  tempoInput.onkeydown = (e) => {
+    if (e.key === "Enter") {
+      commitTempo();
+      tempoInput.blur();
+    }
+    if (e.key === "ArrowUp") {
+      e.preventDefault();
+      nudgeTempo(1);
+    }
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      nudgeTempo(-1);
+    }
+  };
+}
+if (tempoLabelTop) {
+  tempoLabelTop.onclick = () => {
+    if (!swingBlock || !tempoBlock) return;
+    tempoBlock.classList.add("hidden");
+    swingBlock.classList.remove("hidden");
+    if (swingInput) swingInput.focus();
+  };
+}
+if (swingBlock && swingInput) {
+  swingInput.onblur = () => {
+    swingBlock.classList.add("hidden");
+    tempoBlock?.classList.remove("hidden");
+  };
+}
+if (settingsTempoInput) {
+  const commitSettingsTempo = () => updateTempo(settingsTempoInput.value);
+  const nudgeSettingsTempo = (delta) => {
+    const cur = Number(settingsTempoInput.value);
+    const safe = Number.isFinite(cur) ? Math.round(cur + delta) : Math.round(tempo);
+    settingsTempoInput.value = safe;
+    commitSettingsTempo();
+  };
+  settingsTempoInput.step = "1";
+  settingsTempoInput.onchange = commitSettingsTempo;
+  settingsTempoInput.onblur = commitSettingsTempo;
+  settingsTempoInput.onkeydown = (e) => {
+    if (e.key === "Enter") {
+      commitSettingsTempo();
+      settingsTempoInput.blur();
+    }
+    if (e.key === "ArrowUp") {
+      e.preventDefault();
+      nudgeSettingsTempo(1);
+    }
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      nudgeSettingsTempo(-1);
+    }
+  };
+}
+if (swingLabelTop) {
+  swingLabelTop.onclick = () => {
+    if (!swingBlock || !tempoBlock) return;
+    swingBlock.classList.add("hidden");
+    tempoBlock.classList.remove("hidden");
+    if (tempoInput) tempoInput.focus();
+  };
+}
+const transportToggle = document.getElementById("transport-toggle");
+if (transportToggle) {
+  transportToggle.onclick = toggleTransport;
+  setRunningState(running);
+}
+if (clockToggleBtn) {
+  clockToggleBtn.onclick = () => {
+    const prev = clockSource;
+    const next = prev === "external" ? "internal" : "external";
+    clockSource = next;
+    ws?.readyState === WebSocket.OPEN && ws.send(JSON.stringify({ type: "set_clock_source", source: next }));
+    if (prev === "external" && next === "internal") {
+      lockTempoPrecision({ broadcast: true });
+    }
+    applyClockSourceUI();
+    if (clockSource === "external" && clockInputSel && clockInputSel.value) {
+      clockInputId = clockInputSel.value;
+      ws?.readyState === WebSocket.OPEN && ws.send(JSON.stringify({ type: "set_clock_input", name: clockInputId }));
+      attachClockInput(clockInputId);
+    }
+  };
+}
+if (clockSourceSel) {
+  clockSourceSel.onchange = () => {
+    const prev = clockSource;
+    clockSource = clockSourceSel.value;
+    ws?.readyState === WebSocket.OPEN && ws.send(JSON.stringify({ type: "set_clock_source", source: clockSource }));
+    if (prev === "external" && clockSource === "internal") {
+      lockTempoPrecision({ broadcast: true });
+    }
+    applyClockSourceUI();
+    if (clockSource === "external" && clockInputSel && clockInputSel.value) {
+      clockInputId = clockInputSel.value;
+      ws?.readyState === WebSocket.OPEN && ws.send(JSON.stringify({ type: "set_clock_input", name: clockInputId }));
+      attachClockInput(clockInputId);
+    }
+  };
+}
+
+if (clockInputSel) {
+  clockInputSel.onchange = () => {
+    const name = clockInputSel.value;
+    clockInputId = name;
+    ws?.readyState === WebSocket.OPEN && ws.send(JSON.stringify({ type: "set_clock_input", name }));
+    if (clockSource === "external") attachClockInput(clockInputId);
+  };
+}
+
+function applyClockSourceUI() {
+  if (clockSourceSel) clockSourceSel.value = clockSource || "internal";
+  const wrap = document.getElementById("clock-source-wrap");
+  if (wrap) wrap.classList.remove("hidden"); // keep clock input visible for both sources
+  if (clockToggleBtn) {
+    clockToggleBtn.textContent = clockSource === "external" ? "Ext" : "Int";
+    clockToggleBtn.classList.toggle("active", clockSource === "external");
+  }
+  if (clockSource === "external" && clockInputId) {
+    attachClockInput(clockInputId);
+  } else {
+    detachClockInput();
+  }
+  tempoDisplayMode = clockSource === "external" ? "display" : "input";
+  const tempoWrap = tempoInput?.closest(".tempo-block");
+  if (tempoInput && tempoWrap) {
+    tempoInput.readOnly = clockSource === "external";
+    tempoInput.classList.toggle("readonly", clockSource === "external");
+  }
+  if (clockSource === "external" && tempoInput) {
+    tempoInput.value = formatTempoDisplay(tempo);
+  }
+  const transportBtn = document.getElementById("transport-toggle");
+  if (transportBtn) transportBtn.classList.remove("hidden");
+}
+
+function populateClockInputs() {
+  if (!clockInputSel) return;
+  clockInputSel.innerHTML = "";
+  if (!clockInputs.length) {
+    const opt = new Option("No MIDI inputs", "");
+    opt.disabled = true;
+    opt.selected = true;
+    clockInputSel.append(opt);
+    return;
+  }
+  clockInputs.forEach((entry, idx) => {
+    const name = entry.name || entry;
+    const id = entry.id || entry;
+    const opt = new Option(name, id);
+    clockInputSel.append(opt);
+    if (!clockInputId && idx === 0) clockInputId = id;
+  });
+  if (clockInputId) clockInputSel.value = clockInputId;
+  log(`Clock inputs: ${clockInputs.map((i) => i.name || i).join(", ") || "none"}`);
+}
+function attachClockInput(id) {
+  if (!midiAccess) return;
+  const byId = midiAccess.inputs.get(id);
+  const byName = Array.from(midiAccess.inputs.values()).find((inp) => inp.name === id);
+  const target = byId || byName || null;
+  if (midiClockIn && midiClockIn !== target) {
+    midiClockIn.onmidimessage = null;
+  }
+  midiClockIn = target;
+  if (!midiClockIn) {
+    log("No MIDI clock input available");
+    return;
+  }
+  midiClockIn.onmidimessage = handleClockMessage;
+  log(`Listening for MIDI clock on ${midiClockIn.name}`);
+}
+
+function detachClockInput() {
+  if (midiClockIn) midiClockIn.onmidimessage = null;
+  midiClockIn = null;
+  midiClockCount = 0;
+  clockPulseTimes = [];
+}
+
+function handleClockMessage(evt) {
+  if (clockSource !== "external") return;
+  const [status] = evt.data || [];
+  if (status === 0xfa) {
+    // align first tick to the very next clock pulse to avoid long initial wait
+    midiClockCount = 5; // next 0xf8 will fire a 16th tick
+    clockPulseTimes = [];
+    ws?.readyState === WebSocket.OPEN && ws.send(JSON.stringify({ type: "start" }));
+    log(`MIDI Start from ${midiClockIn?.name || "clock in"}`);
+    return;
+  }
+  if (status === 0xfc || status === 0xfd) {
+    midiClockCount = 0;
+    clockPulseTimes = [];
+    ws?.readyState === WebSocket.OPEN && ws.send(JSON.stringify({ type: "stop" }));
+    log(`MIDI Stop from ${midiClockIn?.name || "clock in"}`);
+    return;
+  }
+  if (status !== 0xf8) return; // not a clock tick
+
+  const now = performance.now();
+  clockPulseTimes.push(now);
+  if (clockPulseTimes.length > 48) clockPulseTimes.shift();
+
+  midiClockCount = (midiClockCount + 1) % 24; // 24 ppqn
+  if (midiClockCount % 6 === 0) {
+    ws?.readyState === WebSocket.OPEN && ws.send(JSON.stringify({ type: "clock_tick" }));
+  }
+  // derive tempo once per quarter-note to keep UI in sync
+  if (midiClockCount === 0 && clockPulseTimes.length > 1) {
+    const intervals = [];
+    for (let i = 1; i < clockPulseTimes.length; i++) {
+      intervals.push(clockPulseTimes[i] - clockPulseTimes[i - 1]);
+    }
+    const avgPulseMs = intervals.reduce((a, b) => a + b, 0) / intervals.length;
+    const bpmEstimate = 60000 / (avgPulseMs * 24);
+    if (Number.isFinite(bpmEstimate)) {
+      // mild smoothing to avoid jumpy BPM readout
+      const smoothed = lastTempoMs ? (0.7 * lastTempoVal + 0.3 * bpmEstimate) : bpmEstimate;
+      lastTempoMs = now;
+      lastTempoVal = smoothed;
+      tempo = Math.max(20, Math.min(300, smoothed));
+      const display = formatTempoDisplay(tempo);
+      if (tempoInput) tempoInput.value = display;
+      if (settingsTempoInput) settingsTempoInput.value = display;
+      const nowTs = Date.now();
+      if (nowTs - lastTempoPush > 300) {
+        lastTempoPush = nowTs;
+        ws?.readyState === WebSocket.OPEN && ws.send(JSON.stringify({ type: "tempo", bpm: tempo }));
+      }
+    }
+  }
+}
+document.getElementById("export").onclick = async () => {
+  try {
+    const resp = await fetch("/api/export");
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const data = await resp.json();
+    const payload = data.data || data;
+    downloadJSON(payload, "Untitled.sgridset");
+    log("Exported set");
+  } catch (e) {
+    if (ws?.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: "export_state" }));
+      log("Export requested via WS (HTTP failed)");
+    } else {
+      log("Export failed (no connection)");
+    }
+  }
+};
+const anyTd3ModalOpen = () =>
+  [td3Modal, td3ActionModal, td3ScaleModal, td3ReplaceModal].some((modal) => modal && !modal.classList.contains("hidden"));
+const showTd3Backdrop = () => td3Backdrop?.classList.remove("hidden");
+const hideTd3BackdropIfIdle = () => {
+  if (!td3Backdrop) return;
+  td3Backdrop.classList.toggle("hidden", !anyTd3ModalOpen());
+};
+
+const openTd3Modal = () => {
+  if (td3Modal) td3Modal.classList.remove("hidden");
+  showTd3Backdrop();
+};
+const closeTd3Modal = () => {
+  if (td3Modal) td3Modal.classList.add("hidden");
+  hideTd3BackdropIfIdle();
+};
+
+const openTd3ActionModal = () => {
+  if (td3ActionModal) td3ActionModal.classList.remove("hidden");
+  showTd3Backdrop();
+};
+const closeTd3ActionModal = () => {
+  if (td3ActionModal) td3ActionModal.classList.add("hidden");
+  hideTd3BackdropIfIdle();
+};
+const openTd3ScaleModal = (msg) => {
+  if (td3ScaleMessage && msg) td3ScaleMessage.textContent = msg;
+  if (td3ScaleModal) td3ScaleModal.classList.remove("hidden");
+  showTd3Backdrop();
+};
+const closeTd3ScaleModal = () => {
+  if (td3ScaleModal) td3ScaleModal.classList.add("hidden");
+  hideTd3BackdropIfIdle();
+};
+const openTd3ReplaceModal = () => {
+  if (td3ReplaceModal) td3ReplaceModal.classList.remove("hidden");
+  showTd3Backdrop();
+};
+const closeTd3ReplaceModal = () => {
+  if (td3ReplaceModal) td3ReplaceModal.classList.add("hidden");
+  hideTd3BackdropIfIdle();
+};
+
+async function triggerTd3Export(tdGroup, tdPattern) {
+  const safeGroup = Math.max(1, Math.min(16, Math.round(tdGroup || 5)));
+  const safePattern = Math.max(1, Math.min(16, Math.round(tdPattern || 8)));
+  const params = new URLSearchParams({ group: safeGroup, pattern: safePattern });
+  try {
+    const resp = await fetch(`/api/export-td3?${params.toString()}`);
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const blob = await resp.blob();
+    downloadBlob(blob, "td3_pattern.seq");
+    log("Exported TD-3 .seq");
+  } catch (e) {
+    if (ws?.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: "export_td3", group: safeGroup, pattern: safePattern }));
+      log("TD-3 export requested via WS (HTTP failed)");
+    } else {
+      log("TD-3 export failed (no connection)");
+    }
+  }
+}
+
+function launchTd3ImportPicker() {
+  const picker = document.createElement("input");
+  picker.type = "file";
+  picker.accept = ".seq";
+  picker.onchange = () => {
+    const file = picker.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      const buf = new Uint8Array(ev.target.result);
+      const b64 = btoa(String.fromCharCode(...buf));
+      pendingTd3Import = { data: b64, page: currentPage };
+      const hasData = patternHasData(currentPage);
+      if (hasData) {
+        openTd3ReplaceModal();
+        return;
+      }
+      ws?.readyState === WebSocket.OPEN &&
+        ws.send(JSON.stringify({ type: "td3_import_preview", data: b64, page: currentPage }));
+    };
+    reader.readAsArrayBuffer(file);
+  };
+  picker.click();
+}
+
+function finalizeTd3Import(mode = "fit_current") {
+  if (!pendingTd3Import) return;
+  ws?.readyState === WebSocket.OPEN &&
+    ws.send(JSON.stringify({ type: "td3_import_apply", data: pendingTd3Import.data, page: pendingTd3Import.page, mode }));
+  pendingTd3Import = null;
+}
+
+if (exportTd3Btn) exportTd3Btn.onclick = openTd3ActionModal;
+if (td3ActionClose) td3ActionClose.onclick = closeTd3ActionModal;
+if (td3ExportBtn) td3ExportBtn.onclick = () => {
+  closeTd3ActionModal();
+  openTd3Modal();
+};
+if (td3ImportBtn) {
+  td3ImportBtn.onclick = () => {
+    closeTd3ActionModal();
+    launchTd3ImportPicker();
+  };
+}
+if (td3Close) td3Close.onclick = closeTd3Modal;
+if (td3Cancel) td3Cancel.onclick = closeTd3Modal;
+if (td3Confirm) {
+  td3Confirm.onclick = () => {
+    const groupVal = Number(td3GroupInput?.value || 5);
+    const patVal = Number(td3PatternInput?.value || 8);
+    closeTd3Modal();
+    triggerTd3Export(groupVal, patVal);
+  };
+}
+if (td3ScaleClose) td3ScaleClose.onclick = () => {
+  closeTd3ScaleModal();
+  pendingTd3Import = null;
+};
+if (td3ScaleFit) td3ScaleFit.onclick = () => {
+  closeTd3ScaleModal();
+  finalizeTd3Import("fit_current");
+};
+if (td3ScaleSwitch) td3ScaleSwitch.onclick = () => {
+  closeTd3ScaleModal();
+  finalizeTd3Import("switch_scale");
+};
+if (td3ReplaceCancel) {
+  td3ReplaceCancel.onclick = () => {
+    pendingTd3Import = null;
+    closeTd3ReplaceModal();
+  };
+}
+if (td3ReplaceConfirm) {
+  td3ReplaceConfirm.onclick = () => {
+    if (pendingTd3Import && ws?.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: "td3_import_preview", data: pendingTd3Import.data, page: pendingTd3Import.page }));
+    } else if (!ws || ws.readyState !== WebSocket.OPEN) {
+      log("WS not connected; cannot import");
+      pendingTd3Import = null;
+    }
+    closeTd3ReplaceModal();
+  };
+}
+document.getElementById("import").onclick = () => {
+  const picker = document.createElement("input");
+  picker.type = "file";
+  picker.accept = "application/json,.json,.sgridset";
+  picker.onchange = () => {
+    const file = picker.files?.[0];
+    if (!file) return;
+    const fileName = file.name || "Untitled";
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      try {
+        const data = JSON.parse(ev.target.result);
+        if (ws?.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ type: "import_state", snapshot: data }));
+          log("Import sent to server");
+          showToast(`${fileName} loaded`);
+        } else {
+          log("WS not connected; cannot import");
+        }
+      } catch (e) {
+        log("Import failed: invalid JSON");
+      }
+    };
+    reader.readAsText(file);
+  };
+  picker.click();
+};
+if (settingsBtn && settingsModal && settingsBackdrop) {
+  const openSettings = () => {
+    applyLedSettingsUI();
+    applyMdSlideSpeedUI();
+    settingsModal.classList.remove("hidden");
+    settingsBackdrop.classList.remove("hidden");
+  };
+  const closeSettings = () => {
+    settingsModal.classList.add("hidden");
+    settingsBackdrop.classList.add("hidden");
+  };
+  settingsBtn.onclick = openSettings;
+  if (settingsClose) settingsClose.onclick = closeSettings;
+  settingsBackdrop.onclick = closeSettings;
+  Object.entries(ledInputs).forEach(([k, el]) => {
+    if (!el) return;
+    el.oninput = () => {
+      const val = Math.max(0, Math.min(15, Math.round(Number(el.value) || 0)));
+      ledLevels[k] = val;
+      ws?.readyState === WebSocket.OPEN && ws.send(JSON.stringify({ type: "set_led_levels", levels: { [k]: val } }));
+    };
+  });
+  if (showLogToggle) {
+    showLogToggle.onchange = () => {
+      const show = showLogToggle.checked;
+      document.getElementById("log").classList.toggle("hidden", !show);
+    };
+  }
+  if (allowMDExternalToggle) {
+    allowMDExternalToggle.onchange = () => {
+      allowMDExternal = !!allowMDExternalToggle.checked;
+      enforceMDMidiOut();
+    };
+  }
+  if (patternControlLatchToggle) {
+    patternControlLatchToggle.onchange = () => {
+      patternControlLatch = !!patternControlLatchToggle.checked;
+      ws?.readyState === WebSocket.OPEN &&
+        ws.send(JSON.stringify({ type: "set_pattern_control_latch", enabled: patternControlLatch }));
+    };
+  }
+  if (mdBaseSweepInput) {
+    const commitBaseSweep = () => {
+      const val = Math.max(20, Math.min(200, Math.round(Number(mdBaseSweepInput.value) || mdBaseSweep)));
+      mdBaseSweep = val;
+      mdBaseSweepInput.value = val;
+      ws?.readyState === WebSocket.OPEN && ws.send(JSON.stringify({ type: "set_md_slide_params", factor: mdSlideSpeed, curve: mdSlideCurve, baseMs: mdBaseSweep }));
+    };
+    mdBaseSweepInput.addEventListener("change", commitBaseSweep);
+    mdBaseSweepInput.addEventListener("blur", commitBaseSweep);
+  }
+  if (monoSlidePadInput) {
+    const commitMonoSlidePad = () => {
+      const pct = Math.max(0, Math.min(50, Math.round(Number(monoSlidePadInput.value) || (monoSlidePad * 100))));
+      monoSlidePad = pct / 100;
+      monoSlidePadInput.value = pct;
+      ws?.readyState === WebSocket.OPEN && ws.send(JSON.stringify({ type: "set_mono_slide_pad", value: monoSlidePad }));
+    };
+    monoSlidePadInput.addEventListener("change", commitMonoSlidePad);
+    monoSlidePadInput.addEventListener("blur", commitMonoSlidePad);
+  }
+  if (baseNoteLenSel) {
+    const commitBaseDivision = () => {
+      let val = Math.max(1, Math.min(32, Math.round(Number(baseNoteLenSel.value) || baseDivision || 16)));
+      if (val <= 4) val = val * 4; // migrate old per-beat values (2->8, 4->16)
+      if (val === 6) val = 24; // migrate old 6-per-beat
+      baseDivision = val;
+      baseNoteLenSel.value = String(val);
+      ws?.readyState === WebSocket.OPEN && ws.send(JSON.stringify({ type: "set_base_division", division: val }));
+    };
+    baseNoteLenSel.addEventListener("change", commitBaseDivision);
+  }
+}
+
+if (settingsSaveCfg) {
+  settingsSaveCfg.onclick = () => {
+    try {
+      const cfg = {
+        ledLevels,
+        clockSource,
+        clockInput: clockInputId,
+        clockOut: !!(clockOutToggle && clockOutToggle.checked),
+        clockOutDevice: clockOutPortId,
+        showLog: !!(showLogToggle && showLogToggle.checked),
+        autoFill: !!(autoFillToggle && autoFillToggle.checked),
+        autoLoadSet: !!(autoLoadToggle && autoLoadToggle.checked),
+        allowMDExternal: !!(allowMDExternalToggle && allowMDExternalToggle.checked),
+        baseDivision,
+        midiSettings,
+        patternControlLatch,
+        defaultDeviceColor
+      };
+      localStorage.setItem(LOCAL_CONFIG_KEY, JSON.stringify(cfg));
+      // keep old key for backward compat
+      localStorage.setItem("mgrid_led_config", JSON.stringify(ledLevels));
+      cachedConfig = cfg;
+      pushSavedConfigToServer();
+      log("Saved config");
+      showToast("Config saved");
+    } catch (e) {
+      log("Unable to save config");
+    }
+  };
+}
+if (settingsRestoreCfg) {
+  settingsRestoreCfg.onclick = () => {
+    allowMDExternal = false;
+    enforceMDMidiOut();
+    if (allowMDExternalToggle) allowMDExternalToggle.checked = false;
+    clockOutEnabled = false;
+    applyClockOutUI();
+    ws?.readyState === WebSocket.OPEN && ws.send(JSON.stringify({ type: "set_clock_out", enabled: clockOutEnabled }));
+    clockOutPortId = "";
+    if (clockOutPortSel) clockOutPortSel.value = "";
+    ws?.readyState === WebSocket.OPEN && ws.send(JSON.stringify({ type: "set_clock_out_device", id: "" }));
+    autoFillBars = true;
+    applyAutoFillUI();
+    ws?.readyState === WebSocket.OPEN && ws.send(JSON.stringify({ type: "set_auto_fill", enabled: autoFillBars }));
+    autoLoadSet = false;
+    if (autoLoadToggle) autoLoadToggle.checked = false;
+    patternControlLatch = false;
+    applyPatternControlLatchUI();
+    ws?.readyState === WebSocket.OPEN &&
+      ws.send(JSON.stringify({ type: "set_pattern_control_latch", enabled: patternControlLatch }));
+    ledLevels = { ...DEFAULT_LED_LEVELS };
+    applyLedSettingsUI();
+    ws?.readyState === WebSocket.OPEN && ws.send(JSON.stringify({ type: "set_led_levels", levels: ledLevels }));
+    baseDivision = 16;
+    applyBaseNoteLenUI();
+    ws?.readyState === WebSocket.OPEN && ws.send(JSON.stringify({ type: "set_base_division", division: baseDivision }));
+    monoSlidePad = 0.1;
+    applyMdSlideSpeedUI();
+    ws?.readyState === WebSocket.OPEN && ws.send(JSON.stringify({ type: "set_mono_slide_pad", value: monoSlidePad }));
+    if (showLogToggle) {
+      showLogToggle.checked = false;
+      document.getElementById("log").classList.add("hidden");
+    }
+    try {
+      localStorage.removeItem("mgrid_led_config");
+      localStorage.removeItem(LOCAL_CONFIG_KEY);
+    } catch (e) {}
+    cachedConfig = null;
+    showToast("Defaults restored");
+    log("Restored default config");
+  };
+}
+
+renderDefaultColorOptions();
+updateDefaultColorTrigger();
+if (defaultColorTrigger) {
+  defaultColorTrigger.onclick = openDefaultColorModal;
+}
+
+function renderTabs() {
+  tabs.innerHTML = "";
+  for (let i = 1; i <= 8; i++) {
+    const btn = document.createElement("button");
+    const label = deviceNames[i] && deviceNames[i].trim().length ? deviceNames[i] : `${i}`;
+    btn.textContent = label;
+    btn.dataset.page = i;
+    const isActive = i === currentPage;
+    const activeBg = getDeviceDisplayColor(i);
+    const inactiveBg = "var(--panel-strong)";
+    if (isActive) btn.classList.add("active");
+    btn.style.background = isActive ? activeBg : inactiveBg;
+    btn.style.color = isActive ? contrastForColor(activeBg) : "var(--surface)";
+    btn.style.boxShadow = "none";
+    btn.style.border = "none";
+    btn.onclick = () => {
+        updatePage(i, { fromServer: false });
+        ws?.readyState === WebSocket.OPEN && ws.send(JSON.stringify({ type: "set_page", page: i }));
+    };
+    btn.oncontextmenu = (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      menuTargetPage = i;
+      openDeviceMenu(e.clientX, e.clientY);
+    };
+    tabs.append(btn);
+  }
+  applyDeviceBadge();
+}
+
+function renderPatternRow() {
+  if (!patternRow) return;
+  patternRow.innerHTML = "";
+}
+
+function renderBarRow() {
+  if (!barRow) return;
+  barRow.innerHTML = "";
+  const patIdx = activePatterns[currentPage] || 1;
+  const len = (patternLengths[currentPage] && patternLengths[currentPage][patIdx]) || 16;
+  const bars = Math.max(1, Math.ceil(len / 16));
+  const maxButtons = 4;
+  const storedBar = (barViews[currentPage] && barViews[currentPage][patIdx]) || 0;
+  const playingBar = (barPlayheads[currentPage] && barPlayheads[currentPage][patIdx] != null)
+    ? barPlayheads[currentPage][patIdx]
+    : null;
+  const playingBarClamped = playingBar == null ? null : Math.min(playingBar, maxButtons - 1);
+  const currentBar = Math.min(storedBar, bars - 1);
+  if (storedBar !== currentBar) {
+    if (!barViews[currentPage]) barViews[currentPage] = [];
+    barViews[currentPage][patIdx] = currentBar;
+  }
+  for (let i = 0; i < maxButtons; i++) {
+    const btn = document.createElement("button");
+    btn.className = "bar-btn";
+    const isPlaying = playingBarClamped === i;
+    const icon = document.createElement("i");
+    icon.className = `iconoir-number-${i + 1}-square${isPlaying ? "-solid" : ""}`;
+    icon.setAttribute("aria-hidden", "true");
+    btn.append(icon);
+    if (isPlaying) btn.classList.add("playing");
+    const enabled = i < bars;
+    if (i === currentBar) btn.classList.add("active");
+    if (!enabled) {
+      btn.classList.add("disabled");
+      btn.disabled = true;
+    } else {
+      btn.onclick = () => {
+        if (!barViews[currentPage]) barViews[currentPage] = [];
+        barViews[currentPage][patIdx] = i;
+        if (followEnabled) {
+          followEnabled = false;
+          applyFollowUI();
+          ws?.readyState === WebSocket.OPEN && ws.send(JSON.stringify({ type: "set_follow", enabled: false }));
+        }
+        ws?.readyState === WebSocket.OPEN &&
+          ws.send(JSON.stringify({ type: "set_bar_view", pattern: patIdx, bar: i }));
+        renderBarRow();
+      };
+    }
+    barRow.append(btn);
+  }
+}
+
+function applyPatternLengthUI() {
+  if (!patternLengthBtns || !patternLengthBtns.length) return;
+  const patIdx = activePatterns[currentPage] || 1;
+  const len = (patternLengths[currentPage] && patternLengths[currentPage][patIdx]) || 16;
+  patternLengthBtns.forEach((btn) => {
+    btn.textContent = String(len);
+    btn.dataset.patternLength = String(len);
+    btn.classList.toggle("active", true);
+  });
+}
+
+function applyPatternSelectUI() {
+  if (!patternSelect) return;
+  const patIdx = activePatterns[currentPage] || 1;
+  patternSelect.value = String(patIdx);
+}
+
+function applyPatternScaleUI() {
+  if (!patternScaleToggle) return;
+  const patIdx = activePatterns[currentPage] || 1;
+  const scaleVal = (patternTimeScales[currentPage] && patternTimeScales[currentPage][patIdx]) || 1;
+  patternScaleToggle.textContent = `${scaleVal}x`;
+  patternScaleToggle.dataset.patternScale = String(scaleVal);
+}
+
+function updatePage(page, { fromServer = false } = {}) {
+  if (!page || page < 1 || page > 8) return;
+  currentPage = page;
+  renderTabs();
+  applyPageMidi();
+  applyPageTranspose();
+  applyDeviceBadge();
+  renderPatternRow();
+  applyPatternSelectUI();
+  applyPatternLengthUI();
+  applyPatternScaleUI();
+  applySeqTypeUI();
+  applyDrumNotesUI();
+  applyCCUI();
+  renderBarRow();
+  renderFrame(frames[currentPage]);
+  if (!fromServer) {
+    ws?.readyState === WebSocket.OPEN && ws.send(JSON.stringify({ type: "set_page", page }));
+  }
+}
+
+function applyPageMidi() {
+  const cfg = midiSettings[currentPage] || { outId: "", channel: 1 };
+  midiChan.value = cfg.channel || 1;
+  if (cfg.outId && midiAccess?.outputs.get(cfg.outId)) {
+    midiSel.value = cfg.outId;
+    midiOut = midiAccess.outputs.get(cfg.outId);
+  } else {
+    midiSel.value = "";
+    midiOut = null;
+  }
+  enforceMDMidiOut();
+  updateTd3ExportVisibility();
+}
+
+midiChan.onchange = () => {
+  const ch = Math.max(1, Math.min(16, Number(midiChan.value) || 1));
+  midiSettings[currentPage].channel = ch;
+  sendMidiConfig();
+};
+
+const TD3_NAME_REGEX = /td[-\\s]?3/i;
+function updateTd3ExportVisibility() {
+  if (!exportTd3Btn) return;
+  const type = sequencerTypes[currentPage] || "mono";
+  const cfg = midiSettings[currentPage] || {};
+  const out = cfg.outId && midiAccess?.outputs.get(cfg.outId);
+  const isTd3 = !!(out && TD3_NAME_REGEX.test(out.name || ""));
+  const show = isTd3 && type === "mono";
+  exportTd3Btn.classList.toggle("hidden", !show);
+}
+
+function sendMidiConfig() {
+  ws?.readyState === WebSocket.OPEN &&
+    ws.send(JSON.stringify({ type: "set_midi", page: currentPage, outId: midiSettings[currentPage].outId, channel: midiSettings[currentPage].channel }));
+}
+
+function resetMidiSettings() {
+  midiSettings = Array.from({ length: 9 }, () => ({ outId: "", channel: 1 }));
+  midiOut = null;
+  if (midiSel) midiSel.value = "";
+  if (midiChan) midiChan.value = 1;
+  applyPageMidi();
+  for (let i = 1; i <= 8; i++) {
+    ws?.readyState === WebSocket.OPEN &&
+      ws.send(JSON.stringify({ type: "set_midi", page: i, outId: "", channel: 1 }));
+  }
+}
+
+function applyPageTranspose() {
+  const val = transposes[currentPage] ?? 0;
+  const oct = Math.max(-2, Math.min(2, Math.round(val / 12)));
+  const type = sequencerTypes[currentPage] || "mono";
+  const disableTranspose = type === "drum" || type === "cc";
+  if (transposeDisplay) transposeDisplay.textContent = `${oct}`;
+  if (transposeDec) transposeDec.disabled = disableTranspose || oct <= -2;
+  if (transposeInc) transposeInc.disabled = disableTranspose || oct >= 2;
+}
+
+function applySeqTypeUI() {
+  if (!seqTypeSel) return;
+  const type = sequencerTypes[currentPage] || "mono";
+  seqTypeSel.value = type;
+  const transposeWrap = document.querySelector(".transpose-switch");
+  if (transposeWrap) transposeWrap.classList.toggle("hidden", false);
+  if (midiChan) midiChan.disabled = type === "mdtonal";
+  applyPageTranspose();
+  applyDrumNotesUI();
+  applyCCUI();
+  applyMDTonalUI();
+  enforceMDMidiOut();
+  updateTd3ExportVisibility();
+  applyDeviceBadge();
+  const hasOverride = deviceColorOverrides[currentPage];
+  if (type === "mdtonal" && !hasOverride) {
+    // Auto-apply MDTonal color when no user override
+    deviceColors[currentPage] = AUTO_MDTONAL_COLOR;
+    applyDeviceBadge();
+  } else if (!hasOverride) {
+    // Return to default when leaving MDTonal without a custom color
+    deviceColors[currentPage] = defaultDeviceColor;
+  }
+  renderTabs();
+  renderFrame(frames[currentPage]);
+}
+
+function applyDrumNotesUI() {
+  const type = sequencerTypes[currentPage] || "mono";
+  const drumWrap = document.getElementById("drum-notes");
+  if (drumWrap) drumWrap.classList.toggle("hidden", type !== "drum");
+  if (!drumInputs.length) return;
+  if (!Array.isArray(drumNotes[currentPage])) drumNotes[currentPage] = DEFAULT_DRUMS.slice();
+  const map = drumNotes[currentPage] || DEFAULT_DRUMS;
+  drumInputs.forEach((input) => {
+    const row = Number(input.dataset.row);
+    if (Number.isFinite(row)) {
+      const val = map[row] ?? DEFAULT_DRUMS[row] ?? 36;
+      input.value = val;
+      input.disabled = type !== "drum";
+    }
+  });
+}
+
+function applyCCUI() {
+  const type = sequencerTypes[currentPage] || "mono";
+  const ccWrap = document.getElementById("cc-config");
+  if (ccWrap) ccWrap.classList.toggle("hidden", type !== "cc");
+  const raw = ccNumbers[currentPage];
+  const safe = Math.max(0, Math.min(127, Number.isFinite(raw) ? raw : DEFAULT_CC));
+  if (ccNumberInput) {
+    // avoid wiping in-progress edits
+    if (!ccNumberEditing) ccNumberInput.value = safe;
+    ccNumberInput.disabled = type !== "cc";
+  }
+}
+
+function applyMDTonalUI() {
+  const type = sequencerTypes[currentPage] || "mono";
+  const wrap = document.getElementById("md-config");
+  if (wrap) wrap.classList.toggle("hidden", type !== "mdtonal");
+  if (mdTrackSel) {
+    const current = Math.max(1, Math.min(16, Math.round(mdTracks[currentPage] || 1)));
+    mdTrackSel.value = `${current}`;
+    mdTrackSel.disabled = type !== "mdtonal";
+  }
+  enforceMDMidiOut();
+}
+
+function enforceMDMidiOut(explicitTM1 = null) {
+  if (!midiSel || !midiAccess) return;
+  const type = sequencerTypes[currentPage] || "mono";
+  const tm1 = explicitTM1 || Array.from(midiAccess.outputs.values()).find((o) => o.name.includes(TM1_NAME));
+  if (type !== "mdtonal") {
+    midiSel.disabled = false;
+    return;
+  }
+  if (!allowMDExternal && tm1) {
+    midiSel.value = tm1.id;
+    midiOut = tm1;
+    midiSettings[currentPage].outId = tm1.id;
+    sendMidiConfig();
+    midiSel.disabled = true;
+    log("MDTonal: locked MIDI out to Elektron TM-1");
+  } else if (!allowMDExternal && !tm1) {
+    midiSel.disabled = true;
+    log("MDTonal: Elektron TM-1 not found; select another output from settings override");
+  } else {
+    midiSel.disabled = false;
+  }
+}
+
+canvas.addEventListener("click", (e) => {
+  const rect = canvas.getBoundingClientRect();
+  const x = Math.floor((e.clientX - rect.left) / (rect.width / WIDTH));
+  const y = Math.floor((e.clientY - rect.top) / (rect.height / HEIGHT));
+  if (x < 0 || x >= WIDTH || y < 0 || y >= HEIGHT) return;
+  // send a full press+release tap so mouse input only toggles notes on/off
+  if (ws?.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ type: "grid_key", x, y, s: 1 }));
+    ws.send(JSON.stringify({ type: "grid_key", x, y, s: 0 }));
+  }
+});
+canvas.addEventListener("mousemove", (e) => {
+  const rect = canvas.getBoundingClientRect();
+  const scaleX = rect.width / CANVAS_WIDTH;
+  const scaleY = rect.height / CANVAS_HEIGHT;
+  const relX = (e.clientX - rect.left) / scaleX;
+  const relY = (e.clientY - rect.top) / scaleY;
+  const x = Math.floor(relX / (CELL_SIZE + CELL_GAP));
+  const y = Math.floor(relY / (CELL_SIZE + CELL_GAP));
+  const anchor = hoveredStep;
+  const withinHoverBand = anchor && x === anchor.x && y >= anchor.y - 1 && y <= anchor.y + 1;
+  const movedCell = !anchor || anchor.x !== x || anchor.y !== y;
+
+  if (octaveHoverTimer && !withinHoverBand) {
+    clearTimeout(octaveHoverTimer);
+    octaveHoverTimer = null;
+  }
+  if (movedCell && pendingOctaveHover) {
+    pendingOctaveHover = null;
+  }
+  if (x < 0 || x >= WIDTH || y < 0 || y >= HEIGHT) {
+    hoveredStep = null;
+    if (!isOverOctaveControls) octaveControls.style.display = "none";
+    return;
+  }
+  const seqType = sequencerTypes[currentPage] || "mono";
+  const inStepRows = y < STEP_ROWS;
+  const allowedSeq = seqType !== "drum" && seqType !== "cc";
+  if (!inStepRows || !allowedSeq) {
+    hoveredStep = null;
+    if (!isOverOctaveControls) octaveControls.style.display = "none";
+    return;
+  }
+
+  const frame = frames[currentPage] || [];
+  const val = frame[y * WIDTH + x] || 0;
+  if (val <= 0) {
+    hoveredStep = null;
+    if (!isOverOctaveControls) octaveControls.style.display = "none";
+    return;
+  }
+
+  const target = withinHoverBand && anchor ? anchor : { x, y };
+  hoveredStep = target;
+  if (withinHoverBand && (octaveHoverTimer || pendingOctaveHover || octaveControls.style.display === "flex")) return;
+
+  if (octaveControls.style.display === "flex" && movedCell && !isOverOctaveControls) {
+    octaveControls.style.display = "none";
+  }
+
+  octaveHoverTimer = setTimeout(() => {
+    pendingOctaveHover = {
+      x: target.x,
+      y: target.y,
+      rectLeft: rect.left,
+      rectTop: rect.top,
+      scaleX,
+      scaleY
+    };
+    ws?.readyState === WebSocket.OPEN && ws.send(JSON.stringify({ type: "get_step_state", x: target.x, y: target.y }));
+  }, 500);
+});
+canvas.addEventListener("mouseleave", () => {
+  pendingOctaveHover = null;
+  if (octaveHoverTimer) {
+    clearTimeout(octaveHoverTimer);
+    octaveHoverTimer = null;
+  }
+  if (octaveHideTimer) clearTimeout(octaveHideTimer);
+  octaveHideTimer = setTimeout(() => {
+    if (!isOverOctaveControls) {
+      octaveControls.style.display = "none";
+      hoveredStep = null;
+    }
+  }, 300);
+});
+canvas.addEventListener("contextmenu", (e) => {
+  e.preventDefault();
+  const rect = canvas.getBoundingClientRect();
+  const x = Math.floor((e.clientX - rect.left) / (rect.width / WIDTH));
+  const y = Math.floor((e.clientY - rect.top) / (rect.height / HEIGHT));
+  if (x < 0 || x >= WIDTH || y < 0 || y >= HEIGHT) {
+    closeNoteMenu();
+    return;
+  }
+  if (y >= STEP_ROWS) {
+    closeNoteMenu();
+    return;
+  }
+  closeNoteMenu();
+  if (ws?.readyState === WebSocket.OPEN) {
+    pendingNoteMenu = { x, y, clientX: e.clientX, clientY: e.clientY };
+    ws.send(JSON.stringify({ type: "get_step_state", x, y }));
+  }
+});
+
+function nudgeStepOctave(delta) {
+  const target = hoveredStep || lastOctaveTarget;
+  if (!target) return;
+  const { x, y } = target;
+  const msg = { page: currentPage, x, y, delta };
+  handleOctaveOverlayMessage(msg);
+  ws?.readyState === WebSocket.OPEN && ws.send(JSON.stringify({ type: "set_step_octave", x, y, delta }));
+}
+
+function showOctaveControls(hover) {
+  if (!hover) return;
+  const { x, y, rectLeft, rectTop, scaleX, scaleY } = hover;
+  hoveredStep = { x, y };
+  lastOctaveTarget = { x, y };
+  const hasUp = y > 0;
+  const hasDown = y < STEP_ROWS - 1;
+  if (!hasUp && !hasDown) {
+    if (!isOverOctaveControls) octaveControls.style.display = "none";
+    return;
+  }
+  const btnSize = 24 * scaleX;
+  const distY = (CELL_SIZE + CELL_GAP) * scaleY;
+  const gapPx = hasUp && hasDown
+    ? Math.max(0, 2 * distY - btnSize)
+    : Math.max(0, distY - btnSize);
+  octaveControls.style.rowGap = `${gapPx}px`;
+  [octaveUpBtn, octaveDownBtn].forEach((btn) => {
+    if (btn) {
+      btn.style.width = `${btnSize}px`;
+      btn.style.height = `${btnSize}px`;
+    }
+  });
+  const centerX = rectLeft + (x * (CELL_SIZE + CELL_GAP) + CELL_SIZE / 2) * scaleX;
+  const centerUp = rectTop + ((y - 1) * (CELL_SIZE + CELL_GAP) + CELL_SIZE / 2) * scaleY;
+  const centerDown = rectTop + ((y + 1) * (CELL_SIZE + CELL_GAP) + CELL_SIZE / 2) * scaleY;
+  if (hasUp && octaveUpBtn) {
+    octaveUpBtn.style.display = "flex";
+  } else if (octaveUpBtn) {
+    octaveUpBtn.style.display = "none";
+  }
+  if (hasDown && octaveDownBtn) {
+    octaveDownBtn.style.display = "flex";
+  } else if (octaveDownBtn) {
+    octaveDownBtn.style.display = "none";
+  }
+  const top = hasUp ? (centerUp - btnSize / 2) : (centerDown - btnSize / 2);
+  octaveControls.style.left = `${centerX - btnSize / 2}px`;
+  octaveControls.style.top = `${top}px`;
+  octaveControls.style.display = "flex";
+}
+
+function showOctaveControlsFromOverlay(msg) {
+  const rect = canvas.getBoundingClientRect();
+  const scaleX = rect.width / CANVAS_WIDTH;
+  const scaleY = rect.height / CANVAS_HEIGHT;
+  if (octaveHideTimer) {
+    clearTimeout(octaveHideTimer);
+    octaveHideTimer = null;
+  }
+  hoveredStep = { x: msg.x, y: msg.y };
+  lastOctaveTarget = { x: msg.x, y: msg.y };
+  octaveOverlayLock = !!msg.fromHold;
+  const hover = {
+    x: msg.x,
+    y: msg.y,
+    rectLeft: rect.left,
+    rectTop: rect.top,
+    scaleX,
+    scaleY
+  };
+  showOctaveControls(hover);
+  // keep arrows visible until user exits (mouse leave or edit exit); no auto-hide timer
+  if (remoteOctaveTimer) {
+    clearTimeout(remoteOctaveTimer);
+    remoteOctaveTimer = null;
+  }
+}
+
+if (octaveUpBtn) octaveUpBtn.onclick = () => nudgeStepOctave(1);
+if (octaveDownBtn) octaveDownBtn.onclick = () => nudgeStepOctave(-1);
+octaveControls.addEventListener("mouseenter", () => {
+  isOverOctaveControls = true;
+  if (octaveHideTimer) {
+    clearTimeout(octaveHideTimer);
+    octaveHideTimer = null;
+  }
+});
+octaveControls.addEventListener("mouseleave", () => {
+  isOverOctaveControls = false;
+  if (octaveHideTimer) clearTimeout(octaveHideTimer);
+  octaveHideTimer = setTimeout(() => {
+    if (!hoveredStep) octaveControls.style.display = "none";
+  }, 150);
+});
+
+connectWS();
+initMIDI();
+buildScaleSelectors();
+applyScaleUI();
+applySeqTypeUI();
+renderTabs();
+renderPatternRow();
+applyPatternSelectUI();
+applyPatternLengthUI();
+applyPatternScaleUI();
+renderBarRow();
+applyAutoFillUI();
+renderFrame(frames[currentPage]);
+applyLedSettingsUI();
+loadSavedConfig();
+if (uiScaleSel) {
+  uiScaleSel.value = "1.5";
+  uiScaleSel.onchange = () => applyUiScale(uiScaleSel.value);
+}
+applyUiScale(uiScaleSel?.value || uiScale || 1.5);
+applyPatternControlLatchUI();
+
+function patternHasData(page) {
+  const frame = frames[page] || [];
+  // Only consider step rows (exclude bottom device row)
+  const playVal = ledLevels.playhead || 0;
+  for (let y = 0; y < STEP_ROWS; y++) {
+    for (let x = 0; x < WIDTH; x++) {
+      const v = frame[y * WIDTH + x] || 0;
+      if (v > 0 && v !== playVal) return true; // ignore playhead-only columns
+    }
+  }
+  return false;
+}
+
+if (seqTypeSel) {
+  seqTypeSel.addEventListener("change", () => {
+    const val = seqTypeSel.value;
+    const type = val === "poly" ? "poly" : val === "drum" ? "drum" : val === "cc" ? "cc" : val === "mdtonal" ? "mdtonal" : "mono";
+    // Only prompt if the current pattern has data; otherwise switch immediately
+    const hasData = patternHasData(currentPage);
+    if (hasData) {
+      pendingSeqType = type;
+      // revert UI until user confirms
+      seqTypeSel.value = sequencerTypes[currentPage] || "mono";
+      openSeqModal();
+    } else {
+      pendingSeqType = null;
+      applySeqChange(type, false);
+    }
+  });
+}
+
+function addOverlay(page, x, y, octave, delta) {
+  const pageIdx = Number.isFinite(page) ? page : currentPage;
+  if (!overlays[pageIdx]) overlays[pageIdx] = [];
+  const val = Number.isFinite(octave) ? octave : (Number.isFinite(delta) ? delta : 0);
+  if (!val) {
+    // remove any existing numeric overlay when returning to zero
+    overlays[pageIdx] = overlays[pageIdx].filter((o) => !(o.x === x && o.y === y && /^[-+]?\d/.test(o.text)));
+    if (pageIdx === currentPage) renderFrame(frames[currentPage]);
+    return;
+  }
+  const text = val > 0 ? `+${val}` : `${val}`;
+  const ts = Date.now();
+  overlays[pageIdx] = overlays[pageIdx].filter((o) => !(o.x === x && o.y === y && /^[-+]?\d/.test(o.text)));
+  overlays[pageIdx].push({ x, y, text, ts });
+  if (pageIdx === currentPage) renderFrame(frames[currentPage]);
+}
+
+function clearOverlayAt(pageIdx, x, y) {
+  if (!overlays[pageIdx]) overlays[pageIdx] = [];
+  overlays[pageIdx] = overlays[pageIdx].filter((o) => !(o.x === x && o.y === y && /^[-+]?\d/.test(o.text)));
+}
+
+function handleOctaveOverlayMessage(msg) {
+  const pageIdx = Number.isFinite(msg.page) ? msg.page : currentPage;
+  if (msg.clearAll) {
+    overlays[pageIdx] = [];
+    if (pageIdx === currentPage) renderFrame(frames[currentPage]);
+    hoveredStep = null;
+    lastOctaveTarget = null;
+    octaveOverlayLock = false;
+    octaveControls.style.display = "none";
+    return;
+  }
+  if (msg.clear) {
+    if (Array.isArray(msg.clears) && msg.clears.length) {
+      msg.clears.forEach(({ x, y }) => clearOverlayAt(pageIdx, x, y));
+    } else {
+      clearOverlayAt(pageIdx, msg.x, msg.y);
+    }
+    if (pageIdx === currentPage) renderFrame(frames[currentPage]);
+    hoveredStep = null;
+    lastOctaveTarget = null;
+    octaveOverlayLock = false;
+    octaveControls.style.display = "none";
+    return;
+  }
+  addOverlay(pageIdx, msg.x, msg.y, msg.octave, msg.delta);
+  const overlayPage = pageIdx;
+  recentOctaveOverlay = {
+    page: overlayPage,
+    x: msg.x,
+    y: msg.y,
+    ts: Date.now()
+  };
+  if (!Number.isFinite(overlayPage) || overlayPage === currentPage) {
+    showOctaveControlsFromOverlay(msg);
+  }
+}
+
+function handleAccentOverlayMessage(msg) {
+  addAccentOverlay(msg.page, msg.x, msg.y, msg.accent);
+}
+
+function handleSlideOverlayMessage(msg) {
+  addSlideOverlay(msg.page, msg.x, msg.y, msg.slide);
+}
+
+function addAccentOverlay(page, x, y, accent) {
+  const pageIdx = Number.isFinite(page) ? page : currentPage;
+  if (!overlays[pageIdx]) overlays[pageIdx] = [];
+  // remove any existing accent overlay but do not show a popup
+  overlays[pageIdx] = overlays[pageIdx].filter((o) => !(o.x === x && o.y === y && o.text === "A"));
+  if (accent) overlays[pageIdx].push({ x, y, text: "A", ts: Date.now() });
+  if (pageIdx === currentPage) renderFrame(frames[currentPage]);
+}
+
+function addSlideOverlay(page, x, y, slide) {
+  const pageIdx = Number.isFinite(page) ? page : currentPage;
+  if (!overlays[pageIdx]) overlays[pageIdx] = [];
+  // remove any existing slide overlay but do not show a popup
+  overlays[pageIdx] = overlays[pageIdx].filter((o) => !(o.x === x && o.y === y && o.text === "S"));
+  if (slide) overlays[pageIdx].push({ x, y, text: "S", ts: Date.now() });
+  if (pageIdx === currentPage) renderFrame(frames[currentPage]);
+}
+
+function handleStepStateMessage(msg) {
+  if (typeof msg.page === "number" && msg.page !== currentPage) return;
+  // Context menu path
+  if (pendingNoteMenu && msg.x === pendingNoteMenu.x && msg.y === pendingNoteMenu.y) {
+    const { clientX, clientY } = pendingNoteMenu;
+    pendingNoteMenu = null;
+    if (!msg.on) {
+      closeNoteMenu();
+    } else {
+      noteMenuTarget = {
+        x: msg.x,
+        y: msg.y,
+        accent: !!msg.accent,
+        slide: !!msg.slide,
+        canSlide: !!msg.canSlide,
+        canAccent: !!msg.canAccent
+      };
+      openNoteMenu(clientX, clientY, msg);
+    }
+    return;
+  }
+  // Octave hover path
+  if (pendingOctaveHover && msg.x === pendingOctaveHover.x && msg.y === pendingOctaveHover.y) {
+    const hover = pendingOctaveHover;
+    pendingOctaveHover = null;
+    if (!msg.on) {
+      hoveredStep = null;
+      if (!isOverOctaveControls) octaveControls.style.display = "none";
+      return;
+    }
+    hoveredStep = { x: msg.x, y: msg.y };
+    showOctaveControls(hover);
+  }
+}
+
+if (scaleRootSel) {
+  scaleRootSel.onchange = () => {
+    scale.root = Number(scaleRootSel.value) || 0;
+    if (settingsScaleRootSel) settingsScaleRootSel.value = scale.root;
+    sendScale();
+  };
+}
+if (scaleModeSel) {
+  scaleModeSel.onchange = () => {
+    scale.mode = scaleModeSel.value;
+    if (settingsScaleModeSel) settingsScaleModeSel.value = scale.mode;
+    sendScale();
+  };
+}
+
+if (settingsScaleRootSel) {
+  settingsScaleRootSel.onchange = () => {
+    scale.root = Number(settingsScaleRootSel.value) || 0;
+    if (scaleRootSel) scaleRootSel.value = settingsScaleRootSel.value;
+    sendScale();
+    applyScaleUI();
+  };
+}
+if (settingsScaleModeSel) {
+  settingsScaleModeSel.onchange = () => {
+    scale.mode = settingsScaleModeSel.value;
+    if (scaleModeSel) scaleModeSel.value = settingsScaleModeSel.value;
+    sendScale();
+    applyScaleUI();
+  };
+}
+
+function applyScaleUI() {
+  if (scaleRootSel) scaleRootSel.value = scale.root ?? 0;
+  if (scaleModeSel) scaleModeSel.value = scale.mode || "major";
+  if (settingsScaleRootSel) settingsScaleRootSel.value = scale.root ?? 0;
+  if (settingsScaleModeSel) settingsScaleModeSel.value = scale.mode || "major";
+}
+
+function applyUiScale(val) {
+  const num = Math.max(1, Math.min(1.5, Number(val) || 1));
+  uiScale = num;
+  document.documentElement.style.setProperty("--ui-scale", uiScale);
+  if (uiScaleSel) uiScaleSel.value = String(uiScale);
+  // Resize the Electron window to match scale (no-op in browser)
+  if (typeof window.resizeTo === "function" && window.innerWidth) {
+    const w = Math.round(BASE_WINDOW_WIDTH * uiScale);
+    const h = Math.round(BASE_WINDOW_HEIGHT * uiScale);
+    try {
+      window.resizeTo(w, h);
+    } catch (e) {
+      // ignore if blocked
+    }
+  }
+}
+
+function sendScale() {
+  ws?.readyState === WebSocket.OPEN && ws.send(JSON.stringify({ type: "set_scale", root: Number(scale.root) || 0, mode: scale.mode || "major" }));
+}
+
+const adjustTranspose = (delta) => {
+  const type = sequencerTypes[currentPage] || "mono";
+  if (type === "drum" || type === "cc") return;
+  const current = transposes[currentPage] ?? 0;
+  const oct = Math.max(-2, Math.min(2, Math.round(current / 12) + delta));
+  const semis = oct * 12;
+  transposes[currentPage] = semis;
+  applyPageTranspose();
+  ws?.readyState === WebSocket.OPEN &&
+    ws.send(JSON.stringify({ type: "set_transpose", page: currentPage, transpose: semis }));
+};
+if (transposeDec) transposeDec.addEventListener("click", () => adjustTranspose(-1));
+if (transposeInc) transposeInc.addEventListener("click", () => adjustTranspose(1));
+
+if (swingInput) {
+  swingInput.addEventListener("change", () => updateSwing(swingInput.value));
+}
+if (patternLengthBtns && patternLengthBtns.length) {
+  const lenCycle = [16, 32, 64];
+  patternLengthBtns.forEach((btn) => {
+    btn.onclick = () => {
+      const patIdx = activePatterns[currentPage] || 1;
+      const current = (patternLengths[currentPage] && patternLengths[currentPage][patIdx]) || 16;
+      const nextIdx = (lenCycle.indexOf(current) + 1) % lenCycle.length;
+      const nextLen = lenCycle[nextIdx];
+      if (!patternLengths[currentPage]) patternLengths[currentPage] = [];
+      patternLengths[currentPage][patIdx] = nextLen;
+      ws?.readyState === WebSocket.OPEN &&
+        ws.send(JSON.stringify({ type: "set_pattern_length", pattern: patIdx, length: nextLen }));
+      applyPatternLengthUI();
+      renderBarRow();
+      showToast(`Length set to ${nextLen}`);
+    };
+  });
+}
+
+function setPattern(val) {
+  const pat = Math.max(1, Math.min(8, Number(val) || 1));
+  activePatterns[currentPage] = pat;
+  currentPattern = pat;
+  pendingPatterns[currentPage] = null;
+  if (patternSelect) patternSelect.value = String(pat);
+  ws?.readyState === WebSocket.OPEN && ws.send(JSON.stringify({ type: "set_pattern", pattern: pat }));
+  applyPatternSelectUI();
+  applyPatternLengthUI();
+  applyPatternScaleUI();
+  renderBarRow();
+  renderFrame(frames[currentPage]);
+}
+
+if (patternSelect) {
+  patternSelect.onchange = () => setPattern(patternSelect.value);
+}
+
+if (patternScaleToggle) {
+  const scaleCycle = [1, 2, 4];
+  patternScaleToggle.onclick = () => {
+    const patIdx = activePatterns[currentPage] || 1;
+    const current = Number(patternScaleToggle.dataset.patternScale) || 1;
+    const nextIdx = (scaleCycle.indexOf(current) + 1) % scaleCycle.length;
+    const nextVal = scaleCycle[nextIdx];
+    if (!patternTimeScales[currentPage]) patternTimeScales[currentPage] = [];
+    patternTimeScales[currentPage][patIdx] = nextVal;
+    ws?.readyState === WebSocket.OPEN &&
+      ws.send(JSON.stringify({ type: "set_pattern_time_scale", pattern: patIdx, scale: nextVal }));
+    applyPatternScaleUI();
+    showToast(`Scale set to ${nextVal}x`);
+  };
+}
+
+function applyFollowUI() {
+  if (!followBtn) return;
+  followBtn.classList.toggle("active", followEnabled);
+}
+
+function applyAutoFillUI() {
+  if (!autoFillToggle) return;
+  autoFillToggle.checked = !!autoFillBars;
+}
+
+function applyClockOutUI() {
+  if (clockOutToggle) clockOutToggle.checked = !!clockOutEnabled;
+  if (clockOutPortSel) {
+    const opts = Array.from(clockOutPortSel.options || []);
+    const has = opts.some((o) => o.value === clockOutPortId);
+    if (clockOutPortId && has) {
+      clockOutPortSel.value = clockOutPortId;
+    } else if (opts.length) {
+      clockOutPortSel.value = opts[0].value;
+      clockOutPortId = clockOutPortSel.value;
+    }
+  }
+}
+
+if (followBtn) {
+  followBtn.onclick = () => {
+    followEnabled = !followEnabled;
+    applyFollowUI();
+    ws?.readyState === WebSocket.OPEN && ws.send(JSON.stringify({ type: "set_follow", enabled: followEnabled }));
+  };
+}
+
+if (autoFillToggle) {
+  autoFillToggle.onchange = () => {
+    autoFillBars = !!autoFillToggle.checked;
+    ws?.readyState === WebSocket.OPEN && ws.send(JSON.stringify({ type: "set_auto_fill", enabled: autoFillBars }));
+  };
+}
+if (clockOutToggle) {
+  clockOutToggle.onchange = () => {
+    clockOutEnabled = !!clockOutToggle.checked;
+    ws?.readyState === WebSocket.OPEN && ws.send(JSON.stringify({ type: "set_clock_out", enabled: clockOutEnabled }));
+  };
+}
+if (clockOutPortSel) {
+  clockOutPortSel.onchange = () => {
+    clockOutPortId = clockOutPortSel.value || "";
+    ws?.readyState === WebSocket.OPEN && ws.send(JSON.stringify({ type: "set_clock_out_device", id: clockOutPortId, name: clockOutPortId }));
+  };
+}
+
+if (copyPatternBtn) {
+  copyPatternBtn.onclick = () => {
+    ws?.readyState === WebSocket.OPEN && ws.send(JSON.stringify({ type: "copy_pattern" }));
+    showToast("Pattern copied");
+  };
+}
+
+if (copyBarBtn) {
+  copyBarBtn.onclick = () => {
+    const patIdx = activePatterns[currentPage] || 1;
+    const bar = (barViews[currentPage] && barViews[currentPage][patIdx]) || 0;
+    ws?.readyState === WebSocket.OPEN && ws.send(JSON.stringify({ type: "copy_bar", bar }));
+    showToast("Bar copied");
+  };
+}
+
+if (pasteBtn) {
+  pasteBtn.onclick = () => {
+    const patIdx = activePatterns[currentPage] || 1;
+    const bar = (barViews[currentPage] && barViews[currentPage][patIdx]) || 0;
+    if (lastCopyType === "pattern" && patternClipboard) {
+      ws?.readyState === WebSocket.OPEN &&
+        ws.send(JSON.stringify({ type: "paste_pattern", data: patternClipboard }));
+      showToast("Pattern pasted");
+    } else if (lastCopyType === "bar" && barClipboard) {
+      ws?.readyState === WebSocket.OPEN &&
+        ws.send(JSON.stringify({ type: "paste_bar", bar, data: barClipboard }));
+      showToast("Bar pasted");
+    } else {
+      log("Nothing to paste");
+    }
+  };
+}
+
+function showConfirmModal(show) {
+  if (!confirmModal) return;
+  confirmModal.classList.toggle("hidden", !show);
+  settingsBackdrop?.classList.toggle("hidden", !show);
+}
+
+function isCurrentPatternEmpty() {
+  const patIdx = activePatterns[currentPage] || 1;
+  const len = (patternLengths[currentPage] && patternLengths[currentPage][patIdx]) || 16;
+  const bars = Math.max(1, Math.ceil(len / 16));
+  let empty = true;
+  for (let b = 0; b < bars; b++) {
+    const snap = frames[currentPage] || [];
+    const start = b * 16;
+    const barSlice = snap.slice(start * HEIGHT, (start + 1) * 16 * HEIGHT);
+    if (barSlice.some((v) => v)) {
+      empty = false;
+      break;
+    }
+  }
+  return empty;
+}
+
+function isCurrentBarEmpty() {
+  const patIdx = activePatterns[currentPage] || 1;
+  const bar = (barViews[currentPage] && barViews[currentPage][patIdx]) || 0;
+  const start = bar * 16 * HEIGHT;
+  const end = start + 16 * HEIGHT;
+  const snap = frames[currentPage] || [];
+  return !snap.slice(start, end).some((v) => v);
+}
+
+if (clearBtn) {
+  clearBtn.onclick = () => {
+    if (isCurrentPatternEmpty()) {
+      ws?.readyState === WebSocket.OPEN && ws.send(JSON.stringify({ type: "clear_pattern" }));
+      showToast("Pattern cleared");
+      return;
+    }
+    showConfirmModal(true);
+  };
+}
+if (confirmClose) {
+  confirmClose.onclick = () => showConfirmModal(false);
+}
+if (confirmClearCancel) {
+  confirmClearCancel.onclick = () => showConfirmModal(false);
+}
+if (confirmClearPattern) {
+  confirmClearPattern.onclick = () => {
+    ws?.readyState === WebSocket.OPEN && ws.send(JSON.stringify({ type: "clear_pattern" }));
+    showToast("Pattern cleared");
+    showConfirmModal(false);
+  };
+}
+if (confirmClearBar) {
+  confirmClearBar.onclick = () => {
+    const patIdx = activePatterns[currentPage] || 1;
+    const bar = (barViews[currentPage] && barViews[currentPage][patIdx]) || 0;
+    if (isCurrentBarEmpty()) {
+      ws?.readyState === WebSocket.OPEN && ws.send(JSON.stringify({ type: "clear_bar", bar }));
+      showToast(`Bar ${bar + 1} cleared`);
+      showConfirmModal(false);
+      return;
+    }
+    ws?.readyState === WebSocket.OPEN && ws.send(JSON.stringify({ type: "clear_bar", bar }));
+    showToast(`Bar ${bar + 1} cleared`);
+    showConfirmModal(false);
+  };
+}
+
+function handleGridStatus(connected) {
+  const prev = gridConnected;
+  gridConnected = !!connected;
+  if (gridConnected === prev) return;
+  showToast(gridConnected ? "Grid connected" : "Grid disconnected");
+}
+
+
+function applyDeviceBadge() {
+  if (devicePill) devicePill.textContent = deviceNames[currentPage] || `(unnamed ${currentPage})`;
+  const color = getDeviceDisplayColor(currentPage);
+  onColor = color || ON_COLOR_DEFAULT;
+  document.documentElement.style.setProperty("--accent-active", color);
+  updateDefaultColorTrigger();
+}
+
+function applyLedSettingsUI() {
+  Object.entries(ledInputs).forEach(([k, el]) => {
+    if (el) el.value = ledLevels[k] ?? 0;
+  });
+  if (showLogToggle) {
+    const show = showLogToggle.checked;
+    document.getElementById("log").classList.toggle("hidden", !show);
+  }
+  if (allowMDExternalToggle) {
+    allowMDExternalToggle.checked = !!allowMDExternal;
+  }
+  applyPatternControlLatchUI();
+}
+
+function applyMdSlideSpeedUI() {
+  if (mdBaseSweepInput) {
+    mdBaseSweepInput.value = mdBaseSweep;
+  }
+  if (monoSlidePadInput) {
+    monoSlidePadInput.value = Math.round((monoSlidePad || 0) * 100);
+  }
+}
+
+function applyBaseNoteLenUI() {
+  if (baseNoteLenSel) {
+    const allowed = ["8", "16", "32"];
+    const val = String(baseDivision || 16);
+    baseNoteLenSel.value = allowed.includes(val) ? val : "16";
+  }
+}
+
+function applyPatternControlLatchUI() {
+  if (patternControlLatchToggle) {
+    patternControlLatchToggle.checked = !!patternControlLatch;
+  }
+}
+
+function contrastForColor(hex) {
+  if (!hex || typeof hex !== "string" || !hex.startsWith("#")) return "#f5f6f7";
+  const norm = hex.length === 4
+    ? `#${hex[1]}${hex[1]}${hex[2]}${hex[2]}${hex[3]}${hex[3]}`
+    : hex;
+  const int = parseInt(norm.slice(1), 16);
+  if (Number.isNaN(int)) return "#f5f6f7";
+  const r = (int >> 16) & 255;
+  const g = (int >> 8) & 255;
+  const b = int & 255;
+  const luma = 0.299 * r + 0.587 * g + 0.114 * b;
+  return luma > 180 ? "#1a1e14" : "#f5f6f7";
+}
+
+function renderDefaultColorOptions() {
+  if (!defaultColorModalOptions) return;
+  defaultColorModalOptions.innerHTML = "";
+  DEVICE_COLOR_PALETTE.forEach((c) => {
+    const sw = document.createElement("button");
+    sw.className = "color-swatch";
+    sw.style.background = c;
+    sw.setAttribute("aria-label", `Default color ${c}`);
+    sw.onclick = () => {
+      defaultDeviceColor = c;
+      applyDefaultDeviceColor();
+      applyDeviceBadge();
+      renderTabs();
+      renderFrame(frames[currentPage]);
+      updateDefaultColorTrigger();
+      closeDefaultColorModal();
+    };
+    if (c.toLowerCase() === (defaultDeviceColor || BASE_DEFAULT_DEVICE_COLOR).toLowerCase()) {
+      sw.classList.add("selected");
+    }
+    defaultColorModalOptions.append(sw);
+  });
+}
+
+function applyDefaultDeviceColor() {
+  for (let i = 1; i <= 8; i++) {
+    if (!deviceColorOverrides[i]) deviceColors[i] = defaultDeviceColor;
+  }
+}
+
+function updateDefaultColorTrigger() {
+  if (defaultColorTrigger) {
+    defaultColorTrigger.style.background = defaultDeviceColor;
+    defaultColorTrigger.style.borderColor = "var(--border)";
+  }
+  if (document?.documentElement?.style) {
+    document.documentElement.style.setProperty("--cta", defaultDeviceColor);
+  }
+}
+
+function openDefaultColorModal() {
+  closeDeviceMenu();
+  closeNoteMenu();
+  closeColorModal();
+  renderDefaultColorOptions();
+  if (defaultColorModal) defaultColorModal.classList.remove("hidden");
+}
+function closeDefaultColorModal() {
+  if (defaultColorModal) defaultColorModal.classList.add("hidden");
+}
+
+function getDeviceDisplayColor(page) {
+  const type = sequencerTypes[page] || "mono";
+  const override = deviceColorOverrides[page];
+  const base = deviceColors[page] || defaultDeviceColor;
+  if (override) return base;
+  if (type === "mdtonal") return AUTO_MDTONAL_COLOR;
+  return defaultDeviceColor;
+}
+
+function loadSavedConfig() {
+  try {
+    const rawFull = localStorage.getItem(LOCAL_CONFIG_KEY);
+    const rawLegacy = localStorage.getItem("mgrid_led_config");
+    const parsed = rawFull ? JSON.parse(rawFull) : (rawLegacy ? { ledLevels: JSON.parse(rawLegacy) } : null);
+    if (!parsed || typeof parsed !== "object") return;
+    if (parsed.ledLevels) ledLevels = { ...DEFAULT_LED_LEVELS, ...parsed.ledLevels };
+    if (typeof parsed.clockSource === "string") {
+      clockSource = parsed.clockSource === "external" ? "external" : "internal";
+      if (clockSourceSel) clockSourceSel.value = clockSource;
+    }
+    if (parsed.clockInput) {
+      clockInputId = parsed.clockInput;
+      if (clockInputSel) clockInputSel.value = clockInputId;
+    }
+    if (Array.isArray(parsed.midiSettings)) {
+      midiSettings = parsed.midiSettings.slice(0, 9).map((m) => m || { outId: "", channel: 1 });
+      applyPageMidi();
+    }
+    if (Number.isFinite(parsed.baseDivision)) {
+      let div = Math.round(parsed.baseDivision);
+      if (div <= 4) div = div * 4; // migrate old per-beat values (2->8, 4->16)
+      if (div === 6) div = 24;
+      baseDivision = Math.max(1, Math.min(32, div));
+      applyBaseNoteLenUI();
+    }
+  if (typeof parsed.autoFill === "boolean") {
+    autoFillBars = parsed.autoFill;
+    if (autoFillToggle) autoFillToggle.checked = autoFillBars;
+  }
+  if (parsed.defaultDeviceColor && /^#([0-9a-f]{6}|[0-9a-f]{3})$/i.test(parsed.defaultDeviceColor)) {
+    defaultDeviceColor = parsed.defaultDeviceColor;
+      applyDefaultDeviceColor();
+    }
+    if (typeof parsed.allowMDExternal === "boolean" && allowMDExternalToggle) {
+      allowMDExternal = parsed.allowMDExternal;
+      allowMDExternalToggle.checked = allowMDExternal;
+    }
+    if (typeof parsed.patternControlLatch === "boolean" && patternControlLatchToggle) {
+      patternControlLatch = parsed.patternControlLatch;
+      applyPatternControlLatchUI();
+    }
+  if (typeof parsed.patternControlLatch === "boolean") {
+    patternControlLatch = parsed.patternControlLatch;
+    applyPatternControlLatchUI();
+  }
+  if (typeof parsed.autoLoadSet === "boolean" && autoLoadToggle) {
+    autoLoadToggle.checked = parsed.autoLoadSet;
+    autoLoadSet = parsed.autoLoadSet;
+  }
+    if (typeof parsed.patternControlLatch === "boolean") {
+      patternControlLatch = parsed.patternControlLatch;
+      applyPatternControlLatchUI();
+      if (ws?.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: "set_pattern_control_latch", enabled: patternControlLatch }));
+      }
+    }
+  if (typeof parsed.showLog === "boolean" && showLogToggle) {
+    showLogToggle.checked = parsed.showLog;
+    document.getElementById("log").classList.toggle("hidden", !parsed.showLog);
+  }
+  if (typeof parsed.clockOut === "boolean") {
+    clockOutEnabled = !!parsed.clockOut;
+    applyClockOutUI();
+    if (ws?.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: "set_clock_out", enabled: clockOutEnabled }));
+    }
+  }
+  if (parsed.clockOutDevice) {
+    clockOutPortId = parsed.clockOutDevice;
+    applyClockOutUI();
+    if (ws?.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: "set_clock_out_device", id: clockOutPortId, name: clockOutPortId }));
+    }
+  }
+  if (parsed.defaultDeviceColor && /^#([0-9a-f]{6}|[0-9a-f]{3})$/i.test(parsed.defaultDeviceColor)) {
+    defaultDeviceColor = parsed.defaultDeviceColor;
+    applyDefaultDeviceColor();
+    updateDefaultColorTrigger();
+  } else {
+      updateDefaultColorTrigger();
+    }
+    cachedConfig = parsed;
+  applyLedSettingsUI();
+  applyBaseNoteLenUI();
+  applyMdSlideSpeedUI();
+  applyPatternControlLatchUI();
+  log("Loaded saved config");
+  } catch (e) {
+    log("Failed to load saved config");
+  }
+}
+
+function pushSavedConfigToServer() {
+  if (!cachedConfig || !ws || ws.readyState !== WebSocket.OPEN) return;
+  if (cachedConfig.ledLevels) ws.send(JSON.stringify({ type: "set_led_levels", levels: cachedConfig.ledLevels }));
+  if (cachedConfig.clockSource) ws.send(JSON.stringify({ type: "set_clock_source", source: cachedConfig.clockSource }));
+  if (cachedConfig.clockInput) ws.send(JSON.stringify({ type: "set_clock_input", id: cachedConfig.clockInput, name: cachedConfig.clockInput }));
+  if (typeof cachedConfig.clockOut === "boolean") {
+    clockOutEnabled = !!cachedConfig.clockOut;
+    applyClockOutUI();
+    ws.send(JSON.stringify({ type: "set_clock_out", enabled: clockOutEnabled }));
+  }
+  if (cachedConfig.clockOutDevice) {
+    clockOutPortId = cachedConfig.clockOutDevice;
+    applyClockOutUI();
+    ws.send(JSON.stringify({ type: "set_clock_out_device", id: clockOutPortId, name: clockOutPortId }));
+  }
+  if (typeof cachedConfig.autoFill === "boolean") ws.send(JSON.stringify({ type: "set_auto_fill", enabled: cachedConfig.autoFill }));
+  if (typeof cachedConfig.allowMDExternal === "boolean") {
+    allowMDExternal = !!cachedConfig.allowMDExternal;
+    enforceMDMidiOut();
+  }
+  if (cachedConfig.defaultDeviceColor && /^#([0-9a-f]{6}|[0-9a-f]{3})$/i.test(cachedConfig.defaultDeviceColor)) {
+    defaultDeviceColor = cachedConfig.defaultDeviceColor;
+    applyDefaultDeviceColor();
+  }
+  if (typeof cachedConfig.baseDivision === "number") {
+    let div = Math.round(cachedConfig.baseDivision);
+    if (div <= 4) div = div * 4; // migrate old per-beat values
+    if (div === 6) div = 24;
+    baseDivision = Math.max(1, Math.min(32, div));
+    ws.send(JSON.stringify({ type: "set_base_division", division: baseDivision }));
+  }
+  if (typeof cachedConfig.patternControlLatch === "boolean") {
+    patternControlLatch = !!cachedConfig.patternControlLatch;
+    applyPatternControlLatchUI();
+    ws.send(JSON.stringify({ type: "set_pattern_control_latch", enabled: patternControlLatch }));
+  }
+  if (Array.isArray(cachedConfig.midiSettings)) {
+    cachedConfig.midiSettings.forEach((m, idx) => {
+      const page = idx;
+      if (!m || page === 0) return;
+      const outId = m.outId || "";
+      const channel = m.channel || 1;
+      ws.send(JSON.stringify({ type: "set_midi", page, outId, channel }));
+    });
+  }
+}
+
+function downloadJSON(obj, filename) {
+  const blob = new Blob([JSON.stringify(obj, null, 2)], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+function downloadBlob(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+function downloadBase64Binary(data, filename, mime = "application/octet-stream") {
+  try {
+    const byteStr = atob(data);
+    const len = byteStr.length;
+    const bytes = new Uint8Array(len);
+    for (let i = 0; i < len; i++) {
+      bytes[i] = byteStr.charCodeAt(i);
+    }
+    const blob = new Blob([bytes], { type: mime });
+    downloadBlob(blob, filename);
+  } catch (e) {
+    log("TD-3 export failed to download");
+  }
+}
+
+// inputs removed from panel; keep guards in case they return
+const tabDeviceNameInput = null;
+const deviceNotesInput = null;
+const tabDeviceColorInput = null;
+
+
+if (drumInputs.length) {
+  drumInputs.forEach((input) => {
+    input.addEventListener("change", () => {
+      const row = Number(input.dataset.row);
+      if (!Number.isFinite(row)) return;
+      const val = Math.max(0, Math.min(127, Math.round(Number(input.value) || 0)));
+      if (!Array.isArray(drumNotes[currentPage])) drumNotes[currentPage] = DEFAULT_DRUMS.slice();
+      drumNotes[currentPage][row] = val;
+      input.value = val;
+      ws?.readyState === WebSocket.OPEN &&
+        ws.send(JSON.stringify({ type: "set_drum_note", page: currentPage, row, note: val }));
+    });
+  });
+}
+
+if (ccNumberInput) {
+  const commitCcNumber = () => {
+    const val = Math.max(0, Math.min(127, Math.round(Number(ccNumberInput.value) || DEFAULT_CC)));
+    ccNumbers[currentPage] = val;
+    ccNumberInput.value = val;
+    ws?.readyState === WebSocket.OPEN &&
+      ws.send(JSON.stringify({ type: "set_cc_number", page: currentPage, cc: val }));
+  };
+  ccNumberInput.addEventListener("focus", () => {
+    ccNumberEditing = true;
+  });
+  ccNumberInput.addEventListener("blur", () => {
+    ccNumberEditing = false;
+    commitCcNumber();
+  });
+  ccNumberInput.addEventListener("change", commitCcNumber);
+  ccNumberInput.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      ccNumberInput.blur();
+    }
+  });
+}
+
+if (mdTrackSel) {
+  mdTrackSel.addEventListener("change", () => {
+    const val = Math.max(1, Math.min(16, Math.round(Number(mdTrackSel.value) || 1)));
+    mdTracks[currentPage] = val;
+    mdTrackSel.value = `${val}`;
+    ws?.readyState === WebSocket.OPEN &&
+      ws.send(JSON.stringify({ type: "set_md_track", page: currentPage, track: val }));
+  });
+}
+
+function openSeqModal() {
+  if (seqModal && seqModal.classList.contains("hidden")) seqModal.classList.remove("hidden");
+}
+function closeSeqModal() {
+  if (seqModal && !seqModal.classList.contains("hidden")) seqModal.classList.add("hidden");
+}
+
+function applySeqChange(type, clearPattern = true) {
+  const safeType = type === "poly" || type === "drum" || type === "cc" || type === "mdtonal" ? type : "mono";
+  sequencerTypes[currentPage] = safeType;
+  ws?.readyState === WebSocket.OPEN && ws.send(JSON.stringify({ type: "set_seq_type", page: currentPage, seqType: safeType }));
+  if (clearPattern) {
+    const patIdx = activePatterns[currentPage] || 1;
+    patternLengths[currentPage] = patternLengths[currentPage] || [];
+    patternLengths[currentPage][patIdx] = 16;
+    patternTimeScales[currentPage] = patternTimeScales[currentPage] || [];
+    patternTimeScales[currentPage][patIdx] = 1;
+    if (!barViews[currentPage]) barViews[currentPage] = [];
+    barViews[currentPage][patIdx] = 0;
+    if (ws?.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: "set_pattern_length", pattern: patIdx, length: 16 }));
+      ws.send(JSON.stringify({ type: "set_pattern_time_scale", pattern: patIdx, scale: 1 }));
+      ws.send(JSON.stringify({ type: "set_bar_view", pattern: patIdx, bar: 0 }));
+      ws.send(JSON.stringify({ type: "clear_pattern", pattern: patIdx }));
+    }
+  }
+  applyDrumNotesUI();
+  applyPatternLengthUI();
+  applyPatternScaleUI();
+  applySeqTypeUI();
+  renderBarRow();
+  closeSeqModal();
+}
+
+if (seqOk) {
+  seqOk.onclick = () => {
+    if (pendingSeqType) applySeqChange(pendingSeqType, true);
+    pendingSeqType = null;
+  };
+}
+if (seqKeep) {
+  seqKeep.onclick = () => {
+    if (pendingSeqType) applySeqChange(pendingSeqType, false);
+    pendingSeqType = null;
+  };
+}
+if (seqCancel) {
+  seqCancel.onclick = () => {
+    pendingSeqType = null;
+    // reset select to current type
+    seqTypeSel.value = sequencerTypes[currentPage] || "mono";
+    closeSeqModal();
+  };
+}
+if (seqClose) {
+  seqClose.onclick = () => {
+    pendingSeqType = null;
+    seqTypeSel.value = sequencerTypes[currentPage] || "mono";
+    closeSeqModal();
+  };
+}
+
+// Toast helper
+let toastTimer = null;
+function showToast(text) {
+  const el = document.getElementById("toast");
+  if (!el) return;
+  el.textContent = text || "";
+  el.classList.remove("hidden");
+  el.classList.remove("fade-out");
+  if (toastTimer) clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => {
+    el.classList.add("fade-out");
+    setTimeout(() => el.classList.add("hidden"), 200);
+  }, 2000);
+}
+
+// New set modal controls
+if (newSetBtn && newSetModal) {
+  const openNewSetModal = () => newSetModal.classList.remove("hidden");
+  const closeNewSetModal = () => newSetModal.classList.add("hidden");
+  newSetBtn.onclick = openNewSetModal;
+  if (newSetClose) newSetClose.onclick = closeNewSetModal;
+  if (newSetCancel) newSetCancel.onclick = closeNewSetModal;
+  if (newSetConfirm) {
+    newSetConfirm.onclick = () => {
+      // reset server state (patterns) but keep current config
+      const keepNames = !!(keepDeviceNamesToggle && keepDeviceNamesToggle.checked);
+      const keepMidi = !!(keepMidiSettingsToggle && keepMidiSettingsToggle.checked);
+      ws?.readyState === WebSocket.OPEN &&
+        ws.send(JSON.stringify({ type: "new_set", keepDeviceNames: keepNames, keepMidi, defaultColor: defaultDeviceColor }));
+      if (!keepNames) {
+        deviceNames = normalizeDeviceNames(null);
+        resetNamesOnNextState = true;
+        applyDeviceBadge();
+        renderTabs();
+      }
+      if (!keepMidi) {
+        resetMidiSettings();
+      }
+      closeNewSetModal();
+      showToast("Started new set");
+    };
+  }
+}
+
+function openColorModal(page) {
+  closeDeviceMenu();
+  closeNoteMenu();
+  closeDefaultColorModal();
+  colorModalPage = page;
+  if (colorOptions) {
+    colorOptions.innerHTML = "";
+    DEVICE_COLOR_PALETTE.forEach((c) => {
+      const sw = document.createElement("button");
+      sw.className = "color-swatch";
+      sw.style.background = c;
+      sw.setAttribute("aria-label", `Color ${c}`);
+      sw.onclick = () => {
+        deviceColors[page] = c;
+        const isDefault = c.toLowerCase() === defaultDeviceColor.toLowerCase();
+        deviceColorOverrides[page] = !isDefault;
+        applyDeviceBadge();
+        renderTabs();
+        renderFrame(frames[currentPage]);
+        ws?.readyState === WebSocket.OPEN && ws.send(JSON.stringify({ type: "set_device_color", page, color: c }));
+        closeColorModal();
+      };
+      colorOptions.append(sw);
+    });
+  }
+  if (colorModal) colorModal.classList.remove("hidden");
+}
+function closeColorModal() {
+  if (colorModal) colorModal.classList.add("hidden");
+  colorModalPage = null;
+}
+if (colorClose) colorClose.onclick = closeColorModal;
+if (defaultColorClose) defaultColorClose.onclick = closeDefaultColorModal;
+function isTypingTarget(el) {
+  if (!el) return false;
+  const tag = (el.tagName || "").toLowerCase();
+  if (["input", "textarea", "select", "option", "button"].includes(tag)) return true;
+  return !!el.isContentEditable || !!el.closest?.("[contenteditable='true']");
+}
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") {
+    closeColorModal();
+    closeDefaultColorModal();
+    return;
+  }
+  if (e.shiftKey && (e.key === "ArrowLeft" || e.key === "ArrowRight" || e.key === "ArrowUp" || e.key === "ArrowDown")) {
+    if (isTypingTarget(e.target)) return;
+    const payload = { type: "shift_pattern", page: currentPage, pattern: activePatterns[currentPage] || 1, dx: 0, dy: 0 };
+    if (e.key === "ArrowLeft") payload.dx = -1;
+    if (e.key === "ArrowRight") payload.dx = 1;
+    if (e.key === "ArrowUp") payload.dy = -1;
+    if (e.key === "ArrowDown") payload.dy = 1;
+    e.preventDefault();
+    ws?.readyState === WebSocket.OPEN && ws.send(JSON.stringify(payload));
+  }
+});
+
+function openRenameModal(page) {
+  if (!renameModal || !renameInput) return;
+  renameTargetPage = page ?? currentPage;
+  const currentName = deviceNames[renameTargetPage] || `${renameTargetPage}`;
+  renameInput.value = currentName.slice(0, 10);
+  renameModal.classList.remove("hidden");
+  setTimeout(() => renameInput?.focus(), 0);
+}
+function closeRenameModal() {
+  if (renameModal) renameModal.classList.add("hidden");
+  renameTargetPage = null;
+}
+if (renameCancel) renameCancel.onclick = closeRenameModal;
+if (renameInput) {
+  renameInput.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      renameSave?.click();
+    } else if (e.key === "Escape") {
+      closeRenameModal();
+    }
+  });
+}
+if (renameSave) {
+  renameSave.onclick = () => {
+    if (!renameTargetPage && renameTargetPage !== 0) return closeRenameModal();
+    const raw = (renameInput?.value || "").trim();
+    if (!raw.length) return;
+    const trimmed = raw.slice(0, 10);
+    deviceNames[renameTargetPage] = trimmed;
+    applyDeviceBadge();
+    renderTabs();
+    ws?.readyState === WebSocket.OPEN &&
+      ws.send(JSON.stringify({ type: "set_device_name", page: renameTargetPage, name: trimmed }));
+    closeRenameModal();
+  };
+}
+
+function openDeviceMenu(x, y) {
+  if (!deviceMenu) return openColorModal(menuTargetPage || currentPage);
+  closeNoteMenu();
+  closeColorModal();
+  closeDefaultColorModal();
+  const scale = Number(uiScale) || 1;
+  const menuRect = deviceMenu.getBoundingClientRect();
+  const menuW = menuRect.width / scale;
+  const menuH = menuRect.height / scale;
+  const vw = window.innerWidth / scale;
+  const vh = window.innerHeight / scale;
+  let left = x / scale;
+  let top = y / scale;
+  if (left + menuW > vw) left = vw - menuW - 8;
+  if (top + menuH > vh) top = vh - menuH - 8;
+  deviceMenu.style.left = `${left}px`;
+  deviceMenu.style.top = `${top}px`;
+  deviceMenu.classList.remove("hidden");
+}
+function closeDeviceMenu() {
+  if (deviceMenu) deviceMenu.classList.add("hidden");
+}
+
+function openNoteMenu(x, y, info = {}) {
+  if (!noteMenu) return;
+  closeDeviceMenu();
+  closeColorModal();
+  closeDefaultColorModal();
+  const scale = Number(uiScale) || 1;
+  const menuRect = noteMenu.getBoundingClientRect();
+  const menuW = menuRect.width / scale;
+  const menuH = menuRect.height / scale;
+  const vw = window.innerWidth / scale;
+  const vh = window.innerHeight / scale;
+  let left = x / scale;
+  let top = y / scale;
+  if (left + menuW > vw) left = vw - menuW - 8;
+  if (top + menuH > vh) top = vh - menuH - 8;
+  if (noteMenuAccent) {
+    noteMenuAccent.classList.toggle("active", !!info.accent);
+    noteMenuAccent.disabled = !info.canAccent;
+    noteMenuAccent.textContent = info.accent ? "Turn off Accent" : "Accent";
+  }
+  if (noteMenuSlide) {
+    const showSlide = !!info.canSlide;
+    noteMenuSlide.classList.toggle("hidden", !showSlide);
+    noteMenuSlide.classList.toggle("active", !!info.slide);
+    noteMenuSlide.disabled = !showSlide;
+    if (!showSlide) {
+      noteMenuSlide.textContent = "Slide";
+    } else {
+      noteMenuSlide.textContent = info.slide ? "Turn off Slide" : "Slide";
+    }
+  }
+  noteMenu.style.left = `${left}px`;
+  noteMenu.style.top = `${top}px`;
+  noteMenu.classList.remove("hidden");
+}
+function closeNoteMenu() {
+  if (noteMenu) noteMenu.classList.add("hidden");
+  noteMenuTarget = null;
+  pendingNoteMenu = null;
+}
+document.addEventListener("click", (e) => {
+  if (deviceMenu && !deviceMenu.classList.contains("hidden") && !deviceMenu.contains(e.target)) {
+    closeDeviceMenu();
+  }
+  if (noteMenu && !noteMenu.classList.contains("hidden") && !noteMenu.contains(e.target)) {
+    closeNoteMenu();
+  }
+});
+document.addEventListener("contextmenu", (e) => {
+  if (deviceMenu && !deviceMenu.classList.contains("hidden") && !deviceMenu.contains(e.target)) {
+    closeDeviceMenu();
+  }
+  if (noteMenu && !noteMenu.classList.contains("hidden") && !noteMenu.contains(e.target)) {
+    closeNoteMenu();
+  }
+});
+if (menuColor) {
+  menuColor.onclick = () => {
+    closeDeviceMenu();
+    if (menuTargetPage) openColorModal(menuTargetPage);
+  };
+}
+// Rename removed from panel; keep menu handler if present
+if (menuRename) {
+  menuRename.onclick = () => {
+    closeDeviceMenu();
+    if (!menuTargetPage) return;
+    if (renameModal && renameInput) {
+      openRenameModal(menuTargetPage);
+      return;
+    }
+    const currentName = deviceNames[menuTargetPage] || `${menuTargetPage}`;
+    const newName = prompt("Rename device", currentName);
+    if (newName !== null && newName.trim().length) {
+      const trimmed = newName.trim().slice(0, 10);
+      deviceNames[menuTargetPage] = trimmed;
+      applyDeviceBadge();
+      renderTabs();
+      ws?.readyState === WebSocket.OPEN &&
+        ws.send(JSON.stringify({ type: "set_device_name", page: menuTargetPage, name: trimmed }));
+    }
+  };
+}
+if (noteMenuAccent) {
+  noteMenuAccent.onclick = () => {
+    if (!noteMenuTarget || !noteMenuTarget.canAccent) return closeNoteMenu();
+    const next = !noteMenuTarget.accent;
+    handleAccentOverlayMessage({ page: currentPage, x: noteMenuTarget.x, y: noteMenuTarget.y, accent: next });
+    ws?.readyState === WebSocket.OPEN &&
+      ws.send(JSON.stringify({ type: "set_step_accent", x: noteMenuTarget.x, y: noteMenuTarget.y, accent: next }));
+    closeNoteMenu();
+  };
+}
+if (noteMenuSlide) {
+  noteMenuSlide.onclick = () => {
+    if (!noteMenuTarget || !noteMenuTarget.canSlide) return closeNoteMenu();
+    const next = !noteMenuTarget.slide;
+    handleSlideOverlayMessage({ page: currentPage, x: noteMenuTarget.x, y: noteMenuTarget.y, slide: next });
+    ws?.readyState === WebSocket.OPEN &&
+      ws.send(JSON.stringify({ type: "set_step_slide", x: noteMenuTarget.x, y: noteMenuTarget.y, slide: next }));
+    closeNoteMenu();
+  };
+}
+// studio grid frontend logic: handles UI, WebSocket sync, WebMIDI, rendering the grid canvas, and local config caching.

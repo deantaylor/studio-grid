@@ -1,0 +1,11 @@
+studio:grid feature list
+- 8 device pages with tabs; each page has 8 patterns, pattern lengths up to 128 steps, bar views, 1x/2x/4x time scaling, follow toggle, auto-fill for new bars, copy/paste per pattern or bar, clear actions, and end-of-pattern queued switching.
+- Sequencer types per page: mono, poly (multi-note with per-note accents), drum (per-row note mapping), CC (per-step CC values), and MDTonal for Elektron Machinedrum with track selection and slide/glide handling.
+- Per-device controls: MIDI output and channel per page, transpose ±2 octaves, device rename/color palettes, optional device notes, per-page drum note remapping, CC number, MD track, LED brightness presets for UI/monome, configurable MD slide parameters, and “allow MD external” override.
+- Transport and clock: internal clock with tempo and swing; external MIDI clock input with start/stop handling and tempo following; playheads reset/synced on transport changes; UI start/stop disabled when using external clock.
+- Scale system: selectable scale root and mode (major, minor, modal variants, harmonic/melodic minor, whole tone, chromatic) plus per-page transpose overlays for octave adjustments on held steps.
+- WebMIDI output: server-sent note/CC events routed per page, per-page MIDI config persistence, TM-1 auto-selection for MDTonal unless overridden, program-change filtering, and external clock input attachment.
+- Monome grid integration: WebSocket bridge pushes LED frames/diffs and receives grid key events; LED throttling; per-element brightness; serialosc bridge clears LEDs on quit.
+- Import/export and persistence: export current set via /api/export or WebSocket as .sgridset, import JSON sets, localStorage config for LED/clock/MIDI, optional auto-load last set, and “New set” flow that can keep names/MIDI settings.
+- UI and shell: canvas-rendered grid with overlays for octave/accent/slide, top-bar tempo/swing/scale controls, pattern length/scale buttons, bar selectors, follow toggle, copy/paste/toast/log, settings modal, device context menu for rename/color, and Electron wrapper that finds a free port and cleans up on quit.
+- Import / export of TD3 patterns (a bit wonky but it works for editing etc - the play back over midi is just not 100% accurate when it comes to slides -  i think its just how 303 handles slides internally - )

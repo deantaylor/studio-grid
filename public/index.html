@@ -1,0 +1,447 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>studio:grid</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600&display=swap" rel="stylesheet">
+    <!-- Icon set -->
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/iconoir-icons/iconoir@main/css/iconoir.css" />
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <div id="app-shell" class="app-shell">
+      <header class="top-bar">
+        <div class="badge">
+          <div class="badge-title">studio:<strong>grid</strong></div>
+          <div class="badge-sub">v1.0</div>
+        </div>
+        <div class="top-controls">
+          <div class="transport">
+            <button id="transport-toggle" class="icon-btn" title="Play" aria-pressed="false">
+              <i class="iconoir-play" aria-hidden="true"></i>
+            </button>
+          </div>
+          <div class="tempo-block" id="tempo-block">
+            <span class="label" id="tempo-label-top">Tempo</span>
+            <input type="number" class="input-sm" id="tempo" min="20" max="300" step="0.1" />
+          </div>
+          <div class="swing-block hidden" id="swing-block">
+            <span class="label" id="swing-label-top">Swing</span>
+            <input type="number" id="swing" min="50" max="80" step="1" />
+          </div>
+          <div class="scale-inline">
+            <span class="label">Scale</span>
+            <div class="scale-pair">
+              <select id="scale-root" aria-label="Scale root" class="input-xsm"></select>
+              <select id="scale-mode" aria-label="Scale mode" class="input-md"></select>
+            </div>
+          </div>
+        </div>
+        <div class="top-actions">
+          <button id="new-set" class="icon-btn" title="New set"><i class="iconoir-empty-page" aria-hidden="true"></i></button>
+          <button id="import" class="icon-btn" title="Load set"><i class="iconoir-upload" aria-hidden="true"></i></button>
+          <button id="export" class="icon-btn" title="Save set"><i class="iconoir-floppy-disk" aria-hidden="true"></i></button>
+          <button id="settings-btn" class="icon-btn" title="Settings"><i class="iconoir-settings" aria-hidden="true"></i></button>
+        </div>
+      </header>
+
+    <section class="global hidden"></section>
+
+    <section class="devices">
+      <div class="tabs-row">
+        <div class="tabs" id="page-tabs"></div>
+      </div>
+    </section>
+
+    <div class="layout">
+      <main class="main-panel">
+        <div class="grid-panel workspace">
+          <div class="device-toolbar">
+            <div class="device-toolbar-left">
+              <label>Type
+                <select id="seq-type" class="input-md">
+                  <option value="mono">Mono</option>
+                  <option value="poly">Poly</option>
+                  <option value="drum">Drum</option>
+                  <option value="mdtonal">MDTonal</option>
+                  <option value="cc">Control Change</option>
+                </select>
+              </label>
+              <div class="transpose-switch compact">
+                <span class="trans-label">Transpose</span>
+                <button type="button" class="transpose-step" id="transpose-dec" aria-label="Transpose down">
+                  <i class="iconoir-nav-arrow-left" aria-hidden="true"></i>
+                </button>
+                <span class="transpose-value" id="transpose-value" aria-live="polite">0</span>
+                <button type="button" class="transpose-step" id="transpose-inc" aria-label="Transpose up">
+                  <i class="iconoir-nav-arrow-right" aria-hidden="true"></i>
+                </button>
+              </div>
+              <button id="export-td3" class="icon-btn hidden" title="Export TD-3 (.seq)">
+                <i class="iconoir-emoji" aria-hidden="true"></i>
+              </button>
+              <label class ="hidden">Notes
+                <input type="text" id="device-notes" class="input-lg" placeholder="Notes for this device" />
+              </label>
+            </div>
+            <div class="device-toolbar-right">
+              <label>MIDI Out
+                <select id="midi-out" class="input-lg"></select>
+              </label>
+              <label>Ch
+                <input type="number" id="midi-chan" class="input-xsm" min="1" max="16" value="1" />
+              </label>
+            </div>
+          </div>
+          <div class="grid-wrap">
+            <div class="cc-config hidden" id="cc-config">
+              <span class="cc-label">CC</span>
+              <input
+                type="number"
+                id="cc-number"
+                class="drum-note-input input-sm"
+                min="0"
+                max="127"
+                value="1"
+                aria-label="CC number"
+                autocomplete="off"
+                inputmode="numeric"
+              />
+            </div>
+            <div class="cc-config md-config hidden" id="md-config">
+              <span class="cc-label">MD Track</span>
+              <select id="md-track" class="input-sm" aria-label="MD track">
+                <option value="1">1 BD</option>
+                <option value="2">2 SD</option>
+                <option value="3">3 HT</option>
+                <option value="4">4 MT</option>
+                <option value="5">5 LT</option>
+                <option value="6">6 CP</option>
+                <option value="7">7 RS</option>
+                <option value="8">8 CB</option>
+                <option value="9">9 CH</option>
+                <option value="10">10 OH</option>
+                <option value="11">11 RC</option>
+                <option value="12">12 CC</option>
+                <option value="13">13 M1</option>
+                <option value="14">14 M2</option>
+                <option value="15">15 M3</option>
+                <option value="16">16 M4</option>
+              </select>
+            </div>
+            <div class="drum-notes" id="drum-notes">
+              <span class="drum-notes-label">Notes</span>
+              <input type="number" class="drum-note-input input-sm" data-row="6" min="0" max="127" value="36" aria-label="Drum row 1 note" />
+              <input type="number" class="drum-note-input input-sm" data-row="5" min="0" max="127" value="38" aria-label="Drum row 2 note" />
+              <input type="number" class="drum-note-input input-sm" data-row="4" min="0" max="127" value="42" aria-label="Drum row 3 note" />
+              <input type="number" class="drum-note-input input-sm" data-row="3" min="0" max="127" value="46" aria-label="Drum row 4 note" />
+              <input type="number" class="drum-note-input input-sm" data-row="2" min="0" max="127" value="49" aria-label="Drum row 5 note" />
+              <input type="number" class="drum-note-input input-sm" data-row="1" min="0" max="127" value="51" aria-label="Drum row 6 note" />
+              <input type="number" class="drum-note-input input-sm" data-row="0" min="0" max="127" value="57" aria-label="Drum row 7 note" />
+            </div>
+            <canvas id="grid" width="640" height="320"></canvas>
+            <div id="toast" class="toast hidden"></div>
+          </div>
+          <div class="pattern-toolbar">
+            <div id="pattern-row" class="pattern-tabs"></div>
+            <div class="pattern-controls">
+              <div class="pattern-controls-left">
+                <label>Pattern
+                  <select id="pattern-select" class="input-xsm">
+                    <option value="1">1</option>
+                    <option value="2">2</option>
+                    <option value="3">3</option>
+                    <option value="4">4</option>
+                    <option value="5">5</option>
+                    <option value="6">6</option>
+                    <option value="7">7</option>
+                    <option value="8">8</option>
+                  </select>
+                </label>
+                <div class="pattern-actions inline">
+                  <button id="copy-pattern-btn" type="button" title="Copy Pattern" class="icon-btn"><i class="iconoir-table" aria-hidden="true"></i></button>
+                  <button id="copy-bar-btn" type="button" title="Copy Bar" class="icon-btn"><i class="iconoir-table-rows" aria-hidden="true"></i></button>
+                  <button id="paste-btn" type="button" title="Paste" class="icon-btn"><i class="iconoir-paste-clipboard" aria-hidden="true"></i></button>
+                  <button id="clear-btn" type="button" class="icon-btn xmark" title="Clear"><i class="iconoir-xmark" aria-hidden="true"></i></button>
+                </div>
+                <div class="pattern-scale">
+                  <label>Length</label>
+                  <div class="pattern-scale-buttons" id="pattern-length-buttons">
+                    <button type="button" class="pattern-length-btn single" id="pattern-length-toggle" data-pattern-length="16">16</button>
+                  </div>
+                </div>
+                <div class="pattern-scale">
+                  <label>Scale</label>
+                  <div class="pattern-scale-buttons">
+                    <button type="button" class="pattern-scale-btn single" id="pattern-scale-toggle" data-pattern-scale="1">1x</button>
+                  </div>
+                </div>
+              </div>
+              <div class="pattern-controls-right">
+                <div class="bar-row-wrap" id="bar-row-label">
+                  <label>Bar</label>
+                  <div class="bar-row" id="bar-row"></div>
+                </div>
+                <button id="follow-btn" class="icon-btn follow-btn" type="button" title="Follow playhead">
+                  <i class="iconoir-arrow-right-circle" aria-hidden="true"></i>
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </main>
+    </div>
+
+    <div id="settings-modal" class="modal hidden">
+      <div class="modal-body">
+        <div class="modal-head">
+          <h4>LED Settings</h4>
+          <button id="settings-close" aria-label="Close">×</button>
+        </div>
+          <div class="modal-grid">
+            <label>Tempo
+              <input type="number" id="settings-tempo" min="20" max="300" step="0.1" />
+            </label>
+            <label>UI Scale
+              <select id="ui-scale">
+                <option value="1">1x</option>
+                <option value="1.25">1.25x</option>
+                <option value="1.5" selected>1.5x</option>
+              </select>
+            </label>
+        
+          <label>Clock
+            <select id="clock-source">
+              <option value="internal">Internal</option>
+              <option value="external">External</option>
+            </select>
+          </label>
+          <label id="clock-source-wrap" class="hidden">Clock In
+            <select id="clock-input"></select>
+          </label>
+          <label class="switch-option">
+              <input type="checkbox" id="clock-out-enable" />
+              Send MIDI clock out
+          </label>
+          <label id="clock-out-wrap">Clock Out Port
+            <select id="clock-out-port"></select>
+          </label>
+          <label class="switch-option">
+              <input type="checkbox" id="auto-fill" checked />
+              Auto-fill new bars
+          </label>
+          <label class="switch-option">
+              <input type="checkbox" id="auto-load-set" />
+              Auto-load last set on start-up
+            </label>
+          <label class="switch-option">
+              <input type="checkbox" id="pattern-control-latch" />
+              Latch pattern launch page
+            </label>
+            <label>Base note length
+              <select id="base-note-length">
+                <option value="8">1/8</option>
+                <option value="16" selected>1/16</option>
+                <option value="32">1/32</option>
+              </select>
+            </label>
+            <div class="default-color-row">
+              <span class="default-color-label">Default device color</span>
+              <button type="button" id="default-color-trigger" class="color-chip" aria-label="Choose default device color"></button>
+            </div>
+            <label class="switch-option">
+              <input type="checkbox" id="allow-md-external" />
+              Allow non-TM-1 output for MD
+            </label>
+          </div>
+          <div class="modal-actions">
+            <button type="button" id="settings-restore-default" class="btn">Restore default</button>
+            <button type="button" id="settings-save-config" class="btn primary">Save config</button>
+          </div>
+      </div>
+    </div>
+    <div id="td3-modal" class="modal hidden">
+      <div class="modal-body">
+        <div class="modal-head">
+          <h4>Export TD-3</h4>
+          <button id="td3-close" aria-label="Close">×</button>
+        </div>
+        <div class="modal-grid">
+          <label>Group
+            <input type="number" id="td3-group" min="1" max="8" value="5" />
+          </label>
+          <label>Pattern
+            <input type="number" id="td3-pattern" min="1" max="16" value="8" />
+          </label>
+        </div>
+        <div class="modal-actions">
+          <button id="td3-cancel" type="button" class="btn ghost">Cancel</button>
+          <button id="td3-confirm" type="button" class="btn primary">Export .seq</button>
+        </div>
+      </div>
+    </div>
+    <div id="td3-action-modal" class="modal hidden">
+      <div class="modal-body">
+        <div class="modal-head">
+          <h4>TD-3</h4>
+          <button id="td3-action-close" aria-label="Close">×</button>
+        </div>
+        <div class="modal-actions">
+          <button id="td3-import-btn" type="button" class="btn">Import</button>
+          <button id="td3-export-btn" type="button" class="btn primary">Export</button>
+        </div>
+      </div>
+    </div>
+    <div id="td3-scale-modal" class="modal hidden">
+      <div class="modal-body">
+        <div class="modal-head">
+          <h4>Scale Mismatch</h4>
+          <button id="td3-scale-close" aria-label="Close">×</button>
+        </div>
+        <p id="td3-scale-message">Detected a different scale in the imported pattern.</p>
+        <div class="modal-actions">
+          <button id="td3-scale-fit" type="button" class="btn">Fit to current</button>
+          <button id="td3-scale-switch" type="button" class="btn primary">Switch to detected</button>
+        </div>
+      </div>
+    </div>
+    <div id="td3-replace-modal" class="modal hidden">
+      <div class="modal-body">
+        <div class="modal-head">
+          <h4>Replace current pattern?</h4>
+        </div>
+        <p>Importing a TD-3 pattern will overwrite the current pattern.</p>
+        <div class="modal-actions">
+          <button id="td3-replace-cancel" type="button" class="btn ghost">Cancel</button>
+          <button id="td3-replace-confirm" type="button" class="btn danger">Replace pattern</button>
+        </div>
+      </div>
+    </div>
+    <div id="td3-backdrop" class="backdrop hidden"></div>
+
+    <div id="settings-backdrop" class="backdrop hidden"></div>
+
+    <div id="confirm-modal" class="modal hidden">
+      <div class="modal-body">
+        <div class="modal-head">
+      <h4>Confirm clear</h4>
+        </div>
+        <p>Clear current pattern or current bar?</p>
+        <div class="modal-actions">
+          <button id="confirm-clear-cancel" class="btn ghost">Cancel</button>
+          <button id="confirm-clear-pattern" class="btn danger">Clear pattern</button>
+          <button id="confirm-clear-bar" class="btn danger">Clear bar</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- New set modal -->
+    <div id="new-set-modal" class="modal hidden">
+      <div class="modal-body">
+        <div class="modal-head">
+        <h4>Start New Set</h4>
+        </div>
+        <p>This will clear the current set and start a new.</p>
+        <label class="switch-option">
+          <input type="checkbox" id="keep-device-names" />
+          Keep device names
+        </label>
+        <label class="switch-option">
+          <input type="checkbox" id="keep-midi-settings" />
+          Keep MIDI settings
+        </label>
+        <div class="modal-actions">
+          <button id="new-set-confirm" class="btn danger">Confirm</button>
+          <button id="new-set-cancel" class="btn ghost">Cancel</button>
+        </div>
+      </div>
+    </div>
+
+  <div id="seq-modal" class="modal hidden">
+    <div class="modal-body">
+      <div class="modal-head">
+        <h4>Change Sequencer Type</h4>
+      </div>
+      <p>Switching sequencer type will clear the current pattern.</p>
+      <div class="modal-actions">
+        <button id="seq-cancel" class="btn ghost">Cancel</button> 
+        <button id="seq-keep" class="btn">Keep Current Pattern</button>       
+        <button id="seq-ok" class="btn danger">Clear Pattern</button>
+
+      </div>
+    </div>
+  </div>
+
+  <div id="toast" class="toast hidden"></div>
+
+    <div id="dialog-modal" class="modal hidden">
+      <div class="modal-body">
+        <div class="modal-head">
+        <h4 id="dialog-title">Confirm</h4>
+        </div>
+        <p id="dialog-message"></p>
+        <div class="modal-actions">
+          <button id="dialog-cancel" class="btn ghost">Cancel</button>
+          <button id="dialog-ok" class="btn danger">OK</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="rename-modal" class="modal color-modal-toast hidden">
+      <div class="modal-body">
+        <div class="modal-head">
+        <h4>Rename Device</h4>
+        </div>
+        <div class="rename-form">
+          <label>Name
+            <input id="rename-input" class="rename-input" type="text" maxlength="8" autocomplete="off" />
+          </label>
+        </div>
+        <div class="modal-actions">
+          <button id="rename-cancel" class="btn ghost">Cancel</button>
+          <button id="rename-save" class="btn primary">Save</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Device color modal -->
+    <div id="color-modal" class="modal color-modal-toast hidden">
+      <div class="modal-body">
+        <div class="modal-head">
+        <h4>Select color</h4>
+        </div>
+        <div class="color-options" id="color-options"></div>
+      </div>
+    </div>
+
+    <!-- Device context menu -->
+    <div id="device-menu" class="context-menu hidden">
+      <button id="menu-rename">Rename</button>
+      <button id="menu-color">Color</button>
+    </div>
+
+    <!-- Default color modal -->
+    <div id="default-color-modal" class="modal color-modal-toast hidden">
+      <div class="modal-body">
+        <div class="modal-head">
+        <h4>Select default color</h4>
+          <button id="default-color-close" aria-label="Close">×</button>
+        </div>
+        <div class="color-options" id="default-color-options"></div>
+      </div>
+    </div>
+
+    <!-- Note context menu -->
+    <div id="note-menu" class="context-menu hidden">
+      <button id="note-menu-accent">Accent</button>
+      <button id="note-menu-slide">Slide</button>
+    </div>
+
+    <pre id="log" class="hidden"></pre>
+    </div>
+    <script type="module" src="./main.js"></script>
+  </body>
+</html>
