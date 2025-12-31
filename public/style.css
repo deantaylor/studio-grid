@@ -63,7 +63,6 @@ body {
   border-radius: var(--radius-lg);
   background: transparent;
   box-shadow: none;
-  position: sticky;
   top: 0;
   z-index: 10;
   max-width: 772px;
