@@ -334,6 +334,13 @@ body {
   color: #1a1e14;
   border: none;
 }
+.tabs button.dragging {
+  opacity: 0.6;
+}
+.tabs button.drag-target {
+  outline: 2px dashed var(--border);
+  outline-offset: 2px;
+}
 
 .layout {
   display: flex;

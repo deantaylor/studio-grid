@@ -216,7 +216,18 @@ serial.on("grid_key", (evt) => {
     } else if (ev.type === "slide") {
       broadcast({ type: "slide_overlay", page: state.currentPage, ...ev });
     } else if (ev.type === "bar_view") {
+      followEnabled = false;
+      broadcast({ type: "follow", enabled: followEnabled });
       broadcast({ type: "bar_view", page: ev.page, pattern: ev.pattern, bar: ev.bar });
+    } else if (ev.type === "follow_toggle") {
+      followEnabled = !followEnabled;
+      broadcast({ type: "follow", enabled: followEnabled });
+    } else if (ev.type === "follow") {
+      followEnabled = !!ev.enabled;
+      broadcast({ type: "follow", enabled: followEnabled });
+    } else if (ev.type === "pattern_length") {
+      state.setPatternLength(ev.page, ev.pattern, ev.length, { autoFill: autoFillBars });
+      broadcastPatternLength(ev.page, ev.pattern);
     } else if (ev.type === "pattern_status") {
       broadcastPatternStatus(ev.page || state.currentPage);
     }
@@ -254,6 +265,7 @@ function broadcastState(ws = null) {
   const names = state.deviceNames || state.pages.map((p, idx) => (idx === 0 ? null : p?.name || `Device ${idx}`));
   const notes = state.deviceNotes || state.pages.map((p, idx) => (idx === 0 ? null : p?.note || ""));
   const colors = state.deviceColors || state.pages.map((p, idx) => (idx === 0 ? null : p?.color || "#ffb703"));
+  const deviceOrder = state.deviceOrder || Array.from({ length: 8 }, (_, i) => i + 1);
   const sequencerTypes = state.pages.map((p, idx) => (idx === 0 ? null : p?.sequencerType || "mono"));
   const activePatterns = state.pages.map((p, idx) => (idx === 0 ? null : p?.active_pattern || 1));
   const pendingPatterns = state.pages.map((p, idx) => (idx === 0 ? null : p?.pending_pattern || null));
@@ -290,10 +302,12 @@ function broadcastState(ws = null) {
     midi: state.midi,
     currentPage: state.currentPage,
     scale: state.scale,
+    setName: state.setName,
     transposes,
     names,
     notes,
     colors,
+    deviceOrder,
     sequencerTypes,
     drumNotes,
     ccNumbers,
@@ -346,6 +360,16 @@ function handleClientMessage(ws, data) {
             followEnabled = false;
             broadcast({ type: "follow", enabled: followEnabled });
             broadcast({ type: "bar_view", page: ev.page, pattern: ev.pattern, bar: ev.bar });
+          } else if (ev.type === "follow_toggle") {
+            followEnabled = !followEnabled;
+            broadcast({ type: "follow", enabled: followEnabled });
+          } else if (ev.type === "follow") {
+            followEnabled = !!ev.enabled;
+            broadcast({ type: "follow", enabled: followEnabled });
+          } else if (ev.type === "pattern_length") {
+            state.setPatternLength(ev.page, ev.pattern, ev.length, { autoFill: autoFillBars });
+            broadcastPatternLength(ev.page, ev.pattern);
+            renderAndPush();
           } else if (ev.type === "pattern_status") {
             broadcastPatternStatus(ev.page || state.currentPage);
           }
@@ -427,6 +451,15 @@ function handleClientMessage(ws, data) {
     case "set_device_color":
       state.setDeviceColor(data.page, data.color);
       broadcast({ type: "device_color", page: data.page, color: state.deviceColors[data.page] });
+      break;
+    case "set_device_order":
+      state.setDeviceOrder(data.order);
+      broadcast({ type: "device_order", order: state.deviceOrder });
+      renderAndPush();
+      break;
+    case "set_set_name":
+      state.setSetName(data.name);
+      broadcast({ type: "set_name", name: state.setName });
       break;
     case "set_page":
       if (state.setPage(data.page)) {
@@ -540,6 +573,13 @@ function handleClientMessage(ws, data) {
         state.setSequencerType(page, seq);
         broadcast({ type: "seq_type", page, seqType: seq });
       }
+      break;
+    }
+    case "pattern_poly_check": {
+      const page = Number(data.page) || state.currentPage;
+      const pattern = Number(data.pattern) || state.pages[page]?.active_pattern || 1;
+      const multi = state.patternHasPolySteps(page, pattern);
+      ws.send(JSON.stringify({ type: "pattern_poly_status", page, pattern, multi, requestId: data.requestId || null }));
       break;
     }
     case "set_cc_number":

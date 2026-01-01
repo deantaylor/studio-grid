@@ -34,6 +34,7 @@ let currentPattern = 1;
 let baseDivision = 16; // denominator of base note (1/16)
 let playheads = Array(9).fill(0);
 let deviceHeld = false;
+let draggedDevicePage = null;
 let midiSettings = Array.from({ length: 9 }, () => ({ outId: "", channel: 1 }));
 
 const canvas = document.getElementById("grid");
@@ -118,6 +119,8 @@ const seqOk = document.getElementById("seq-ok");
 const seqKeep = document.getElementById("seq-keep");
 const seqCancel = document.getElementById("seq-cancel");
 let pendingSeqType = null;
+let pendingSeqKeepAllowed = true;
+let pendingSeqRequestId = 0;
 const seqTypeSel = document.getElementById("seq-type");
 const mdTrackSel = document.getElementById("md-track");
 const ccNumberInput = document.getElementById("cc-number");
@@ -137,10 +140,21 @@ const defaultColorModal = document.getElementById("default-color-modal");
 const defaultColorModalOptions = document.getElementById("default-color-options");
 const defaultColorClose = document.getElementById("default-color-close");
 const renameModal = document.getElementById("rename-modal");
+const renameTitle = document.getElementById("rename-title");
+const renameLabel = document.getElementById("rename-label");
 const renameInput = document.getElementById("rename-input");
 const renameSave = document.getElementById("rename-save");
 const renameCancel = document.getElementById("rename-cancel");
 let renameTargetPage = null;
+let renameTargetPattern = null;
+let renameMode = "device";
+const renameDefaults = {
+  title: renameTitle?.textContent || "Rename Device",
+  label: renameLabel?.textContent || "Name",
+  maxLength: renameInput?.maxLength || 8,
+  inputMode: renameInput?.inputMode || "",
+  type: renameInput?.type || "text"
+};
 const exportTd3Btn = document.getElementById("export-td3");
 const td3Modal = document.getElementById("td3-modal");
 const td3Backdrop = document.getElementById("td3-backdrop");
@@ -177,6 +191,8 @@ const AUTO_MDTONAL_COLOR = ON_COLOR_DEFAULT;
 // context menu for device tabs
 const deviceMenu = document.getElementById("device-menu");
 const menuRename = document.getElementById("menu-rename");
+const patternLengthMenu = document.getElementById("pattern-length-menu");
+const menuPatternLengthCustom = document.getElementById("menu-pattern-length-custom");
 const menuColor = document.getElementById("menu-color");
 let menuTargetPage = null;
 const noteMenu = document.getElementById("note-menu");
@@ -294,6 +310,8 @@ let clockOutPortId = "";
 let deviceColors = Array(9).fill(defaultDeviceColor);
 deviceColors[0] = "";
 let deviceColorOverrides = Array(9).fill(false);
+let deviceOrder = Array.from({ length: 8 }, (_, i) => i + 1);
+let setName = "default";
 let activePatterns = Array.from({ length: 9 }, () => 1);
 let pendingPatterns = Array.from({ length: 9 }, () => null);
 let patternLengths = Array.from({ length: 9 }, () => Array(9).fill(16));
@@ -453,6 +471,10 @@ function connectWS() {
       if (typeof msg.monoSlidePad === "number") {
         monoSlidePad = Math.max(0, Math.min(0.5, Number(msg.monoSlidePad)));
       }
+      if (typeof msg.setName === "string") {
+        setName = msg.setName;
+        updateSetTitle(setName);
+      }
       if (msg.transposes) transposes = msg.transposes;
       if (msg.sequencerTypes) sequencerTypes = msg.sequencerTypes;
       if (msg.scale) scale = msg.scale;
@@ -482,6 +504,9 @@ function connectWS() {
       if (msg.patternTimeScales) patternTimeScales = msg.patternTimeScales;
       if (msg.barViews) barViews = msg.barViews;
       if (msg.barPlayheads) barPlayheads = msg.barPlayheads;
+      if (Array.isArray(msg.deviceOrder)) {
+        deviceOrder = normalizeDeviceOrder(msg.deviceOrder);
+      }
       if (typeof msg.follow === "boolean") followEnabled = msg.follow;
       if (typeof msg.autoFill === "boolean") autoFillBars = msg.autoFill;
       if (typeof msg.patternControlLatch === "boolean") patternControlLatch = msg.patternControlLatch;
@@ -579,6 +604,18 @@ function connectWS() {
       applyDeviceBadge();
       renderPatternRow();
       renderFrame(frames[currentPage]);
+    } else if (msg.type === "device_order") {
+      if (Array.isArray(msg.order)) {
+        deviceOrder = normalizeDeviceOrder(msg.order);
+        renderTabs();
+      }
+    } else if (msg.type === "set_name") {
+      if (typeof msg.name === "string") {
+        setName = msg.name;
+        updateSetTitle(setName);
+      }
+    } else if (msg.type === "pattern_poly_status") {
+      handlePatternPolyStatus(msg);
     } else if (msg.type === "clock_source") {
       clockSource = msg.source || clockSource;
       applyClockSourceUI();
@@ -622,6 +659,7 @@ function connectWS() {
         if (msg.page === currentPage) {
           applyPatternLengthUI();
           renderBarRow();
+          showToast(`Length set to ${msg.length}`);
         }
       }
     } else if (msg.type === "pattern_time_scale") {
@@ -921,9 +959,25 @@ function renderFrame(frame) {
   const deviceColor = getDeviceDisplayColor(currentPage);
   onColor = deviceColor || ON_COLOR_DEFAULT;
   const safeFrame = Array.isArray(frame) ? frame : new Array(WIDTH * HEIGHT).fill(0);
+  const displayFrame = safeFrame.slice();
+  const patIdx = activePatterns[currentPage] || 1;
+  const len = (patternLengths[currentPage] && patternLengths[currentPage][patIdx]) || 16;
+  const bars = Math.max(1, Math.ceil(len / 16));
+  const bar = (barViews[currentPage] && barViews[currentPage][patIdx]) || 0;
+  const rem = len % 16;
+  const lastBar = Math.max(0, bars - 1);
+  if (rem > 0 && bar === lastBar) {
+    const dimLevel = Math.max(1, Math.round((ledLevels.pattern_inactive || 4) * 0.5));
+    for (let x = rem; x < 16; x++) {
+      for (let y = 0; y < STEP_ROWS; y++) {
+        const idx = y * WIDTH + x;
+        displayFrame[idx] = Math.max(1, Math.min(displayFrame[idx] || dimLevel, dimLevel));
+      }
+    }
+  }
   if (!Array.isArray(frame)) frames[currentPage] = safeFrame;
   ctx.clearRect(0, 0, canvas.width, canvas.height);
-  safeFrame.forEach((level, idx) => {
+  displayFrame.forEach((level, idx) => {
     const x = idx % WIDTH;
     const y = Math.floor(idx / WIDTH);
     const px = x * (CELL_SIZE + CELL_GAP);
@@ -948,7 +1002,7 @@ function renderFrame(frame) {
   const currentOverlays = overlays[currentPage] || [];
   // keep numeric octave overlays persistent; only age out non-numeric markers
   const filtered = currentOverlays.filter((o) => {
-    const level = safeFrame[o.y * WIDTH + o.x] || 0;
+    const level = displayFrame[o.y * WIDTH + o.x] || 0;
     if (level <= 0) return false;
     const isNumeric = /^[-+]?\d/.test(o.text);
     if (isNumeric) return true;
@@ -1418,6 +1472,7 @@ document.getElementById("import").onclick = () => {
     reader.onload = (ev) => {
       try {
         const data = JSON.parse(ev.target.result);
+        if (!data.setName) data.setName = deriveSetNameFromFilename(fileName);
         if (ws?.readyState === WebSocket.OPEN) {
           ws.send(JSON.stringify({ type: "import_state", snapshot: data }));
           log("Import sent to server");
@@ -1586,15 +1641,58 @@ if (defaultColorTrigger) {
   defaultColorTrigger.onclick = openDefaultColorModal;
 }
 
+function normalizeDeviceOrder(order) {
+  const base = Array.from({ length: 8 }, (_, i) => i + 1);
+  if (!Array.isArray(order)) return base;
+  const clean = order
+    .map((v) => Math.round(Number(v)))
+    .filter((v) => v >= 1 && v <= 8);
+  const unique = Array.from(new Set(clean));
+  base.forEach((v) => {
+    if (!unique.includes(v)) unique.push(v);
+  });
+  return unique.slice(0, 8);
+}
+
+function updateSetTitle(name) {
+  const safe = String(name || "default").trim() || "default";
+  const display = safe.toLowerCase() === "default" ? "Untitled" : safe;
+  document.title = `studio:grid — ${display}`;
+}
+
+function deriveSetNameFromFilename(filename) {
+  const raw = String(filename || "").trim();
+  if (!raw) return "default";
+  const base = raw.replace(/\.[^.]+$/, "");
+  return base || "default";
+}
+
+function clearDragTargets() {
+  tabs?.querySelectorAll(".drag-target").forEach((el) => el.classList.remove("drag-target"));
+}
+
+function applyDeviceReorder(fromPage, toPage) {
+  const order = normalizeDeviceOrder(deviceOrder);
+  const fromIdx = order.indexOf(fromPage);
+  const toIdx = order.indexOf(toPage);
+  if (fromIdx === -1 || toIdx === -1 || fromIdx === toIdx) return;
+  order.splice(fromIdx, 1);
+  order.splice(toIdx, 0, fromPage);
+  deviceOrder = order;
+  renderTabs();
+  ws?.readyState === WebSocket.OPEN && ws.send(JSON.stringify({ type: "set_device_order", order }));
+}
+
 function renderTabs() {
   tabs.innerHTML = "";
-  for (let i = 1; i <= 8; i++) {
+  const order = normalizeDeviceOrder(deviceOrder);
+  order.forEach((page) => {
     const btn = document.createElement("button");
-    const label = deviceNames[i] && deviceNames[i].trim().length ? deviceNames[i] : `${i}`;
+    const label = deviceNames[page] && deviceNames[page].trim().length ? deviceNames[page] : `${page}`;
     btn.textContent = label;
-    btn.dataset.page = i;
-    const isActive = i === currentPage;
-    const activeBg = getDeviceDisplayColor(i);
+    btn.dataset.page = page;
+    const isActive = page === currentPage;
+    const activeBg = getDeviceDisplayColor(page);
     const inactiveBg = "var(--panel-strong)";
     if (isActive) btn.classList.add("active");
     btn.style.background = isActive ? activeBg : inactiveBg;
@@ -1602,17 +1700,42 @@ function renderTabs() {
     btn.style.boxShadow = "none";
     btn.style.border = "none";
     btn.onclick = () => {
-        updatePage(i, { fromServer: false });
-        ws?.readyState === WebSocket.OPEN && ws.send(JSON.stringify({ type: "set_page", page: i }));
+        updatePage(page, { fromServer: false });
+        ws?.readyState === WebSocket.OPEN && ws.send(JSON.stringify({ type: "set_page", page }));
     };
     btn.oncontextmenu = (e) => {
       e.preventDefault();
       e.stopPropagation();
-      menuTargetPage = i;
+      menuTargetPage = page;
       openDeviceMenu(e.clientX, e.clientY);
     };
+    btn.draggable = true;
+    btn.addEventListener("dragstart", (e) => {
+      draggedDevicePage = page;
+      btn.classList.add("dragging");
+      e.dataTransfer.effectAllowed = "move";
+    });
+    btn.addEventListener("dragend", () => {
+      draggedDevicePage = null;
+      btn.classList.remove("dragging");
+      clearDragTargets();
+    });
+    btn.addEventListener("dragover", (e) => {
+      e.preventDefault();
+      if (draggedDevicePage == null || draggedDevicePage === page) return;
+      btn.classList.add("drag-target");
+    });
+    btn.addEventListener("dragleave", () => {
+      btn.classList.remove("drag-target");
+    });
+    btn.addEventListener("drop", (e) => {
+      e.preventDefault();
+      btn.classList.remove("drag-target");
+      if (draggedDevicePage == null || draggedDevicePage === page) return;
+      applyDeviceReorder(draggedDevicePage, page);
+    });
     tabs.append(btn);
-  }
+  });
   applyDeviceBadge();
 }
 
@@ -2088,6 +2211,7 @@ if (uiScaleSel) {
 }
 applyUiScale(uiScaleSel?.value || uiScale || 1.5);
 applyPatternControlLatchUI();
+updateSetTitle(setName);
 
 function patternHasData(page) {
   const frame = frames[page] || [];
@@ -2095,11 +2219,16 @@ function patternHasData(page) {
   const playVal = ledLevels.playhead || 0;
   for (let y = 0; y < STEP_ROWS; y++) {
     for (let x = 0; x < WIDTH; x++) {
+      if (isBarSelectorCell(x, y)) continue;
       const v = frame[y * WIDTH + x] || 0;
       if (v > 0 && v !== playVal) return true; // ignore playhead-only columns
     }
   }
   return false;
+}
+
+function isBarSelectorCell(x, y) {
+  return y === 7 && x >= 9 && x <= 12;
 }
 
 if (seqTypeSel) {
@@ -2112,7 +2241,25 @@ if (seqTypeSel) {
       pendingSeqType = type;
       // revert UI until user confirms
       seqTypeSel.value = sequencerTypes[currentPage] || "mono";
-      openSeqModal();
+      const supportsPoly = type === "poly" || type === "drum";
+      if (supportsPoly) {
+        setSeqModalKeepAllowed(true);
+        openSeqModal();
+      } else if (ws?.readyState === WebSocket.OPEN) {
+        pendingSeqRequestId += 1;
+        const reqId = pendingSeqRequestId;
+        setSeqModalKeepAllowed(false);
+        openSeqModal();
+        ws.send(JSON.stringify({
+          type: "pattern_poly_check",
+          page: currentPage,
+          pattern: activePatterns[currentPage] || 1,
+          requestId: reqId
+        }));
+      } else {
+        setSeqModalKeepAllowed(true);
+        openSeqModal();
+      }
     } else {
       pendingSeqType = null;
       applySeqChange(type, false);
@@ -2318,7 +2465,7 @@ if (swingInput) {
   swingInput.addEventListener("change", () => updateSwing(swingInput.value));
 }
 if (patternLengthBtns && patternLengthBtns.length) {
-  const lenCycle = [16, 32, 64];
+  const lenCycle = [16, 32, 48, 64];
   patternLengthBtns.forEach((btn) => {
     btn.onclick = () => {
       const patIdx = activePatterns[currentPage] || 1;
@@ -2332,6 +2479,11 @@ if (patternLengthBtns && patternLengthBtns.length) {
       applyPatternLengthUI();
       renderBarRow();
       showToast(`Length set to ${nextLen}`);
+    };
+    btn.oncontextmenu = (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      openPatternLengthMenu(e.clientX, e.clientY);
     };
   });
 }
@@ -2462,29 +2614,27 @@ function showConfirmModal(show) {
 }
 
 function isCurrentPatternEmpty() {
-  const patIdx = activePatterns[currentPage] || 1;
-  const len = (patternLengths[currentPage] && patternLengths[currentPage][patIdx]) || 16;
-  const bars = Math.max(1, Math.ceil(len / 16));
-  let empty = true;
-  for (let b = 0; b < bars; b++) {
-    const snap = frames[currentPage] || [];
-    const start = b * 16;
-    const barSlice = snap.slice(start * HEIGHT, (start + 1) * 16 * HEIGHT);
-    if (barSlice.some((v) => v)) {
-      empty = false;
-      break;
+  const snap = frames[currentPage] || [];
+  for (let y = 0; y < STEP_ROWS; y++) {
+    for (let x = 0; x < WIDTH; x++) {
+      if (isBarSelectorCell(x, y)) continue;
+      const v = snap[y * WIDTH + x] || 0;
+      if (v > 0) return false;
     }
   }
-  return empty;
+  return true;
 }
 
 function isCurrentBarEmpty() {
-  const patIdx = activePatterns[currentPage] || 1;
-  const bar = (barViews[currentPage] && barViews[currentPage][patIdx]) || 0;
-  const start = bar * 16 * HEIGHT;
-  const end = start + 16 * HEIGHT;
   const snap = frames[currentPage] || [];
-  return !snap.slice(start, end).some((v) => v);
+  for (let y = 0; y < STEP_ROWS; y++) {
+    for (let x = 0; x < WIDTH; x++) {
+      if (isBarSelectorCell(x, y)) continue;
+      const v = snap[y * WIDTH + x] || 0;
+      if (v > 0) return false;
+    }
+  }
+  return true;
 }
 
 if (clearBtn) {
@@ -2893,6 +3043,18 @@ function closeSeqModal() {
   if (seqModal && !seqModal.classList.contains("hidden")) seqModal.classList.add("hidden");
 }
 
+function setSeqModalKeepAllowed(allowed) {
+  pendingSeqKeepAllowed = !!allowed;
+  if (seqKeep) seqKeep.classList.toggle("hidden", !pendingSeqKeepAllowed);
+}
+
+function handlePatternPolyStatus(msg) {
+  if (!msg || msg.requestId !== pendingSeqRequestId || !pendingSeqType) return;
+  const allowKeep = !msg.multi;
+  setSeqModalKeepAllowed(allowKeep);
+  openSeqModal();
+}
+
 function applySeqChange(type, clearPattern = true) {
   const safeType = type === "poly" || type === "drum" || type === "cc" || type === "mdtonal" ? type : "mono";
   sequencerTypes[currentPage] = safeType;
@@ -2928,6 +3090,7 @@ if (seqOk) {
 }
 if (seqKeep) {
   seqKeep.onclick = () => {
+    if (!pendingSeqKeepAllowed) return;
     if (pendingSeqType) applySeqChange(pendingSeqType, false);
     pendingSeqType = null;
   };
@@ -2937,6 +3100,7 @@ if (seqCancel) {
     pendingSeqType = null;
     // reset select to current type
     seqTypeSel.value = sequencerTypes[currentPage] || "mono";
+    setSeqModalKeepAllowed(true);
     closeSeqModal();
   };
 }
@@ -2944,6 +3108,7 @@ if (seqClose) {
   seqClose.onclick = () => {
     pendingSeqType = null;
     seqTypeSel.value = sequencerTypes[currentPage] || "mono";
+    setSeqModalKeepAllowed(true);
     closeSeqModal();
   };
 }
@@ -3049,17 +3214,65 @@ document.addEventListener("keydown", (e) => {
   }
 });
 
-function openRenameModal(page) {
+function configureRenameModal({ title, label, maxLength, inputMode, value }) {
+  if (renameTitle) renameTitle.textContent = title || renameDefaults.title;
+  if (renameLabel) {
+    const textNode = Array.from(renameLabel.childNodes).find((n) => n.nodeType === 3);
+    if (textNode) textNode.textContent = label || renameDefaults.label;
+  }
+  if (renameInput) {
+    renameInput.type = renameDefaults.type;
+    renameInput.maxLength = maxLength || renameDefaults.maxLength;
+    renameInput.inputMode = inputMode || renameDefaults.inputMode || "";
+    renameInput.value = value || "";
+  }
+}
+
+function openRenameModalForDevice(page) {
   if (!renameModal || !renameInput) return;
+  renameMode = "device";
+  renameTargetPattern = null;
   renameTargetPage = page ?? currentPage;
   const currentName = deviceNames[renameTargetPage] || `${renameTargetPage}`;
-  renameInput.value = currentName.slice(0, 10);
+  configureRenameModal({
+    title: "Rename Device",
+    label: "Name",
+    maxLength: 10,
+    inputMode: "",
+    value: currentName.slice(0, 10)
+  });
+  renameModal.classList.remove("hidden");
+  setTimeout(() => renameInput?.focus(), 0);
+}
+
+function openRenameModalForPatternLength() {
+  if (!renameModal || !renameInput) return;
+  renameMode = "pattern_length";
+  renameTargetPage = null;
+  renameTargetPattern = activePatterns[currentPage] || 1;
+  const current = (patternLengths[currentPage] && patternLengths[currentPage][renameTargetPattern]) || 16;
+  configureRenameModal({
+    title: "Custom Pattern Length",
+    label: "Length (1-64)",
+    maxLength: 2,
+    inputMode: "numeric",
+    value: String(current)
+  });
   renameModal.classList.remove("hidden");
   setTimeout(() => renameInput?.focus(), 0);
 }
 function closeRenameModal() {
   if (renameModal) renameModal.classList.add("hidden");
   renameTargetPage = null;
+  renameTargetPattern = null;
+  renameMode = "device";
+  configureRenameModal({
+    title: renameDefaults.title,
+    label: renameDefaults.label,
+    maxLength: renameDefaults.maxLength,
+    inputMode: renameDefaults.inputMode,
+    value: ""
+  });
 }
 if (renameCancel) renameCancel.onclick = closeRenameModal;
 if (renameInput) {
@@ -3074,9 +3287,23 @@ if (renameInput) {
 }
 if (renameSave) {
   renameSave.onclick = () => {
-    if (!renameTargetPage && renameTargetPage !== 0) return closeRenameModal();
     const raw = (renameInput?.value || "").trim();
-    if (!raw.length) return;
+    if (!raw.length) return closeRenameModal();
+    if (renameMode === "pattern_length") {
+      const parsed = Math.max(1, Math.min(64, Math.round(Number(raw) || 0)));
+      if (!parsed) return closeRenameModal();
+      const patIdx = renameTargetPattern || (activePatterns[currentPage] || 1);
+      if (!patternLengths[currentPage]) patternLengths[currentPage] = [];
+      patternLengths[currentPage][patIdx] = parsed;
+      ws?.readyState === WebSocket.OPEN &&
+        ws.send(JSON.stringify({ type: "set_pattern_length", pattern: patIdx, length: parsed }));
+      applyPatternLengthUI();
+      renderBarRow();
+      showToast(`Length set to ${parsed}`);
+      closeRenameModal();
+      return;
+    }
+    if (!renameTargetPage && renameTargetPage !== 0) return closeRenameModal();
     const trimmed = raw.slice(0, 10);
     deviceNames[renameTargetPage] = trimmed;
     applyDeviceBadge();
@@ -3092,6 +3319,7 @@ function openDeviceMenu(x, y) {
   closeNoteMenu();
   closeColorModal();
   closeDefaultColorModal();
+  closePatternLengthMenu();
   const scale = Number(uiScale) || 1;
   const menuRect = deviceMenu.getBoundingClientRect();
   const menuW = menuRect.width / scale;
@@ -3110,9 +3338,34 @@ function closeDeviceMenu() {
   if (deviceMenu) deviceMenu.classList.add("hidden");
 }
 
+function openPatternLengthMenu(x, y) {
+  if (!patternLengthMenu) return;
+  closeDeviceMenu();
+  closeNoteMenu();
+  closeColorModal();
+  closeDefaultColorModal();
+  const scale = Number(uiScale) || 1;
+  const menuRect = patternLengthMenu.getBoundingClientRect();
+  const menuW = menuRect.width / scale;
+  const menuH = menuRect.height / scale;
+  const vw = window.innerWidth / scale;
+  const vh = window.innerHeight / scale;
+  let left = x / scale;
+  let top = y / scale;
+  if (left + menuW > vw) left = vw - menuW - 8;
+  if (top + menuH > vh) top = vh - menuH - 8;
+  patternLengthMenu.style.left = `${left}px`;
+  patternLengthMenu.style.top = `${top}px`;
+  patternLengthMenu.classList.remove("hidden");
+}
+function closePatternLengthMenu() {
+  if (patternLengthMenu) patternLengthMenu.classList.add("hidden");
+}
+
 function openNoteMenu(x, y, info = {}) {
   if (!noteMenu) return;
   closeDeviceMenu();
+  closePatternLengthMenu();
   closeColorModal();
   closeDefaultColorModal();
   const scale = Number(uiScale) || 1;
@@ -3154,6 +3407,9 @@ document.addEventListener("click", (e) => {
   if (deviceMenu && !deviceMenu.classList.contains("hidden") && !deviceMenu.contains(e.target)) {
     closeDeviceMenu();
   }
+  if (patternLengthMenu && !patternLengthMenu.classList.contains("hidden") && !patternLengthMenu.contains(e.target)) {
+    closePatternLengthMenu();
+  }
   if (noteMenu && !noteMenu.classList.contains("hidden") && !noteMenu.contains(e.target)) {
     closeNoteMenu();
   }
@@ -3161,6 +3417,9 @@ document.addEventListener("click", (e) => {
 document.addEventListener("contextmenu", (e) => {
   if (deviceMenu && !deviceMenu.classList.contains("hidden") && !deviceMenu.contains(e.target)) {
     closeDeviceMenu();
+  }
+  if (patternLengthMenu && !patternLengthMenu.classList.contains("hidden") && !patternLengthMenu.contains(e.target)) {
+    closePatternLengthMenu();
   }
   if (noteMenu && !noteMenu.classList.contains("hidden") && !noteMenu.contains(e.target)) {
     closeNoteMenu();
@@ -3178,7 +3437,7 @@ if (menuRename) {
     closeDeviceMenu();
     if (!menuTargetPage) return;
     if (renameModal && renameInput) {
-      openRenameModal(menuTargetPage);
+      openRenameModalForDevice(menuTargetPage);
       return;
     }
     const currentName = deviceNames[menuTargetPage] || `${menuTargetPage}`;
@@ -3191,6 +3450,12 @@ if (menuRename) {
       ws?.readyState === WebSocket.OPEN &&
         ws.send(JSON.stringify({ type: "set_device_name", page: menuTargetPage, name: trimmed }));
     }
+  };
+}
+if (menuPatternLengthCustom) {
+  menuPatternLengthCustom.onclick = () => {
+    closePatternLengthMenu();
+    openRenameModalForPatternLength();
   };
 }
 if (noteMenuAccent) {

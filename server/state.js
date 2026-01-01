@@ -44,6 +44,8 @@ export class MGridState {
     this.deviceNames = this.pages.map((p, i) => (i === 0 ? null : p.name));
     this.deviceNotes = this.pages.map((p, i) => (i === 0 ? null : p.note));
     this.deviceColors = this.pages.map((p, i) => (i === 0 ? null : p.color));
+    this.deviceOrder = Array.from({ length: 8 }, (_, i) => i + 1);
+    this.setName = "default";
     this.currentPage = 1;
     this.playheads = Array(9).fill(0); // 1-indexed
     this.lastTickTime = 0;
@@ -86,6 +88,42 @@ export class MGridState {
     this.pendingOctaveOverlays = [];
     this.holdTimers = new Map(); // key -> timeout id for entering edit mode
     this.requestRender = null; // optional callback wired by server to force a render
+  }
+
+  normalizeDeviceOrder(order) {
+    const base = Array.from({ length: 8 }, (_, i) => i + 1);
+    if (!Array.isArray(order)) return base;
+    const clean = order
+      .map((v) => Math.round(Number(v)))
+      .filter((v) => v >= 1 && v <= 8);
+    const unique = Array.from(new Set(clean));
+    base.forEach((v) => {
+      if (!unique.includes(v)) unique.push(v);
+    });
+    return unique.slice(0, 8);
+  }
+
+  setDeviceOrder(order) {
+    this.deviceOrder = this.normalizeDeviceOrder(order);
+  }
+
+  getDeviceByColumn(col) {
+    const safeCol = clamp(Math.round(col || 0), 0, 7);
+    const order = this.normalizeDeviceOrder(this.deviceOrder);
+    return order[safeCol] || (safeCol + 1);
+  }
+
+  setSetName(name) {
+    const clean = String(name || "").trim().slice(0, 64);
+    this.setName = clean || "default";
+  }
+
+  patternHasPolySteps(pageIdx, patternIdx) {
+    if (pageIdx < 1 || pageIdx > 8) return false;
+    if (patternIdx < 1 || patternIdx > 8) return false;
+    const pat = this.pages[pageIdx]?.patterns?.[patternIdx];
+    if (!pat || !Array.isArray(pat.steps)) return false;
+    return pat.steps.some((s) => Array.isArray(s?.notes) && s.notes.length > 1);
   }
 
   resetTickCounters() {
@@ -234,6 +272,7 @@ export class MGridState {
   resetSet({ defaultColor, keepDeviceNames = false, keepMidi = false } = {}) {
     const fallbackColor = safeColor(defaultColor, BASE_DEFAULT_DEVICE_COLOR);
     const newColors = [null];
+    const newNotes = [null];
     if (!keepMidi) {
       this.midi = this.buildDefaultMidi();
     }
@@ -257,7 +296,10 @@ export class MGridState {
       page.muted = false; // legacy mute flag
       page.sequencerStopped = false;
       page.sequencerType = "mono";
+      page.transpose = 0;
       page.drumNotes = Array.isArray(page.drumNotes) ? page.drumNotes.slice(0, 7) : [36, 38, 41, 43, 45, 47, 55];
+      page.note = "";
+      page.ccNumber = DEFAULT_CC;
       this.sequencerTypes[p] = "mono";
       page.mdTrack = 1;
       const paletteColor = DEFAULT_DEVICE_COLORS[p - 1] || fallbackColor;
@@ -269,9 +311,20 @@ export class MGridState {
       } else if (this.deviceNames?.[p]) {
         page.name = this.deviceNames[p];
       }
+      newNotes[p] = "";
     }
     this.deviceColors = newColors;
+    this.deviceNotes = newNotes;
     this.playheads = Array(9).fill(0);
+    this.deviceOrder = Array.from({ length: 8 }, (_, i) => i + 1);
+    this.setName = "default";
+    this.currentPage = 1;
+    this.heldStep = null;
+    this.heldStepModified = false;
+    this.heldStepPendingOff = false;
+    this.deviceHeld = false;
+    this.patternHeld = false;
+    this.patternControlHeld = false;
     this.resetTickCounters();
     this.pageTickPos = Array(9).fill(-1);
   }
@@ -550,6 +603,7 @@ export class MGridState {
       };
     });
     return {
+      setName: this.setName,
       tempo: this.tempo,
       swing: this.swing,
       baseDivision: this.baseDivision,
@@ -560,6 +614,7 @@ export class MGridState {
       deviceNames: this.deviceNames,
       deviceNotes: this.deviceNotes,
       deviceColors: this.deviceColors,
+      deviceOrder: this.deviceOrder,
       midi: this.midi,
       ledLevels: { ...this.ledLevels },
       ccNumbers: this.pages.map((p, idx) => (idx === 0 ? null : clamp(Math.round(p?.ccNumber ?? DEFAULT_CC), 0, 127))),
@@ -571,6 +626,9 @@ export class MGridState {
 
   loadSnapshot(snap) {
     if (!snap || typeof snap !== "object") return false;
+    if (typeof snap.setName === "string") {
+      this.setSetName(snap.setName);
+    }
     if (snap.tempo) this.tempo = clamp(Number(snap.tempo) || 120, 20, 300);
     if (snap.swing) this.swing = clamp(Number(snap.swing) || 50, 50, 80);
     if (snap.baseDivision) this.setBaseDivision(snap.baseDivision);
@@ -593,6 +651,7 @@ export class MGridState {
     if (Array.isArray(snap.deviceNames)) this.deviceNames = snap.deviceNames.slice(0, 9);
     if (Array.isArray(snap.deviceNotes)) this.deviceNotes = snap.deviceNotes.slice(0, 9);
     if (Array.isArray(snap.deviceColors)) this.deviceColors = snap.deviceColors.slice(0, 9);
+    if (Array.isArray(snap.deviceOrder)) this.deviceOrder = this.normalizeDeviceOrder(snap.deviceOrder);
     if (Array.isArray(snap.midi)) this.midi = snap.midi.slice(0, 9);
     if (Array.isArray(snap.ccNumbers)) {
       snap.ccNumbers.forEach((cc, idx) => {
@@ -690,6 +749,10 @@ export class MGridState {
       return this.handlePatternControlKey(x, y, s);
     }
     // Pattern control toggle (pattern launcher) is always handled first
+    if (y === 7 && x === PATTERN_CONTROL_BUTTON && this.patternHeld) {
+      if (s !== 1) return null;
+      return { type: "follow_toggle" };
+    }
     if (y === 7 && x === PATTERN_CONTROL_BUTTON) {
       if (this.patternControlLatch) {
         if (s === 1) {
@@ -732,6 +795,26 @@ export class MGridState {
 
     // bottom row y=7 for controls
     if (y === 7) {
+      if (x >= 9 && x <= 12) {
+        if (s !== 1) return null;
+        if (this.patternHeld) {
+          const lengths = [16, 32, 48, 64];
+          const target = x - 9;
+          const nextLen = lengths[target];
+          if (!nextLen) return null;
+          return { type: "pattern_length", page: this.currentPage, pattern: this.pages[this.currentPage]?.active_pattern || 1, length: nextLen };
+        }
+        const page = this.pages[this.currentPage];
+        const patIdx = page?.active_pattern || 1;
+        const pat = page?.patterns?.[patIdx];
+        if (!pat) return null;
+        const bars = Math.max(1, Math.ceil((pat.length_steps || 16) / 16));
+        const maxBars = Math.min(4, bars);
+        const target = x - 9;
+        if (target >= maxBars) return null;
+        this.setBarView(this.currentPage, patIdx, target);
+        return { type: "bar_view", page: this.currentPage, pattern: patIdx, bar: target };
+      }
       if (x === 14) {
         // pattern switch modifier (immediate)
         this.patternHeld = s === 1;
@@ -744,7 +827,8 @@ export class MGridState {
           this.setPattern(idx, this.currentPage);
           return { type: "pattern_status", page: this.currentPage };
         } else {
-          this.setPage(idx);
+          const pageIdx = this.getDeviceByColumn(x);
+          this.setPage(pageIdx);
         }
       }
       return;
@@ -752,7 +836,9 @@ export class MGridState {
     if (y >= 0 && y < 7) {
       const page = this.pages[this.currentPage];
       const pat = this.getPattern();
+      const len = Math.max(1, pat?.length_steps || 16);
       const abs = pat ? x + pat.barView * 16 : -1;
+      if (abs < 0 || abs >= len) return null;
       const step = pat && abs >= 0 ? pat.steps[abs] : null;
       const seqType = page?.sequencerType || "mono";
       if (seqType === "cc") {
@@ -1252,14 +1338,15 @@ export class MGridState {
       if (x === 15) return null;
       if (s !== 1) return null;
       if (x >= 0 && x < 8) {
-        const stopRes = this.queueDeviceSequencerToggle(x + 1);
-        return stopRes ? { type: "device_sequencer", page: x + 1 } : null;
+        const pageIdx = this.getDeviceByColumn(x);
+        const stopRes = this.queueDeviceSequencerToggle(pageIdx);
+        return stopRes ? { type: "device_sequencer", page: pageIdx } : null;
       }
       return null;
     }
     if (x >= 0 && x < 8 && y >= 0 && y <= 6 && s === 1) {
       const patternIdx = y + 1; // top row = pattern 1
-      const pageIdx = x + 1;
+      const pageIdx = this.getDeviceByColumn(x);
       const hasData = this.patternHasData(pageIdx, patternIdx);
       if (hasData) {
         this.setPattern(patternIdx, pageIdx);
@@ -1296,7 +1383,8 @@ export class MGridState {
   handleCCKey(x, y, s, pat) {
     if (!pat) return null;
     const abs = x + (pat.barView || 0) * 16;
-    if (abs < 0 || abs >= pat.steps.length) return null;
+    const len = Math.max(1, pat.length_steps || 16);
+    if (abs < 0 || abs >= len) return null;
     const step = pat.steps[abs];
     if (!step) return null;
     if (s === 1) {
@@ -1681,7 +1769,7 @@ export class MGridState {
   }
 
   tick(follow = false, externalStepMs = null) {
-    const barChanges = follow ? this.applyFollow() : [];
+    const barChanges = [];
     const barPlayheadChanges = [];
     const midiEvents = [];
     this.lastTickTime = Date.now();
@@ -1919,19 +2007,22 @@ export class MGridState {
       // pattern/mute changes handled before step processing for tighter LED alignment
     }
     this.tickCount = (this.tickCount + 1) % 1024;
+    if (follow) {
+      barChanges.push(...this.applyFollowToPlayhead());
+    }
     const ledFrame = this.renderLED();
     return { midiEvents, ledFrame, patternSwitches, barChanges, barPlayheadChanges };
   }
 
-  applyFollow() {
+  applyFollowToPlayhead() {
     const changes = [];
     const page = this.pages[this.currentPage];
-    if (!page) return changes;
+    if (!page || page.sequencerStopped) return changes;
     const pat = page.patterns[page.active_pattern];
     if (!pat) return changes;
     const len = Math.max(1, pat.length_steps || 16);
     const bars = Math.max(1, Math.ceil(len / 16));
-    const pos = this.playheads[this.currentPage] % len;
+    const pos = (this.playheads[this.currentPage] ?? 0) % len;
     const bar = Math.min(bars - 1, Math.floor(pos / 16));
     if (pat.barView !== bar) {
       pat.barView = bar;
@@ -2079,7 +2170,7 @@ export class MGridState {
     const PLAYHEAD = this.ledLevels.playhead;
     const frame = new Array(WIDTH * HEIGHT).fill(OFF);
     for (let col = 0; col < 8; col++) {
-      const pageIdx = col + 1;
+      const pageIdx = this.getDeviceByColumn(col);
       const page = this.pages[pageIdx];
       if (!page) continue;
       const active = page.active_pattern;
@@ -2135,7 +2226,7 @@ export class MGridState {
     const blinkFast = Math.floor(tMs / 150) % 2 === 0;
     const blinkSlow = Math.floor(tMs / 320) % 2 === 0;
     for (let col = 0; col < 8; col++) {
-      const pageIdx = col + 1;
+      const pageIdx = this.getDeviceByColumn(col);
       const page = this.pages[pageIdx];
       if (!page) continue;
       const active = page.active_pattern;
@@ -2306,7 +2397,10 @@ export class MGridState {
         });
       }
       if (!page.sequencerStopped) {
-        const ph = this.playheads[this.currentPage] % Math.max(1, pat.length_steps);
+        const scaleFactor = Math.max(1, Math.round(pat.time_scale || 1));
+        const currentTicks = this.pageTicks[this.currentPage] || 0;
+        const len = Math.max(1, pat.length_steps);
+        const ph = Math.floor(currentTicks / scaleFactor) % len;
         const phBar = Math.floor(ph / 16);
         if (phBar === bar) {
           const phX = ph % 16;
@@ -2384,8 +2478,9 @@ export class MGridState {
       frame[7 * WIDTH + PATTERN_CONTROL_BUTTON] = ctlLevel;
     } else {
       for (let i = 0; i < 8; i++) {
-        const dev = this.pages[i + 1];
-        const isCurrent = this.currentPage === i + 1;
+        const pageIdx = this.getDeviceByColumn(i);
+        const dev = this.pages[pageIdx];
+        const isCurrent = this.currentPage === pageIdx;
         const isDevStopped = dev?.sequencerStopped;
         const hasData = dev?.patterns?.some((pat, idx) => idx > 0 && pat?.steps?.some((s) => s.on));
         const pendingStop = dev?.pendingStop;
@@ -2396,9 +2491,9 @@ export class MGridState {
           frame[7 * WIDTH + i] = isDevStopped ? PATTERN_MUTED : DEVICE_ACTIVE;
         } else if (isDevStopped) {
           frame[7 * WIDTH + i] = PATTERN_INACTIVE;
-      } else {
-        frame[7 * WIDTH + i] = hasData ? DEVICE_HAS_DATA : DEVICE_PRESENT;
-      }
+        } else {
+          frame[7 * WIDTH + i] = hasData ? DEVICE_HAS_DATA : DEVICE_PRESENT;
+        }
       }
       // const isPending = page && page.pending_pattern;
       // const isMuted = page?.muted;
@@ -2406,6 +2501,33 @@ export class MGridState {
       const ctlLevel = (this.patternControlMode || this.patternControlHeld) ? PATTERN_ACTIVE : PATTERN_INACTIVE;
       frame[7 * WIDTH + 14] = PATTERN_INACTIVE;
       frame[7 * WIDTH + PATTERN_CONTROL_BUTTON] = ctlLevel;
+    }
+    if (page?.patterns?.[page.active_pattern]) {
+      const barPat = page.patterns[page.active_pattern];
+      const bars = Math.max(1, Math.ceil((barPat.length_steps || 16) / 16));
+      const maxBars = Math.min(4, bars);
+      const storedBar = barPat.barView || 0;
+      const playingBar = (!page.sequencerStopped && Number.isFinite(this.playheads[this.currentPage]))
+        ? Math.min(bars - 1, Math.floor((this.playheads[this.currentPage] % Math.max(1, barPat.length_steps || 16)) / 16))
+        : null;
+      for (let i = 0; i < 4; i++) {
+        const idx = 7 * WIDTH + (9 + i);
+        if (this.patternHeld) {
+          frame[idx] = i < maxBars ? PATTERN_HAS_DATA : PATTERN_INACTIVE;
+          continue;
+        }
+        if (i >= maxBars) {
+          frame[idx] = OFF;
+          continue;
+        }
+        let level = PATTERN_INACTIVE;
+        if (playingBar === i) {
+          level = this.pulse ? PATTERN_PENDING : PATTERN_INACTIVE;
+        } else if (storedBar === i) {
+          level = PATTERN_HAS_DATA;
+        }
+        frame[idx] = level;
+      }
     }
     return frame;
   }

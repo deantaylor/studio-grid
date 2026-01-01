@@ -393,10 +393,10 @@
     <div id="rename-modal" class="modal color-modal-toast hidden">
       <div class="modal-body">
         <div class="modal-head">
-        <h4>Rename Device</h4>
+        <h4 id="rename-title">Rename Device</h4>
         </div>
         <div class="rename-form">
-          <label>Name
+          <label id="rename-label">Name
             <input id="rename-input" class="rename-input" type="text" maxlength="8" autocomplete="off" />
           </label>
         </div>
@@ -421,6 +421,11 @@
     <div id="device-menu" class="context-menu hidden">
       <button id="menu-rename">Rename</button>
       <button id="menu-color">Color</button>
+    </div>
+
+    <!-- Pattern length context menu -->
+    <div id="pattern-length-menu" class="context-menu hidden">
+      <button id="menu-pattern-length-custom">Custom pattern length</button>
     </div>
 
     <!-- Default color modal -->
