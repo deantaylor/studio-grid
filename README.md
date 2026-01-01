@@ -1,2 +1,2 @@
 # studio-grid
-a grid based sequencer for monome (and without)
+a multi-sequencer for monome (and without)
