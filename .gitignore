@@ -4,3 +4,4 @@ __MACOSX/*
 scripts/*
 logs/*
 .DS_Store
+debug/*
