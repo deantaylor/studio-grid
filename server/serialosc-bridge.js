@@ -26,13 +26,13 @@ export class SerialOSCBridge extends EventEmitter {
     return arg && typeof arg === "object" && "value" in arg ? arg.value : arg;
   }
 
-  allocatePort(deviceId) {
-    if (this.portMap.has(deviceId)) return this.portMap.get(deviceId);
+  allocatePort(deviceId, startAt = null) {
+    if (this.portMap.has(deviceId) && startAt == null) return this.portMap.get(deviceId);
     const used = new Set(this.portMap.values());
-    let candidate = this.nextPort;
+    let candidate = startAt != null ? startAt : this.nextPort;
     while (used.has(candidate)) candidate += 1;
     this.portMap.set(deviceId, candidate);
-    this.nextPort = candidate + 1;
+    this.nextPort = Math.max(this.nextPort, candidate + 1);
     return candidate;
   }
 
@@ -134,13 +134,12 @@ export class SerialOSCBridge extends EventEmitter {
       return { cols: 16, rows: 8 };
     };
     const initSize = guessSize();
-    const listenPort = this.allocatePort(key);
     const device = {
       id: key,
       type: type || "",
       host,
       port,
-      listenPort,
+      listenPort: this.allocatePort(key),
       gridCols: initSize.cols,
       gridRows: initSize.rows,
       supportsLevels,
@@ -151,16 +150,21 @@ export class SerialOSCBridge extends EventEmitter {
       connected: false
     };
     this.devices.set(key, device);
+    this.openDevicePort(device);
+  }
 
-    device.devicePort = new osc.UDPPort({
+  openDevicePort(device, retryCount = 0) {
+    if (!device) return;
+    const portRef = new osc.UDPPort({
       localAddress: ANYHOST,
-      localPort: listenPort, // stable port per device/id
-      remoteAddress: host,
-      remotePort: port,
+      localPort: device.listenPort, // stable port per device/id
+      remoteAddress: device.host,
+      remotePort: device.port,
       metadata: true
     });
 
-    const portRef = device.devicePort;
+    device.devicePort = portRef;
+
     portRef.on("ready", () => {
       if (!device.devicePort || device.devicePort !== portRef || !portRef.options) return;
       this.emit("log", `device ready ${device.id} (local ${portRef.options.localPort})`);
@@ -189,7 +193,13 @@ export class SerialOSCBridge extends EventEmitter {
       portRef.send({ address: "/sys/info", args: [] });
       setTimeout(() => {
         // port may have been closed before the delayed resend; bail quietly if so
-        if (!device.devicePort || device.devicePort !== portRef || !portRef.socket || !portRef.socket._handle) return;
+        if (!device.devicePort || device.devicePort !== portRef || !portRef.socket) return;
+        try {
+          // address() throws if the underlying dgram socket is closed/not bound.
+          portRef.socket.address();
+        } catch (err) {
+          return;
+        }
         try {
           portRef.send({
             address: "/sys/host",
@@ -233,12 +243,24 @@ export class SerialOSCBridge extends EventEmitter {
       }
     });
     portRef.on("error", (e) => {
+      if (!device.devicePort || device.devicePort !== portRef) return;
+      if (e?.code === "EADDRINUSE" && retryCount < 4) {
+        const nextPort = this.allocatePort(device.id, (device.listenPort || DEVICE_LISTEN_PORT) + 1);
+        this.emit("log", `port ${device.listenPort} in use; retrying on ${nextPort}`);
+        device.listenPort = nextPort;
+        try {
+          portRef.close();
+        } catch (err) {}
+        this.openDevicePort(device, retryCount + 1);
+        return;
+      }
       this.emit("error", e);
       this.markDisconnected(device.id);
       this.devices.delete(device.id);
       this.scheduleRediscover();
     });
     portRef.on("close", () => {
+      if (!device.devicePort || device.devicePort !== portRef) return;
       this.emit("log", "device connection closed");
       this.markDisconnected(device.id);
       this.devices.delete(device.id);

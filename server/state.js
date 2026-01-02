@@ -970,7 +970,6 @@ export class MGridState {
           } else {
             step.degree = targetDegree;
             step.notes = [targetDegree];
-            step.slide = false;
             step.octave = 0;
           }
           step.micro = 0;
@@ -1518,18 +1517,9 @@ export class MGridState {
     const prevDeg = step.degree || 0;
     const yPos = clamp(6 - prevDeg, 0, 6);
     const xPos = abs % 16;
-    // clear any slide relationships involving this step
+    // clear slide/tie on this step only; preserve previous links when clearing/moving targets
     step.slide = false;
     step.mdSlide = false;
-    if (abs > 0) {
-      const prev = pat.steps[abs - 1];
-      if (prev && prev.slide) prev.slide = false;
-      if (prev && prev.mdSlide) prev.mdSlide = false;
-      if (prev && prev.tie) prev.tie = false;
-    }
-    const next = pat.steps[abs + 1];
-    if (next && step.slide) step.slide = false;
-    if (next && step.mdSlide) step.mdSlide = false;
     step.on = false;
     step.degree = 0;
     step.octave = 0;
@@ -1918,7 +1908,9 @@ export class MGridState {
                 vel: step.accent ? 120 : 96,
                 durMs: noteDur,
                 delayMs,
-                chan: trackCfg.noteChannel
+                chan: trackCfg.noteChannel,
+                accent: !!step.accent,
+                td3Slide: false
               });
             }
           }
@@ -1945,6 +1937,7 @@ export class MGridState {
             : [step.degree || 0];
           const mode = (this.scale && this.scale.mode) || "major";
           if (seqTypePlay === "mono") {
+            // DO NOT CHANGE LOGIC: TD-3 slide playback behavior depends on this exact block.
             const pageTranspose = this.pages[p].transpose || 0;
             const pitchCur = this.calcPitch(pat.root || 0, mode, step.degree || 0, step.octave || 0) + pageTranspose;
             const prevSlidesHere = prevStep?.on && prevStep?.slide;
@@ -1959,7 +1952,17 @@ export class MGridState {
               }
               if (!step.slide) {
                 const durMs = Math.max(1, Math.round(baseDur - this.noteOffEpsilonMs)); // slide ended; play target at normal length
-                midiEvents.push({ type: "midi_note", page: p, pitch: pitchCur, vel: noteVel, durMs, delayMs, chan });
+                midiEvents.push({
+                  type: "midi_note",
+                  page: p,
+                  pitch: pitchCur,
+                  vel: noteVel,
+                  durMs,
+                  delayMs,
+                  chan,
+                  accent: !!step.accent,
+                  td3Slide: false
+                });
                 continue;
               }
               // Trim by swing/epsilon plus a small margin so the slide gate doesn't run past the following note.
@@ -1967,7 +1970,17 @@ export class MGridState {
               const slidePad = this.monoSlidePad || 0;
               const padMs = this.noteOffEpsilonMs + delayMs + Math.round(chainDurMs * slidePad);
               const durMs = Math.max(1, Math.round(chainDurMs - padMs));
-              midiEvents.push({ type: "midi_note", page: p, pitch: pitchCur, vel: noteVel, durMs, delayMs, chan });
+              midiEvents.push({
+                type: "midi_note",
+                page: p,
+                pitch: pitchCur,
+                vel: noteVel,
+                durMs,
+                delayMs,
+                chan,
+                accent: !!step.accent,
+                td3Slide: true
+              });
               continue;
             }
             if (isSlideStart) {
@@ -1975,12 +1988,32 @@ export class MGridState {
               const slidePad = this.monoSlidePad || 0;
               const padMs = this.noteOffEpsilonMs + delayMs + Math.round(chainDurMs * slidePad);
               const durMs = Math.max(1, Math.round(chainDurMs - padMs)); // hold through the chain without overshooting
-              midiEvents.push({ type: "midi_note", page: p, pitch: pitchCur, vel: noteVel, durMs, delayMs, chan });
+              midiEvents.push({
+                type: "midi_note",
+                page: p,
+                pitch: pitchCur,
+                vel: noteVel,
+                durMs,
+                delayMs,
+                chan,
+                accent: !!step.accent,
+                td3Slide: true
+              });
               continue;
             }
             if (step.tie) {
               const durMs = baseDur * 2; // tie adds one step
-              midiEvents.push({ type: "midi_note", page: p, pitch: pitchCur, vel: noteVel, durMs, delayMs, chan });
+              midiEvents.push({
+                type: "midi_note",
+                page: p,
+                pitch: pitchCur,
+                vel: noteVel,
+                durMs,
+                delayMs,
+                chan,
+                accent: !!step.accent,
+                td3Slide: false
+              });
               this.skipNextNote = this.skipNextNote || {};
               this.skipNextNote[p] = (pos + 1) % len;
               continue;
@@ -2000,7 +2033,18 @@ export class MGridState {
             const noteVel = (seqTypePlay === "poly" || seqTypePlay === "drum")
               ? (Array.isArray(step.accented) && step.accented.includes(deg) ? 120 : 96)
               : (step.accent ? 120 : 96);
-            midiEvents.push({ type: "midi_note", page: p, pitch, vel: noteVel, durMs, delayMs, chan });
+            const isAccent = noteVel >= 120;
+            midiEvents.push({
+              type: "midi_note",
+              page: p,
+              pitch,
+              vel: noteVel,
+              durMs,
+              delayMs,
+              chan,
+              accent: isAccent,
+              td3Slide: false
+            });
           });
         }
       }
@@ -2262,6 +2306,7 @@ export class MGridState {
     return frame;
   }
 
+  // DO NOT CHANGE LOGIC: monome LED frame generation depends on this exact pipeline.
   renderLED(slideTimeMs, opts = {}) {
     const includeOctaveHint = opts.includeOctaveHint !== false;
     const WIDTH = 16;
@@ -2397,10 +2442,9 @@ export class MGridState {
         });
       }
       if (!page.sequencerStopped) {
-        const scaleFactor = Math.max(1, Math.round(pat.time_scale || 1));
-        const currentTicks = this.pageTicks[this.currentPage] || 0;
         const len = Math.max(1, pat.length_steps);
-        const ph = Math.floor(currentTicks / scaleFactor) % len;
+        // Use the computed playhead to avoid the pageTicks pre-increment offset.
+        const ph = Math.max(0, Math.floor(this.playheads[this.currentPage] ?? 0)) % len;
         const phBar = Math.floor(ph / 16);
         if (phBar === bar) {
           const phX = ph % 16;

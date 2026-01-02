@@ -5,3 +5,4 @@ scripts/*
 logs/*
 .DS_Store
 debug/*
+spec/*

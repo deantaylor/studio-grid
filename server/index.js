@@ -3,7 +3,6 @@ import { readFile, stat } from "fs/promises";
 import path from "path";
 import { fileURLToPath } from "url";
 import { WebSocketServer } from "ws";
-import { performance } from "perf_hooks";
 import { SerialOSCBridge } from "./serialosc-bridge.js";
 import { buildTd3Seq, parseTd3SeqBuffer, detectScale, importTd3Pattern } from "./td3.js";
 import { MGridState } from "./state.js";
@@ -64,23 +63,23 @@ const wss = new WebSocketServer({ server });
 const serial = new SerialOSCBridge({ prefix: "mgrid" });
 const state = new MGridState();
 state.requestRender = () => renderAndPush(true);
-let clockTimer = null;
-let clockMode = "stopped"; // "internal" | "stopped" | "external"
+const PPQN = 24;
+const TICKS_PER_STEP = 6;
 let clockSource = "external"; // default to external clock
 let clockInputId = "IAC Driver Bus 2"; // preferred default
-let manualRunning = false; // user start/stop button
-let midiListeners = new Set(); // track ws subscribed to midi messages
+let transport = {
+  running: false,
+  mode: "EXTERNAL_MIDI",
+  bpm: state.tempo,
+  tick: 0
+};
+let eventListeners = new Set(); // track ws subscribed to musical events
 let lastBroadcastPage = state.currentPage;
 let followEnabled = false;
 let autoFillBars = true;
 let gridConnected = false;
 let clockOutEnabled = false;
 let clockOutDevice = ""; // MIDI clock out target (id/name hint)
-let nextInternalTickTime = null;
-// external clock smoothing (median over recent intervals)
-let extClockIntervals = [];
-let lastExtPulseTs = 0;
-let extStepMs = null;
 // LED throttling to avoid flooding monome / browser
 const LED_MIN_INTERVAL = 40; // ~25fps
 const SLIDE_ANIM_INTERVAL = LED_MIN_INTERVAL; // reuse LED cadence for slide animation
@@ -90,6 +89,9 @@ let lastLedSend = 0;
 let lastRenderedFrame = null;
 let ledPaused = false;
 let slideAnimTimer = null;
+let lastExternalTickIntervalMs = null;
+let lastReceivedTick = null;
+let externalArmed = false;
 
 function patternControllerDevices() {
   const devices = typeof serial.deviceList === "function" ? serial.deviceList() : [];
@@ -123,37 +125,6 @@ function resetLedBuffers() {
       dev.lastFrame = null;
     });
   }
-}
-
-function median(values) {
-  if (!Array.isArray(values) || !values.length) return null;
-  const sorted = values.slice().sort((a, b) => a - b);
-  const mid = Math.floor(sorted.length / 2);
-  return sorted.length % 2 === 0 ? (sorted[mid - 1] + sorted[mid]) / 2 : sorted[mid];
-}
-
-function recordExternalPulse(nowMs) {
-  if (lastExtPulseTs) {
-    const delta = nowMs - lastExtPulseTs;
-    const recent = extClockIntervals.slice(-4);
-    const baseline = median(recent) || delta;
-    const maxDev = baseline * 0.25; // drop >25% outliers for gate timing
-    if (Math.abs(delta - baseline) <= maxDev) {
-      extClockIntervals.push(delta);
-      if (extClockIntervals.length > 12) extClockIntervals.shift();
-      const smooth = median(extClockIntervals.slice(-4));
-      if (smooth && Number.isFinite(smooth)) {
-        extStepMs = smooth;
-      }
-    }
-  }
-  lastExtPulseTs = nowMs;
-}
-
-function resetExternalClockStats() {
-  extClockIntervals = [];
-  lastExtPulseTs = 0;
-  extStepMs = null;
 }
 
 function buildExportPayload() {
@@ -415,7 +386,6 @@ function handleClientMessage(ws, data) {
       {
         state.setBaseDivision(data.division);
         broadcast({ type: "base_division", division: state.baseDivision });
-        restartClock();
       }
       break;
     case "set_pattern_control_latch":
@@ -424,8 +394,8 @@ function handleClientMessage(ws, data) {
       break;
     case "tempo":
       state.setTempo(data.bpm);
+      transport.bpm = state.tempo;
       broadcastTempo();
-      restartClock();
       break;
     case "set_scale":
       state.setScale(data.root, data.mode);
@@ -434,7 +404,6 @@ function handleClientMessage(ws, data) {
     case "set_swing":
       state.setSwing(data.swing);
       broadcast({ type: "swing", swing: state.swing });
-      restartClock();
       break;
     case "set_transpose":
       state.setTranspose(data.page, data.transpose);
@@ -597,18 +566,25 @@ function handleClientMessage(ws, data) {
       broadcast({ type: "led_levels", levels: state.ledLevels });
       renderAndPush();
       break;
+    case "subscribe_events":
     case "subscribe_midi":
-      midiListeners.add(ws);
+      eventListeners.add(ws);
       break;
     case "set_clock_source":
       if (data.source === "internal" || data.source === "external") {
         clockSource = data.source;
+        transport.mode = clockSource === "internal" ? "INTERNAL" : "EXTERNAL_MIDI";
+        if (clockSource !== "external") externalArmed = false;
+        stopTick();
         broadcastClockSource();
-        restartClock();
         // advertise current inputs on switch
         if (clockSource === "external") broadcastClockInputs();
         broadcastClockOutDevice();
       }
+      break;
+    case "set_external_arm":
+      externalArmed = !!data.enabled;
+      broadcast({ type: "external_arm", enabled: externalArmed });
       break;
     case "set_clock_out":
       clockOutEnabled = !!data.enabled;
@@ -622,23 +598,49 @@ function handleClientMessage(ws, data) {
       clockInputId = data.id || data.name || "";
       broadcastClockInputs();
       break;
-    case "clock_tick":
-      if (clockSource === "external") {
-        if (!manualRunning) {
-          manualRunning = true;
-          state.resetTickCounters();
-          state.syncPlayheads(0);
+    case "transport":
+      {
+        const action = data.action || data.subtype;
+        if (action === "start") {
+          if (!transport.running || lastReceivedTick == null) {
+            startTick({ tick: data.tick });
+          }
+        } else if (action === "stop") {
+          stopTick();
+        } else if (action === "continue") {
+          continueTick({ tick: data.tick });
         }
-        recordExternalPulse(Date.now());
-        processTick();
-        broadcastClockStatus();
       }
       break;
-    case "start":
-      startTick();
-      break;
-    case "stop":
-      stopTick();
+    case "clockTicks":
+      {
+        const ticks = Array.isArray(data.ticks)
+          ? data.ticks
+          : [{ tick: data.tick, intervalMs: data.intervalMs }];
+        ticks.forEach((evt) => {
+          if (!evt || !Number.isFinite(evt.tick)) return;
+          const nextTick = Math.max(0, Math.floor(evt.tick));
+          if (lastReceivedTick != null && nextTick <= lastReceivedTick) {
+            return;
+          }
+          lastReceivedTick = nextTick;
+          if (!transport.running && transport.mode === "EXTERNAL_MIDI") {
+            if (!externalArmed) return;
+            startTick({ tick: nextTick });
+          }
+          transport.tick = nextTick;
+          if (transport.mode === "EXTERNAL_MIDI" && Number.isFinite(evt.intervalMs) && evt.intervalMs > 0) {
+            lastExternalTickIntervalMs = evt.intervalMs;
+          }
+          if (transport.tick % TICKS_PER_STEP === 0) {
+            const externalStepMs = transport.mode === "EXTERNAL_MIDI" && Number.isFinite(lastExternalTickIntervalMs)
+              ? lastExternalTickIntervalMs * TICKS_PER_STEP
+              : null;
+            processTick({ tick: transport.tick, externalStepMs });
+            broadcastClockStatus();
+          }
+        });
+      }
       break;
     case "export_state":
       (() => {
@@ -706,6 +708,7 @@ function handleClientMessage(ws, data) {
         const snap = data.snapshot || data.state || {};
         if (snap.clockSource === "internal" || snap.clockSource === "external") {
           clockSource = snap.clockSource;
+          transport.mode = clockSource === "internal" ? "INTERNAL" : "EXTERNAL_MIDI";
           broadcastClockSource();
         }
         if (snap.clockInput) {
@@ -721,6 +724,7 @@ function handleClientMessage(ws, data) {
           broadcastClockOutDevice();
         }
         if (state.loadSnapshot(snap)) {
+          transport.bpm = state.tempo;
           if (typeof snap.follow === "boolean") {
             followEnabled = !!snap.follow;
             broadcast({ type: "follow", enabled: followEnabled });
@@ -729,7 +733,11 @@ function handleClientMessage(ws, data) {
             autoFillBars = !!snap.autoFill;
             broadcast({ type: "auto_fill", enabled: autoFillBars });
           }
-          restartClock();
+          if (transport.running) {
+            syncStateToTransport();
+          } else {
+            stopTick();
+          }
           broadcastState();
           renderAndPush();
         }
@@ -744,7 +752,11 @@ function handleClientMessage(ws, data) {
         keepDeviceNames: !!data.keepDeviceNames,
         keepMidi: !!data.keepMidi
       });
-      state.syncPlayheads(0);
+      if (transport.running) {
+        syncStateToTransport();
+      } else {
+        state.syncPlayheads(0);
+      }
       broadcastState();
       renderAndPush();
       break;
@@ -789,8 +801,59 @@ function renderAndPush(force = false) {
   queueLedFrame(frame, forceRefresh || force);
 }
 
-function processTick() {
-  const externalStepMs = clockSource === "external" ? extStepMs : null;
+function buildMusicalEvents({ tick, midiEvents }) {
+  if (!Array.isArray(midiEvents) || !midiEvents.length) return [];
+  const out = [];
+  midiEvents.forEach((evt) => {
+    if (!evt) return;
+    if (evt.type === "midi_note") {
+      const delayMs = Math.max(0, Number(evt.delayMs) || 0);
+      const durMs = Math.max(0, Number(evt.durMs) || 0);
+      out.push({
+        type: "note_on",
+        tick,
+        offsetMs: delayMs,
+        page: evt.page,
+        channel: evt.chan,
+        note: evt.pitch,
+        velocity: evt.vel,
+        accent: !!evt.accent,
+        td3Slide: !!evt.td3Slide
+      });
+      out.push({
+        type: "note_off",
+        tick,
+        offsetMs: delayMs + durMs,
+        page: evt.page,
+        channel: evt.chan,
+        note: evt.pitch,
+        velocity: 0
+      });
+    } else if (evt.type === "midi_cc") {
+      out.push({
+        type: "cc",
+        tick,
+        offsetMs: Math.max(0, Number(evt.delayMs) || 0),
+        page: evt.page,
+        channel: evt.chan,
+        cc: evt.cc,
+        value: evt.value
+      });
+    }
+  });
+  return out;
+}
+
+function broadcastEvents(events) {
+  if (!events || !events.length) return;
+  eventListeners.forEach((client) => {
+    if (client.readyState === client.OPEN) {
+      client.send(JSON.stringify({ type: "events", events }));
+    }
+  });
+}
+
+function processTick({ tick, externalStepMs = null }) {
   const { midiEvents, ledFrame, patternSwitches, barChanges, barPlayheadChanges } = state.tick(followEnabled, externalStepMs);
   queueLedFrame(ledFrame);
   if (patternSwitches?.length) {
@@ -802,106 +865,75 @@ function processTick() {
   if (barPlayheadChanges?.length) {
     barPlayheadChanges.forEach((bc) => broadcastBarPlayhead(bc.page, bc.pattern, bc.bar));
   }
-  midiEvents.forEach((evt) => {
-    midiListeners.forEach((client) => {
-      if (client.readyState === client.OPEN) {
-        const msgType = evt.type || "midi_note";
-        client.send(JSON.stringify({ type: msgType, ...evt }));
-      }
-    });
-  });
-  if (clockOutEnabled && clockSource === "internal" && manualRunning) {
-    const div = Math.max(1, state.baseDivision || 16);
-    const pulsesPerTick = Math.max(1, Math.round(96 / div)); // 24 ppqn
-    midiListeners.forEach((client) => {
-      if (client.readyState === client.OPEN) {
-        client.send(JSON.stringify({ type: "midi_clock", pulses: pulsesPerTick, bpm: state.tempo }));
-      }
-    });
-  }
+  broadcastEvents(buildMusicalEvents({ tick, midiEvents }));
 }
 
-function startTick() {
-  manualRunning = true;
+function startTick({ tick = 0 } = {}) {
+  transport.running = true;
+  transport.tick = Math.max(0, Math.floor(tick || 0));
+  lastExternalTickIntervalMs = null;
+  lastReceivedTick = null;
+  const stepIndex = Math.max(0, Math.floor(transport.tick / TICKS_PER_STEP));
   state.resetTickCounters();
-  state.syncPlayheads(0);
-  resetExternalClockStats();
+  state.tickCount = stepIndex % 1024;
+  for (let p = 1; p <= 8; p++) {
+    if (!state.pages[p]) continue;
+    state.pageTicks[p] = stepIndex;
+    state.pageTickPos[p] = stepIndex - 1;
+  }
+  state.syncPlayheads(stepIndex);
   renderAndPush(); // show playhead at step 0 before ticking
-  if (clockOutEnabled && clockSource === "internal") {
-    broadcastClockTransport("start");
-  }
-  restartClock();
+  broadcastClockStatus();
 }
 
-function stopTick() {
-  manualRunning = false;
+function syncStateToTransport() {
+  const baseStepIndex = Math.max(0, Math.floor((transport.tick || 0) / TICKS_PER_STEP));
+  const nextStepIndex = baseStepIndex + 1;
   state.resetTickCounters();
-  state.syncPlayheads(0);
-  resetExternalClockStats();
-  restartClock();
-  renderAndPush(); // show playhead reset
-  if (clockOutEnabled && clockSource === "internal") {
-    broadcastClockTransport("stop");
-  }
-}
-
-function clearClockTimer() {
-  if (clockTimer) {
-    clearTimeout(clockTimer);
-    clockTimer = null;
-  }
-  nextInternalTickTime = null;
-}
-
-function restartClock() {
-  clearClockTimer();
-  if (manualRunning && clockSource === "internal") {
-    clockMode = "internal";
-    nextInternalTickTime = performance.now();
-    scheduleInternalTick();
-  } else if (manualRunning && clockSource === "external") {
-    clockMode = "external"; // driven by external clock_tick messages
-  } else {
-    clockMode = "stopped";
+  state.tickCount = nextStepIndex % 1024;
+  for (let p = 1; p <= 8; p++) {
+    const page = state.pages[p];
+    if (!page) continue;
+    const pat = page.patterns?.[page.active_pattern];
+    if (!pat) continue;
+    const len = Math.max(1, pat.length_steps || 16);
+    const scaleFactor = Math.max(1, Math.round(pat.time_scale || 1));
+    const prevStepPos = Math.floor(baseStepIndex / scaleFactor) % len;
+    state.pageTicks[p] = nextStepIndex;
+    state.pageTickPos[p] = prevStepPos;
+    state.playheads[p] = prevStepPos;
   }
   broadcastClockStatus();
 }
 
-function scheduleInternalTick() {
-  if (!manualRunning || clockSource !== "internal") return;
-  const div = Math.max(1, state.baseDivision || 16); // denominator of base note (1/div)
-  const baseStepMs = (60000 / state.tempo) * 4 / div;
-  // swing: 50 = straight, 80 = max; convert to +/- 0.5 factor
-  const swingAmt = Math.max(0, (state.swing - 50) / 60); // 0..0.5
-  const even = (state.tickCount % 2) === 0;
-  const factor = swingAmt > 0 ? (even ? (1 - swingAmt) : (1 + swingAmt)) : 1;
-  const interval = Math.max(1, Math.round(baseStepMs * factor));
-  const now = performance.now();
-  if (nextInternalTickTime == null) nextInternalTickTime = now;
-  // prevent runaway catch-up; if we fell far behind, realign to now
-  if (nextInternalTickTime < now - interval * 2) {
-    nextInternalTickTime = now;
-  }
-  nextInternalTickTime += interval;
-  const delay = Math.max(0, Math.round(nextInternalTickTime - now));
-  clockTimer = setTimeout(() => {
-    processTick();
-    scheduleInternalTick();
-  }, delay);
+function stopTick() {
+  transport.running = false;
+  transport.tick = 0;
+  lastExternalTickIntervalMs = null;
+  lastReceivedTick = null;
+  state.resetTickCounters();
+  state.syncPlayheads(0);
+  renderAndPush(); // show playhead reset
+  broadcastClockStatus();
 }
 
-function stopClock() {
-  clearClockTimer();
-  clockMode = "stopped";
+function continueTick({ tick = null } = {}) {
+  transport.running = true;
+  if (Number.isFinite(tick)) {
+    transport.tick = Math.max(0, Math.floor(tick));
+    state.syncPlayheads(Math.floor(transport.tick / TICKS_PER_STEP));
+  }
   broadcastClockStatus();
 }
 
 function broadcastClockStatus() {
   const status = {
-    running: manualRunning,
-    mode: clockMode,
+    running: transport.running,
+    mode: transport.mode,
     clockSource,
-    clockInput: clockInputId
+    clockInput: clockInputId,
+    tick: transport.tick,
+    bpm: transport.bpm
   };
   broadcast({ type: "clock_status", data: status });
 }
@@ -912,16 +944,6 @@ function broadcastClockOut() {
 
 function broadcastClockOutDevice() {
   broadcast({ type: "clock_out_device", id: clockOutDevice });
-}
-
-function broadcastClockTransport(kind) {
-  if (kind !== "start" && kind !== "stop") return;
-  const msgType = kind === "start" ? "midi_clock_start" : "midi_clock_stop";
-  midiListeners.forEach((client) => {
-    if (client.readyState === client.OPEN) {
-      client.send(JSON.stringify({ type: msgType }));
-    }
-  });
 }
 
 function broadcastTempo() {
@@ -961,6 +983,7 @@ function broadcastBarPlayhead(page, pattern, bar) {
   broadcast({ type: "bar_playhead", page, pattern, bar });
 }
 
+// DO NOT CHANGE LOGIC: monome LED frame generation + serialosc output pipeline.
 function manageLedAnimation(forceStop = false) {
   const shouldRun = !forceStop && (state.hasSlidePairs() || state.hasOctaveShifts());
   if (shouldRun) {
@@ -1073,7 +1096,6 @@ export function startServer(port = PORT) {
     server.listen(port, () => {
       console.log(`mgrid web listening on http://localhost:${port}`);
       serial.start();
-      restartClock();
       resolve(server);
     });
   });

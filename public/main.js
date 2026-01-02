@@ -1,3 +1,5 @@
+import { AudioEventScheduler } from "./scheduler.js";
+
 const WS_URL = `ws://${location.host}`;
 const WIDTH = 16;
 const HEIGHT = 8;
@@ -21,6 +23,8 @@ const PATTERN_INACTIVE = 4;
 const DEVICE_ACTIVE = 15;
 const DEVICE_PRESENT = 8;
 const BASE_PITCH = 60;
+const PPQN = 24;
+const TICKS_PER_STEP = 6;
 
 let ws;
 let midiAccess;
@@ -145,6 +149,17 @@ const renameLabel = document.getElementById("rename-label");
 const renameInput = document.getElementById("rename-input");
 const renameSave = document.getElementById("rename-save");
 const renameCancel = document.getElementById("rename-cancel");
+const saveSetModal = document.getElementById("save-set-modal");
+const saveSetMessage = document.getElementById("save-set-message");
+const saveSetCurrent = document.getElementById("save-set-current");
+const saveSetNew = document.getElementById("save-set-new");
+const saveSetCancel = document.getElementById("save-set-cancel");
+const dialogModal = document.getElementById("dialog-modal");
+const dialogTitle = document.getElementById("dialog-title");
+const dialogMessage = document.getElementById("dialog-message");
+const dialogCancel = document.getElementById("dialog-cancel");
+const dialogOk = document.getElementById("dialog-ok");
+let dialogOkHandler = null;
 let renameTargetPage = null;
 let renameTargetPattern = null;
 let renameMode = "device";
@@ -236,9 +251,14 @@ function updateTempo(val, opts = {}) {
   const broadcast = opts.broadcast !== false;
   const next = Math.max(20, Math.min(300, Number(val) || tempo));
   tempo = next;
-  const display = formatTempoDisplay(next);
+  displayTempoVal = next;
+  const display = formatTempoDisplay(displayTempoVal);
   if (tempoInput) tempoInput.value = display;
   if (settingsTempoInput) settingsTempoInput.value = display;
+      if (clockSource === "internal" && running) {
+        internalTickPeriodSec = 60 / (tempo * PPQN);
+        internalStartTimeSec = getNowSec() - transportTick * internalTickPeriodSec;
+      }
   if (broadcast) {
     ws?.readyState === WebSocket.OPEN && ws.send(JSON.stringify({ type: "tempo", bpm: tempo }));
   }
@@ -312,6 +332,9 @@ deviceColors[0] = "";
 let deviceColorOverrides = Array(9).fill(false);
 let deviceOrder = Array.from({ length: 8 }, (_, i) => i + 1);
 let setName = "default";
+let currentSetFilename = null;
+let pendingExportFilename = null;
+let currentSetFileHandle = null;
 let activePatterns = Array.from({ length: 9 }, () => 1);
 let pendingPatterns = Array.from({ length: 9 }, () => null);
 let patternLengths = Array.from({ length: 9 }, () => Array(9).fill(16));
@@ -330,11 +353,28 @@ const DEFAULT_LED_LEVELS = {
 };
 let ledLevels = { ...DEFAULT_LED_LEVELS };
 let midiClockIn = null;
-let midiClockCount = 0;
-let clockPulseTimes = [];
 let lastTempoPush = 0;
 let lastTempoMs = 0;
 let lastTempoVal = 120;
+let displayTempoVal = 120;
+let lastTempoDisplayMs = 0;
+let audioTimeOriginMs = 0;
+let scheduler = null;
+let internalTickPeriodSec = 0;
+let internalClockTimer = null;
+let internalNextTick = 0;
+let internalStartTimeSec = 0;
+let externalTick = 0;
+let externalTickTimes = new Map();
+let lastExternalTickMs = null;
+let lastSentExternalTick = -1;
+let externalStartSent = false;
+let autoStartPending = false;
+let autoStartFirstMs = 0;
+let autoStartTicks = 0;
+let transportTick = 0;
+let externalArmed = false;
+const activeNotes = new Map();
 let uiScale = 1.5;
 // pattern lengths not tracked client-side
 let barViews = Array.from({ length: 9 }, () => Array(9).fill(0));
@@ -421,7 +461,8 @@ function connectWS() {
   ws.onopen = () => {
     if (wsStatus) wsStatus.textContent = "WS: connected";
     log("WS connected");
-    ws.send(JSON.stringify({ type: "subscribe_midi" }));
+    ws.send(JSON.stringify({ type: "subscribe_events" }));
+    panicAll();
     // push saved config (LED/clock/log/auto-fill) if we have it
     pushSavedConfigToServer();
     // optionally auto-load last set if enabled
@@ -515,6 +556,10 @@ function connectWS() {
       if (msg.clockOutDevice) clockOutPortId = msg.clockOutDevice;
       if (msg.ledLevels) ledLevels = { ...ledLevels, ...msg.ledLevels };
       if (msg.clockInput) clockInputId = msg.clockInput;
+      if (clockSource === "internal" && running) {
+        internalTickPeriodSec = 60 / (tempo * PPQN);
+        internalStartTimeSec = getNowSec() - transportTick * internalTickPeriodSec;
+      }
       if (msg.mdTracks) {
         mdTracks = msg.mdTracks.map((t, idx) => {
           if (idx === 0) return null;
@@ -636,6 +681,7 @@ function connectWS() {
       if (typeof status.running === "boolean") setRunningState(status.running);
       if (status.clockSource) clockSource = status.clockSource;
       if (status.clockInput) clockInputId = status.clockInput;
+      if (Number.isFinite(status.tick)) transportTick = status.tick;
       applyClockSourceUI();
     } else if (msg.type === "pattern_status") {
       if (typeof msg.page === "number") {
@@ -700,7 +746,13 @@ function connectWS() {
       showToast("Bar copied");
     } else if (msg.type === "export_state") {
       const payload = msg.data || {};
-      downloadJSON(payload, "Untitled.sgridset");
+      const targetName = ensureSetFilename(pendingExportFilename || "Untitled.sgridset");
+      downloadJSON(payload, targetName);
+      currentSetFilename = targetName;
+      setName = displaySetName(targetName || setName);
+      updateSetTitle(setName);
+      pendingExportFilename = null;
+      currentSetFileHandle = null;
     } else if (msg.type === "export_td3") {
       if (msg.data) {
         downloadBase64Binary(msg.data, "td3_pattern.seq");
@@ -735,19 +787,10 @@ function connectWS() {
       applyLedSettingsUI();
     } else if (msg.type === "pattern_lengths") {
       // pattern lengths no longer handled client-side
-    } else if (msg.type === "midi_note") {
-      const { page, pitch, vel, durMs, delayMs, chan } = msg;
-      sendMIDI(page, pitch, vel, durMs, delayMs, chan);
-    } else if (msg.type === "midi_cc") {
-      const { page, cc, value, delayMs, chan } = msg;
-      sendMIDICC(page, cc, value, delayMs, chan);
-    } else if (msg.type === "midi_clock") {
-      const pulses = Math.max(0, Math.round(msg.pulses || 0));
-      if (pulses > 0) sendMidiClock(pulses);
-    } else if (msg.type === "midi_clock_start") {
-      sendMidiClockTransport("start");
-    } else if (msg.type === "midi_clock_stop") {
-      sendMidiClockTransport("stop");
+    } else if (msg.type === "events") {
+      ensureScheduler();
+      scheduler?.enqueue(msg.events || []);
+      scheduler?.tick();
     } else if (msg.type === "base_division") {
       baseDivision = msg.division || baseDivision;
       applyBaseNoteLenUI();
@@ -771,6 +814,9 @@ function refreshMIDIDevices() {
   if (!midiSel) return;
   const prevSelectedId = midiSel.value || (midiOut && midiOut.id) || "";
   const prevClockOutId = clockOutPortId;
+  if (prevSelectedId && midiAccess?.outputs && !midiAccess.outputs.get(prevSelectedId)) {
+    panicAll();
+  }
   midiSel.innerHTML = "";
   midiSel.append(new Option("None", ""));
   if (clockOutPortSel) {
@@ -815,6 +861,7 @@ function refreshMIDIDevices() {
     }
   }
   midiSel.onchange = () => {
+    panicAll();
     midiOut = midiAccess.outputs.get(midiSel.value) || null;
     log(midiOut ? `MIDI out selected: ${midiOut.name}` : "MIDI out cleared");
     midiSettings[currentPage].outId = midiOut ? midiOut.id : "";
@@ -840,34 +887,57 @@ function refreshMIDIDevices() {
   updateTd3ExportVisibility();
   if (midiStatus) midiStatus.textContent = `MIDI: ${midiAccess ? midiAccess.outputs.size : 0} outputs`;
   if (outs.length) log(`Available MIDI outs: ${outs.join(", ")}`);
-  // if preferred clock input present, pick it and force external clock
-  const preferredClock = clockInputs.find((i) => i.name.includes("IAC Driver Bus 2"));
-  if (preferredClock) {
-    clockInputId = preferredClock.id;
-    populateClockInputs();
-    clockSource = "external";
-    ws?.readyState === WebSocket.OPEN && ws.send(JSON.stringify({ type: "set_clock_source", source: "external" }));
-    ws?.readyState === WebSocket.OPEN && ws.send(JSON.stringify({ type: "set_clock_input", name: clockInputId }));
-    attachClockInput(clockInputId);
-    applyClockSourceUI();
-  }
+  // keep user-selected clock source; do not auto-force external here
 }
 
 function start() {
   if (clockSource === "external") {
-    log("Start is controlled by external clock");
+    if (!externalArmed) {
+      externalArmed = true;
+      ws?.readyState === WebSocket.OPEN && ws.send(JSON.stringify({ type: "set_external_arm", enabled: true }));
+      log("External clock armed");
+    } else {
+      externalArmed = false;
+      ws?.readyState === WebSocket.OPEN && ws.send(JSON.stringify({ type: "set_external_arm", enabled: false }));
+      log("External clock disarmed");
+    }
     return;
   }
-  ws?.send(JSON.stringify({ type: "start" }));
-  setRunningState(true);
+  startInternalTransport();
 }
 function stop() {
   if (clockSource === "external") {
-    log("Stop is controlled by external clock");
+    externalArmed = false;
+    ws?.readyState === WebSocket.OPEN && ws.send(JSON.stringify({ type: "set_external_arm", enabled: false }));
+    log("External clock disarmed");
     return;
   }
-  ws?.send(JSON.stringify({ type: "stop" }));
+  stopInternalTransport();
+}
+
+function startInternalTransport() {
+  ensureScheduler();
+  internalTickPeriodSec = 60 / (tempo * PPQN);
+  internalStartTimeSec = getNowSec();
+  internalNextTick = 0;
+  transportTick = 0;
+  scheduler?.clear();
+  setRunningState(true);
+  ws?.readyState === WebSocket.OPEN &&
+    ws.send(JSON.stringify({ type: "transport", action: "start", tick: 0 }));
+  if (clockOutEnabled) sendMidiClockTransport("start");
+  startInternalClockLoop();
+}
+
+function stopInternalTransport() {
+  stopInternalClockLoop();
   setRunningState(false);
+  transportTick = 0;
+  scheduler?.clear();
+  ws?.readyState === WebSocket.OPEN &&
+    ws.send(JSON.stringify({ type: "transport", action: "stop" }));
+  if (clockOutEnabled) sendMidiClockTransport("stop");
+  panicAll();
 }
 
 function setRunningState(isRunning) {
@@ -887,6 +957,132 @@ function toggleTransport() {
   } else {
     start();
   }
+}
+
+function audioTimeToPerfMs(timeSec) {
+  if (!audioTimeOriginMs) audioTimeOriginMs = performance.now();
+  return audioTimeOriginMs + timeSec * 1000;
+}
+
+function resolveTickTime(tick) {
+  if (clockSource === "internal" && internalTickPeriodSec > 0) {
+    return internalStartTimeSec + tick * internalTickPeriodSec;
+  }
+  return externalTickTimes.get(tick);
+}
+
+function getNowSec() {
+  if (!audioTimeOriginMs) audioTimeOriginMs = performance.now();
+  return (performance.now() - audioTimeOriginMs) / 1000;
+}
+
+function ensureScheduler() {
+  if (scheduler) return;
+  scheduler = new AudioEventScheduler(() => getNowSec(), { lookaheadMs: 15, scheduleAheadMs: 150 });
+  scheduler.setTickTimeResolver(resolveTickTime);
+  scheduler.start(scheduleMidiEvent);
+}
+
+function startInternalClockLoop() {
+  stopInternalClockLoop();
+  internalClockTimer = setInterval(() => {
+    if (clockSource !== "internal") return;
+    const now = getNowSec();
+    if (!Number.isFinite(now)) return;
+    while (internalStartTimeSec + internalNextTick * internalTickPeriodSec <= now) {
+      const tickTime = internalStartTimeSec + internalNextTick * internalTickPeriodSec;
+      handleInternalTick(internalNextTick, tickTime);
+      internalNextTick += 1;
+    }
+  }, 10);
+}
+
+function stopInternalClockLoop() {
+  if (internalClockTimer) clearInterval(internalClockTimer);
+  internalClockTimer = null;
+}
+
+function handleInternalTick(tick, tickTimeSec) {
+  transportTick = tick;
+  if (tick % TICKS_PER_STEP === 0) {
+    ws?.readyState === WebSocket.OPEN &&
+      ws.send(JSON.stringify({ type: "clockTicks", ticks: [{ tick, intervalMs: internalTickPeriodSec * 1000 }] }));
+  }
+  if (clockOutEnabled) {
+    sendMidiClockPulse(audioTimeToPerfMs(tickTimeSec));
+  }
+}
+
+function getMidiOutForPage(page) {
+  const cfg = midiSettings[page] || midiSettings[currentPage] || {};
+  return cfg.outId && midiAccess?.outputs.get(cfg.outId);
+}
+
+function getMidiChannelForPage(page, fallbackChan) {
+  const cfg = midiSettings[page] || midiSettings[currentPage] || {};
+  if (Number.isFinite(fallbackChan)) return fallbackChan;
+  return cfg.channel || 1;
+}
+
+function noteKey(out, channel) {
+  return `${out?.id || "none"}:${channel || 1}`;
+}
+
+function trackNoteOn(out, channel, note) {
+  if (!out) return;
+  const key = noteKey(out, channel);
+  if (!activeNotes.has(key)) activeNotes.set(key, new Set());
+  activeNotes.get(key).add(note);
+}
+
+function trackNoteOff(out, channel, note) {
+  if (!out) return;
+  const key = noteKey(out, channel);
+  const notes = activeNotes.get(key);
+  if (!notes) return;
+  notes.delete(note);
+  if (!notes.size) activeNotes.delete(key);
+}
+
+function scheduleMidiEvent(evt, targetTimeSec) {
+  const out = getMidiOutForPage(evt.page);
+  if (!out) return;
+  const channel = getMidiChannelForPage(evt.page, evt.channel);
+  const safeTime = Math.max(targetTimeSec, getNowSec() + 0.001);
+  const ts = audioTimeToPerfMs(safeTime);
+  if (evt.type === "note_on") {
+    const status = 0x90 + (channel - 1);
+    const vel = Math.max(0, Math.min(127, Math.round(evt.velocity || 0)));
+    sendMIDISafe(out, [status, evt.note, vel], ts);
+    trackNoteOn(out, channel, evt.note);
+  } else if (evt.type === "note_off") {
+    const status = 0x80 + (channel - 1);
+    sendMIDISafe(out, [status, evt.note, 0], ts);
+    const delay = Math.max(0, ts - performance.now());
+    setTimeout(() => trackNoteOff(out, channel, evt.note), delay);
+  } else if (evt.type === "cc") {
+    const status = 0xb0 + (channel - 1);
+    const ccNum = Math.max(0, Math.min(127, Math.round(evt.cc || 0)));
+    const ccVal = Math.max(0, Math.min(127, Math.round(evt.value || 0)));
+    sendMIDISafe(out, [status, ccNum, ccVal], ts);
+  }
+}
+
+function panicAll() {
+  if (!midiAccess) return;
+  activeNotes.forEach((notes, key) => {
+    const [outId, chanStr] = key.split(":");
+    const out = midiAccess.outputs.get(outId);
+    const channel = Math.max(1, Math.min(16, Number(chanStr) || 1));
+    if (!out) return;
+    notes.forEach((note) => {
+      const status = 0x80 + (channel - 1);
+      sendMIDISafe(out, [status, note, 0], performance.now());
+    });
+    sendMIDISafe(out, [0xb0 + (channel - 1), 123, 0], performance.now());
+    sendMIDISafe(out, [0xb0 + (channel - 1), 120, 0], performance.now());
+  });
+  activeNotes.clear();
 }
 
 function sendMIDISafe(out, bytes, ts) {
@@ -914,6 +1110,9 @@ function sendMIDI(page, pitch, vel, durMs, delayMs, chan) {
   const offTs = now + Math.max(0, delayMs + durMs);
   sendMIDISafe(out, [statusOn, pitch, vel], onTs);
   sendMIDISafe(out, [statusOff, pitch, 0], offTs);
+  trackNoteOn(out, channel, pitch);
+  const delay = Math.max(0, offTs - performance.now());
+  setTimeout(() => trackNoteOff(out, channel, pitch), delay);
 }
 
 function sendMIDICC(page, cc, value, delayMs, chan) {
@@ -929,19 +1128,14 @@ function sendMIDICC(page, cc, value, delayMs, chan) {
   sendMIDISafe(out, [status, ccNum, ccVal], ts);
 }
 
-function sendMidiClock(pulses) {
+function sendMidiClockPulse(timestampMs) {
   if (!clockOutEnabled) return;
   const out =
     (clockOutPortId && midiAccess?.outputs.get(clockOutPortId)) ||
     ((midiSettings[currentPage] || {}).outId && midiAccess?.outputs.get(midiSettings[currentPage].outId));
   if (!out) return;
-  const div = Math.max(1, baseDivision || 16);
-  const stepMs = (60000 / tempo) * 4 / div;
-  const spacing = stepMs / Math.max(1, pulses);
-  const now = window.performance.now();
-  for (let i = 0; i < pulses; i++) {
-    sendMIDISafe(out, [0xf8], now + spacing * i);
-  }
+  const ts = Number.isFinite(timestampMs) ? timestampMs : window.performance.now();
+  sendMIDISafe(out, [0xf8], ts);
 }
 
 function sendMidiClockTransport(kind) {
@@ -1131,11 +1325,36 @@ if (transportToggle) {
   transportToggle.onclick = toggleTransport;
   setRunningState(running);
 }
+
+function handleClockSourceChange(prev, next) {
+  if (prev === next) return;
+  if (prev === "internal") stopInternalClockLoop();
+  if (running) {
+    ws?.readyState === WebSocket.OPEN && ws.send(JSON.stringify({ type: "transport", action: "stop" }));
+    setRunningState(false);
+    if (clockOutEnabled) sendMidiClockTransport("stop");
+  }
+  transportTick = 0;
+  externalTick = 0;
+  externalTickTimes = new Map();
+  lastExternalTickMs = null;
+  lastSentExternalTick = -1;
+  externalStartSent = false;
+  autoStartPending = false;
+  autoStartFirstMs = 0;
+  autoStartTicks = 0;
+  externalArmed = false;
+  ws?.readyState === WebSocket.OPEN && ws.send(JSON.stringify({ type: "set_external_arm", enabled: false }));
+  scheduler?.clear();
+  panicAll();
+}
+
 if (clockToggleBtn) {
   clockToggleBtn.onclick = () => {
     const prev = clockSource;
     const next = prev === "external" ? "internal" : "external";
     clockSource = next;
+    handleClockSourceChange(prev, next);
     ws?.readyState === WebSocket.OPEN && ws.send(JSON.stringify({ type: "set_clock_source", source: next }));
     if (prev === "external" && next === "internal") {
       lockTempoPrecision({ broadcast: true });
@@ -1146,12 +1365,17 @@ if (clockToggleBtn) {
       ws?.readyState === WebSocket.OPEN && ws.send(JSON.stringify({ type: "set_clock_input", name: clockInputId }));
       attachClockInput(clockInputId);
     }
+    if (clockSource !== "external") {
+      externalArmed = false;
+      ws?.readyState === WebSocket.OPEN && ws.send(JSON.stringify({ type: "set_external_arm", enabled: false }));
+    }
   };
 }
 if (clockSourceSel) {
   clockSourceSel.onchange = () => {
     const prev = clockSource;
     clockSource = clockSourceSel.value;
+    handleClockSourceChange(prev, clockSource);
     ws?.readyState === WebSocket.OPEN && ws.send(JSON.stringify({ type: "set_clock_source", source: clockSource }));
     if (prev === "external" && clockSource === "internal") {
       lockTempoPrecision({ broadcast: true });
@@ -1161,6 +1385,10 @@ if (clockSourceSel) {
       clockInputId = clockInputSel.value;
       ws?.readyState === WebSocket.OPEN && ws.send(JSON.stringify({ type: "set_clock_input", name: clockInputId }));
       attachClockInput(clockInputId);
+    }
+    if (clockSource !== "external") {
+      externalArmed = false;
+      ws?.readyState === WebSocket.OPEN && ws.send(JSON.stringify({ type: "set_external_arm", enabled: false }));
     }
   };
 }
@@ -1240,55 +1468,157 @@ function attachClockInput(id) {
 function detachClockInput() {
   if (midiClockIn) midiClockIn.onmidimessage = null;
   midiClockIn = null;
-  midiClockCount = 0;
-  clockPulseTimes = [];
+  externalTick = 0;
+  externalTickTimes = new Map();
+  lastExternalTickMs = null;
+  lastSentExternalTick = -1;
+  externalStartSent = false;
+  autoStartPending = false;
+  autoStartFirstMs = 0;
+  autoStartTicks = 0;
 }
 
 function handleClockMessage(evt) {
   if (clockSource !== "external") return;
-  const [status] = evt.data || [];
+  const [status, data1, data2] = evt.data || [];
   if (status === 0xfa) {
-    // align first tick to the very next clock pulse to avoid long initial wait
-    midiClockCount = 5; // next 0xf8 will fire a 16th tick
-    clockPulseTimes = [];
-    ws?.readyState === WebSocket.OPEN && ws.send(JSON.stringify({ type: "start" }));
+    ensureScheduler();
+    externalTick = 0;
+    externalTickTimes = new Map();
+    lastExternalTickMs = null;
+    lastSentExternalTick = -1;
+    externalStartSent = true;
+    autoStartPending = false;
+    autoStartFirstMs = 0;
+    autoStartTicks = 0;
+    autoStartPending = false;
+    autoStartFirstMs = 0;
+    autoStartTicks = 0;
+    transportTick = 0;
+    scheduler?.clear();
+    setRunningState(true);
+    ws?.readyState === WebSocket.OPEN &&
+      ws.send(JSON.stringify({ type: "transport", action: "start", tick: 0 }));
+    if (clockOutEnabled) sendMidiClockTransport("start");
     log(`MIDI Start from ${midiClockIn?.name || "clock in"}`);
     return;
   }
   if (status === 0xfc || status === 0xfd) {
-    midiClockCount = 0;
-    clockPulseTimes = [];
-    ws?.readyState === WebSocket.OPEN && ws.send(JSON.stringify({ type: "stop" }));
+    setRunningState(false);
+    scheduler?.clear();
+    externalTickTimes = new Map();
+    lastExternalTickMs = null;
+    lastSentExternalTick = -1;
+    externalStartSent = false;
+    autoStartPending = false;
+    autoStartFirstMs = 0;
+    autoStartTicks = 0;
+    autoStartPending = false;
+    autoStartFirstMs = 0;
+    autoStartTicks = 0;
+    ws?.readyState === WebSocket.OPEN &&
+      ws.send(JSON.stringify({ type: "transport", action: "stop" }));
+    if (clockOutEnabled) sendMidiClockTransport("stop");
+    panicAll();
     log(`MIDI Stop from ${midiClockIn?.name || "clock in"}`);
     return;
   }
-  if (status !== 0xf8) return; // not a clock tick
-
-  const now = performance.now();
-  clockPulseTimes.push(now);
-  if (clockPulseTimes.length > 48) clockPulseTimes.shift();
-
-  midiClockCount = (midiClockCount + 1) % 24; // 24 ppqn
-  if (midiClockCount % 6 === 0) {
-    ws?.readyState === WebSocket.OPEN && ws.send(JSON.stringify({ type: "clock_tick" }));
+  if (status === 0xfb) {
+    setRunningState(true);
+    ws?.readyState === WebSocket.OPEN &&
+      ws.send(JSON.stringify({ type: "transport", action: "continue", tick: transportTick }));
+    if (clockOutEnabled) sendMidiClockTransport("start");
+    log(`MIDI Continue from ${midiClockIn?.name || "clock in"}`);
+    return;
   }
-  // derive tempo once per quarter-note to keep UI in sync
-  if (midiClockCount === 0 && clockPulseTimes.length > 1) {
-    const intervals = [];
-    for (let i = 1; i < clockPulseTimes.length; i++) {
-      intervals.push(clockPulseTimes[i] - clockPulseTimes[i - 1]);
+  if (status === 0xf2) {
+    const spp = ((data2 || 0) << 7) | (data1 || 0);
+    const tick = spp * TICKS_PER_STEP;
+    transportTick = tick;
+    externalTick = tick;
+    lastSentExternalTick = tick - 1;
+    autoStartPending = false;
+    autoStartFirstMs = 0;
+    autoStartTicks = 0;
+    autoStartPending = false;
+    autoStartFirstMs = 0;
+    autoStartTicks = 0;
+    ws?.readyState === WebSocket.OPEN &&
+      ws.send(JSON.stringify({ type: "transport", action: "continue", tick }));
+    return;
+  }
+  if (status !== 0xf8) return; // not a clock tick
+  ensureScheduler();
+  const nowMs = Number.isFinite(evt.timeStamp) ? evt.timeStamp : performance.now();
+  if (!audioTimeOriginMs) audioTimeOriginMs = nowMs;
+  const nowSec = (nowMs - audioTimeOriginMs) / 1000;
+  const intervalMs = lastExternalTickMs ? (nowMs - lastExternalTickMs) : null;
+  lastExternalTickMs = nowMs;
+
+  transportTick = externalTick;
+  if (externalTick <= lastSentExternalTick) {
+    externalTick += 1;
+    return;
+  }
+  externalTickTimes.set(externalTick, nowSec);
+  if (externalTickTimes.size > 1024) {
+    const cutoff = externalTick - 512;
+    externalTickTimes.forEach((_, key) => {
+      if (key < cutoff) externalTickTimes.delete(key);
+    });
+  }
+
+  if (!running) {
+    if (!autoStartPending && !externalStartSent) {
+      autoStartPending = true;
+      autoStartFirstMs = nowMs;
+      autoStartTicks = 0;
     }
-    const avgPulseMs = intervals.reduce((a, b) => a + b, 0) / intervals.length;
-    const bpmEstimate = 60000 / (avgPulseMs * 24);
+    if (autoStartPending && !externalStartSent) {
+      autoStartTicks += 1;
+      const elapsed = nowMs - autoStartFirstMs;
+      const ready = elapsed >= 120 || autoStartTicks >= TICKS_PER_STEP;
+      if (ready) {
+        autoStartPending = false;
+        externalStartSent = true;
+        scheduler?.clear();
+        setRunningState(true);
+        ws?.readyState === WebSocket.OPEN &&
+          ws.send(JSON.stringify({ type: "transport", action: "start", tick: externalTick }));
+        if (clockOutEnabled) sendMidiClockTransport("start");
+      }
+    }
+  }
+
+  ws?.readyState === WebSocket.OPEN &&
+    ws.send(JSON.stringify({
+      type: "clockTicks",
+      ticks: [{ tick: externalTick, intervalMs }]
+    }));
+
+  if (clockOutEnabled) sendMidiClockPulse(nowMs);
+  lastSentExternalTick = externalTick;
+  externalTick += 1;
+
+  if (Number.isFinite(intervalMs)) {
+    const bpmEstimate = 60000 / (intervalMs * PPQN);
     if (Number.isFinite(bpmEstimate)) {
-      // mild smoothing to avoid jumpy BPM readout
       const smoothed = lastTempoMs ? (0.7 * lastTempoVal + 0.3 * bpmEstimate) : bpmEstimate;
-      lastTempoMs = now;
+      lastTempoMs = nowMs;
       lastTempoVal = smoothed;
       tempo = Math.max(20, Math.min(300, smoothed));
-      const display = formatTempoDisplay(tempo);
-      if (tempoInput) tempoInput.value = display;
-      if (settingsTempoInput) settingsTempoInput.value = display;
+      const displaySmoothed = lastTempoDisplayMs
+        ? (0.85 * displayTempoVal + 0.15 * tempo)
+        : tempo;
+      const nowUiMs = nowMs;
+      const diff = Math.abs(displaySmoothed - displayTempoVal);
+      if (diff >= 0.2 || (nowUiMs - lastTempoDisplayMs) > 400) {
+        displayTempoVal = displaySmoothed;
+        lastTempoDisplayMs = nowUiMs;
+        const display = formatTempoDisplay(displayTempoVal);
+        if (tempoInput) tempoInput.value = display;
+        if (settingsTempoInput) settingsTempoInput.value = display;
+      }
       const nowTs = Date.now();
       if (nowTs - lastTempoPush > 300) {
         lastTempoPush = nowTs;
@@ -1297,22 +1627,28 @@ function handleClockMessage(evt) {
     }
   }
 }
-document.getElementById("export").onclick = async () => {
-  try {
-    const resp = await fetch("/api/export");
-    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-    const data = await resp.json();
-    const payload = data.data || data;
-    downloadJSON(payload, "Untitled.sgridset");
-    log("Exported set");
-  } catch (e) {
-    if (ws?.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({ type: "export_state" }));
-      log("Export requested via WS (HTTP failed)");
-    } else {
-      log("Export failed (no connection)");
-    }
+document.getElementById("export").onclick = () => {
+  if (currentSetFilename) {
+    openSaveSetModal();
+    return;
   }
+  const suggested = setName && setName.toLowerCase() !== "default" ? setName : "Untitled";
+  if (window.showSaveFilePicker) {
+    requestSaveHandle(suggested)
+      .then((handle) => {
+        if (handle?.name) {
+          currentSetFilename = handle.name;
+          setName = displaySetName(handle.name || setName);
+          updateSetTitle(setName);
+        }
+        return saveSnapshotToHandle(handle);
+      })
+      .catch(() => {
+        log("Save canceled");
+      });
+    return;
+  }
+  startExport(suggested);
 };
 const anyTd3ModalOpen = () =>
   [td3Modal, td3ActionModal, td3ScaleModal, td3ReplaceModal].some((modal) => modal && !modal.classList.contains("hidden"));
@@ -1474,6 +1810,8 @@ document.getElementById("import").onclick = () => {
         const data = JSON.parse(ev.target.result);
         if (!data.setName) data.setName = deriveSetNameFromFilename(fileName);
         if (ws?.readyState === WebSocket.OPEN) {
+          currentSetFilename = ensureSetFilename(fileName);
+          currentSetFileHandle = null;
           ws.send(JSON.stringify({ type: "import_state", snapshot: data }));
           log("Import sent to server");
           showToast(`${fileName} loaded`);
@@ -1655,7 +1993,8 @@ function normalizeDeviceOrder(order) {
 }
 
 function updateSetTitle(name) {
-  const safe = String(name || "default").trim() || "default";
+  const preferred = currentSetFilename ? displaySetName(currentSetFilename) : name;
+  const safe = String(preferred || "default").trim() || "default";
   const display = safe.toLowerCase() === "default" ? "Untitled" : safe;
   document.title = `studio:grid — ${display}`;
 }
@@ -1665,6 +2004,165 @@ function deriveSetNameFromFilename(filename) {
   if (!raw) return "default";
   const base = raw.replace(/\.[^.]+$/, "");
   return base || "default";
+}
+
+function ensureSetFilename(name) {
+  const raw = String(name || "").trim();
+  if (!raw) return "Untitled.sgridset";
+  const cleaned = raw.replace(/[\\/:*?"<>|]+/g, "-");
+  if (/\.(sgridset|json)$/i.test(cleaned)) return cleaned;
+  return `${cleaned}.sgridset`;
+}
+
+function displaySetName(name) {
+  const raw = String(name || "").trim();
+  if (!raw) return "Untitled";
+  return raw.replace(/\.(sgridset|json)$/i, "") || "Untitled";
+}
+
+async function saveSnapshotToHandle(handle) {
+  if (!handle) return false;
+  const resp = await fetch("/api/export");
+  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+  const data = await resp.json();
+  const payload = data.data || data;
+  const writable = await handle.createWritable();
+  await writable.write(JSON.stringify(payload, null, 2));
+  await writable.close();
+  currentSetFileHandle = handle;
+  currentSetFilename = handle.name || currentSetFilename;
+  setName = displaySetName(currentSetFilename || setName);
+  updateSetTitle(setName);
+  showToast("Set saved");
+  log("Saved current set");
+  return true;
+}
+
+async function requestSaveHandle(defaultName) {
+  if (!window.showSaveFilePicker) return null;
+  const suggested = ensureSetFilename(defaultName || "Untitled.sgridset");
+  return window.showSaveFilePicker({
+    suggestedName: suggested,
+    types: [
+      {
+        description: "Studio Grid Set",
+        accept: {
+          "application/json": [".sgridset"]
+        }
+      }
+    ],
+    excludeAcceptAllOption: true
+  });
+}
+
+function startExport(name) {
+  const targetName = ensureSetFilename(name || "Untitled.sgridset");
+  setName = displaySetName(targetName || setName);
+  updateSetTitle(setName);
+  pendingExportFilename = targetName;
+  currentSetFileHandle = null;
+  fetch("/api/export")
+    .then((resp) => {
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      return resp.json();
+    })
+    .then((data) => {
+      const payload = data.data || data;
+      downloadJSON(payload, targetName);
+      currentSetFilename = targetName;
+      setName = displaySetName(targetName || setName);
+      updateSetTitle(setName);
+      pendingExportFilename = null;
+      log("Exported set");
+    })
+    .catch(() => {
+      if (ws?.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: "export_state" }));
+        log("Export requested via WS (HTTP failed)");
+      } else {
+        pendingExportFilename = null;
+        log("Export failed (no connection)");
+      }
+    });
+}
+
+function openConfirmDialog(message, onConfirm) {
+  if (!dialogModal) {
+    onConfirm?.();
+    return;
+  }
+  if (dialogTitle) dialogTitle.textContent = "Confirm";
+  if (dialogMessage) dialogMessage.textContent = message || "Are you sure?";
+  dialogOkHandler = typeof onConfirm === "function" ? onConfirm : null;
+  dialogModal.classList.remove("hidden");
+}
+
+function openSaveSetModal() {
+  if (!saveSetModal) {
+    startExport(currentSetFilename || "Untitled.sgridset");
+    return;
+  }
+  const display = displaySetName(currentSetFilename || "Untitled.sgridset");
+  if (saveSetMessage) {
+    saveSetMessage.textContent = `Save current set as "${display}"?`;
+  }
+  saveSetModal.classList.remove("hidden");
+  if (saveSetCurrent) {
+    saveSetCurrent.onclick = () => {
+      saveSetModal.classList.add("hidden");
+      const target = displaySetName(currentSetFilename || "Untitled.sgridset");
+      openConfirmDialog(`Are you sure you want to save over "${target}"?`, () => {
+        if (currentSetFileHandle) {
+          saveSnapshotToHandle(currentSetFileHandle).catch(() => {
+            showToast("Save failed");
+            log("Save failed");
+          });
+        } else if (window.showSaveFilePicker) {
+          requestSaveHandle(currentSetFilename || `${target}.sgridset`)
+            .then((handle) => {
+              if (handle?.name) {
+                currentSetFilename = handle.name;
+                setName = displaySetName(handle.name || setName);
+                updateSetTitle(setName);
+              }
+              return saveSnapshotToHandle(handle);
+            })
+            .catch(() => {
+              log("Save canceled");
+            });
+        } else {
+          startExport(currentSetFilename || "Untitled.sgridset");
+        }
+      });
+    };
+  }
+  if (saveSetNew) {
+    saveSetNew.onclick = () => {
+      saveSetModal.classList.add("hidden");
+      const suggested = setName && setName.toLowerCase() !== "default" ? setName : "Untitled";
+      if (window.showSaveFilePicker) {
+        requestSaveHandle(suggested)
+          .then((handle) => {
+            if (handle?.name) {
+              currentSetFilename = handle.name;
+              setName = displaySetName(handle.name || setName);
+              updateSetTitle(setName);
+            }
+            return saveSnapshotToHandle(handle);
+          })
+          .catch(() => {
+            log("Save canceled");
+          });
+      } else {
+        startExport(suggested);
+      }
+    };
+  }
+  if (saveSetCancel) {
+    saveSetCancel.onclick = () => {
+      saveSetModal.classList.add("hidden");
+    };
+  }
 }
 
 function clearDragTargets() {
@@ -3142,6 +3640,8 @@ if (newSetBtn && newSetModal) {
       const keepMidi = !!(keepMidiSettingsToggle && keepMidiSettingsToggle.checked);
       ws?.readyState === WebSocket.OPEN &&
         ws.send(JSON.stringify({ type: "new_set", keepDeviceNames: keepNames, keepMidi, defaultColor: defaultDeviceColor }));
+      currentSetFilename = null;
+      currentSetFileHandle = null;
       if (!keepNames) {
         deviceNames = normalizeDeviceNames(null);
         resetNamesOnNextState = true;
@@ -3311,6 +3811,21 @@ if (renameSave) {
     ws?.readyState === WebSocket.OPEN &&
       ws.send(JSON.stringify({ type: "set_device_name", page: renameTargetPage, name: trimmed }));
     closeRenameModal();
+  };
+}
+
+if (dialogCancel) {
+  dialogCancel.onclick = () => {
+    dialogModal?.classList.add("hidden");
+    dialogOkHandler = null;
+  };
+}
+if (dialogOk) {
+  dialogOk.onclick = () => {
+    const handler = dialogOkHandler;
+    dialogModal?.classList.add("hidden");
+    dialogOkHandler = null;
+    handler?.();
   };
 }
 
