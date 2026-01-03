@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
-import { buildTd3Seq, parseTd3SeqBuffer, importTd3Pattern } from "./td3.js";
-import { MGridState } from "./state.js";
+import { buildTd3Seq, parseTd3SeqBuffer, importTd3Pattern } from "../server/td3.js";
+import { MGridState } from "../server/state.js";
 
 function makeMonoStateWithFourSameNotes({ slideFirstThree = true } = {}) {
   const state = new MGridState();

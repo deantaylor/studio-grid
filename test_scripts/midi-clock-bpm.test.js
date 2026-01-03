@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { MGridState } from "./state.js";
+import { MGridState } from "../server/state.js";
 
 function calcMidiClockBpm({ tempo, bars = 16, baseDivision = 16 }) {
   const state = new MGridState();

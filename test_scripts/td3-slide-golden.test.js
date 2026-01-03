@@ -2,8 +2,8 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { importTd3Pattern } from "./td3.js";
-import { MGridState } from "./state.js";
+import { importTd3Pattern } from "../server/td3.js";
+import { MGridState } from "../server/state.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const SEQ_PATH = path.join(__dirname, "..", "TD3", "example.seq");
