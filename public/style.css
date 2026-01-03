@@ -809,7 +809,6 @@ canvas#grid {
 }
 .bar-row .bar-btn.playing {
   color: var(--accent-secondary);
-);
 }
 .bar-row .bar-btn i {
   font-size: 16px;
@@ -854,8 +853,7 @@ canvas#grid {
   padding: 0 10px;
   min-width: 32px;
 }
-.pattern-length-btn.active {
-}
+
 .btn {
   background: var(--panel-strong);
   color: var(--surface);
