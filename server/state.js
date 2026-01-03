@@ -1000,7 +1000,8 @@ export class MGridState {
             }
           }
         }
-        if (step && step.on && (step.degree !== targetDegree || (uiMode && (seqType === "mono" || seqType === "mdtonal") && (step.octave || 0) !== targetOctave))) {
+        const rowMatch = step ? this.noteMatchesRow(step, targetDegree, seqType, rowInfo) : false;
+        if (step && step.on && !rowMatch) {
           const prevDegree = step.degree || 0;
           const prevOctave = step.octave || 0;
           const seqTypeCur = page?.sequencerType || "mono";
@@ -1847,7 +1848,7 @@ export class MGridState {
       const pageOverlays = Array.isArray(overlays?.[page]) ? overlays[page] : [];
       pageOverlays.forEach((ov) => {
         if (!ov) return;
-        this.enqueueOctaveOverlay({ page, x: ov.x, y: ov.y, octave: ov.octave, delta: 0, silent: true });
+        this.enqueueOctaveOverlay({ page, x: ov.x, y: ov.y, rawY: ov.y, octave: ov.octave, delta: 0, silent: true });
       });
       this.heldStep = null;
       this.heldStepModified = false;

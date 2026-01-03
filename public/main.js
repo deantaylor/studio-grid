@@ -3093,7 +3093,7 @@ function handleOctaveOverlayMessage(msg) {
     return;
   }
   const val = Number.isFinite(msg.octave) ? msg.octave : (Number.isFinite(msg.delta) ? msg.delta : 0);
-  const rawY = unmapOverlayY(msg.y, val, fullScaleMode);
+  const rawY = Number.isFinite(msg.rawY) ? msg.rawY : unmapOverlayY(msg.y, val, fullScaleMode);
   addOverlay(pageIdx, msg.x, rawY, msg.octave, msg.delta);
   if (!msg.silent) {
     const overlayPage = pageIdx;

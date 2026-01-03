@@ -7,3 +7,4 @@ logs/*
 debug/*
 spec/*
 studio-grid.code-workspace
+.DS_Store
