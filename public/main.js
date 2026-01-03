@@ -1344,12 +1344,7 @@ if (tempoLabelTop) {
     if (swingInput) swingInput.focus();
   };
 }
-if (swingBlock && swingInput) {
-  swingInput.onblur = () => {
-    swingBlock.classList.add("hidden");
-    tempoBlock?.classList.remove("hidden");
-  };
-}
+
 if (settingsTempoInput) {
   const commitSettingsTempo = () => {
     if (settingsOpen) return;

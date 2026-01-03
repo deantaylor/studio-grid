@@ -139,7 +139,6 @@ body {
   color: var(--surface);
   cursor: pointer;
   display: inline-flex;
-  align-items: center;
   justify-content: center;
   transition: background 0.15s ease, filter 0.15s ease, border-color 0.15s ease;
 }
@@ -827,7 +826,7 @@ canvas#grid {
   gap: var(--gap-md);
 }
 .pattern-scale-buttons { display: flex; gap: var(--gap-sm); }
-.pattern-scale-buttons .single { width: 32px; height: 32px; }
+.pattern-scale-buttons .single { width: 28px; height: 28px; }
 .pattern-scale-btn,
 .pattern-length-btn {
   border: none;
@@ -837,8 +836,7 @@ canvas#grid {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  height: 32px;
-  min-width: 32px;
+  height: 28px;
   font-size: 10px;
   line-height: 12px;
   font-weight: 400;
@@ -851,7 +849,6 @@ canvas#grid {
 .pattern-length-btn {
   background: var(--panel-strong);
   padding: 0 10px;
-  min-width: 32px;
 }
 
 .btn {
@@ -864,7 +861,7 @@ canvas#grid {
   font-weight: 400;
   font-size: 10px;
   line-height: 12px;
-  height: 32px;
+  height: 28px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -954,8 +951,7 @@ canvas#grid {
 .modal-actions button:hover { filter: brightness(1.05); }
 .btn.danger,
 .modal-actions .danger {
-  color: #1a1e14;
-  background: var(--danger);
+  color: var(--danger);
   border: 1px solid rgba(255, 142, 142, 0.55);
 }
 
