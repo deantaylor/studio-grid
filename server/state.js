@@ -1001,6 +1001,8 @@ export class MGridState {
           }
         }
         if (step && step.on && (step.degree !== targetDegree || (uiMode && (seqType === "mono" || seqType === "mdtonal") && (step.octave || 0) !== targetOctave))) {
+          const prevDegree = step.degree || 0;
+          const prevOctave = step.octave || 0;
           const seqTypeCur = page?.sequencerType || "mono";
           if (seqTypeCur === "poly" || seqTypeCur === "drum") {
             if (!Array.isArray(step.notes)) step.notes = [];
@@ -1031,6 +1033,14 @@ export class MGridState {
             step.octave = uiMode ? targetOctave : 0;
           }
           step.micro = 0;
+          if (seqTypeCur !== "poly" && seqTypeCur !== "drum") {
+            if (prevOctave) {
+              this.enqueueOctaveOverlay({ page: this.currentPage, x, y: clamp(6 - prevDegree, 0, 6), clear: true });
+            }
+            if (step.octave) {
+              this.enqueueOctaveOverlay({ page: this.currentPage, x, y: clamp(6 - step.degree, 0, 6), octave: step.octave, delta: 0 });
+            }
+          }
           // if previous step was a tie into this step and pitch now changes, convert previous to slide
           const prevStep = abs > 0 ? pat.steps[abs - 1] : null;
           if ((page?.sequencerType || "mono") === "mono" && prevStep && prevStep.on && prevStep.tie) {
@@ -1148,11 +1158,15 @@ export class MGridState {
             if (!Array.isArray(step2.notes)) step2.notes = [];
             const idx = step2.notes.indexOf(targetDeg);
             const rowMatch = this.noteMatchesRow(step2, targetDeg, seqType, rowInfo);
-            if (idx !== -1 && rowMatch) {
+          if (idx !== -1 && rowMatch) {
+              const prevOct = this.getNoteOctave(step2, targetDeg);
               step2.notes.splice(idx, 1);
               if (Array.isArray(step2.accented)) step2.accented = step2.accented.filter((n) => n !== targetDeg);
               if (step2.noteOctaves && typeof step2.noteOctaves === "object") {
                 delete step2.noteOctaves[targetDeg];
+              }
+              if (prevOct) {
+                this.enqueueOctaveOverlay({ page: this.currentPage, x: hx, y: hy, clear: true });
               }
             }
             if (!step2.notes.length) {
@@ -1508,6 +1522,7 @@ export class MGridState {
     if (n < 1 || n > 8) return false;
     if (this.currentPage === n) return false;
     this.currentPage = n;
+    this.forceLedRefresh = true;
     return true;
   }
 
@@ -1610,6 +1625,7 @@ export class MGridState {
     if (!pat) return null;
     return {
       length_steps: pat.length_steps,
+      time_scale: pat.time_scale,
       barView: pat.barView || 0,
       steps: pat.steps.map((s) => ({
         on: !!s.on,
@@ -1636,6 +1652,9 @@ export class MGridState {
     const pat = pg.patterns[pattern];
     if (!pat) return;
     pat.length_steps = clamp(snap.length_steps || pat.length_steps, 1, 128);
+    if (snap.time_scale !== undefined) {
+      pat.time_scale = Math.max(1, Math.min(4, Number(snap.time_scale) || 1));
+    }
     pat.barView = clamp(snap.barView || 0, 0, Math.max(0, Math.ceil(pat.length_steps / 16) - 1));
     for (let i = 0; i < pat.steps.length && i < snap.steps.length; i++) {
       const s = snap.steps[i];
@@ -1654,6 +1673,11 @@ export class MGridState {
         accented: Array.isArray(s.accented) ? s.accented.map((n) => clamp(n, 0, 6)) : [],
         noteOctaves: this.sanitizeNoteOctaves(s.noteOctaves)
       };
+    }
+    if (pattern === pg.active_pattern) {
+      this.playheads[page] = this.playheads[page] % pat.length_steps;
+      this.pageTicks[page] = this.pageTicks[page] || 0;
+      this.pageTickPos[page] = -1;
     }
   }
 
@@ -1755,16 +1779,24 @@ export class MGridState {
     const seqType = pg.sequencerType || "mono";
     const dxRaw = Number.isFinite(Number(opts.dx)) ? Math.round(Number(opts.dx)) : 0;
     const dyRaw = Number.isFinite(Number(opts.dy)) ? Math.round(Number(opts.dy)) : 0;
+    const barRaw = Number.isFinite(Number(opts.bar)) ? Math.round(Number(opts.bar)) : null;
+    const bars = Math.max(1, Math.ceil(len / 16));
+    const barIdx = barRaw == null ? null : clamp(barRaw, 0, bars - 1);
+    const barStart = barIdx == null ? 0 : barIdx * 16;
+    const barLen = barIdx == null ? len : Math.max(0, Math.min(16, len - barStart));
     let changed = false;
 
     // shift horizontally (wrap within the active pattern length)
     if (dxRaw) {
-      const norm = ((dxRaw % len) + len) % len;
+      const span = barIdx == null ? len : barLen;
+      if (span <= 0) return false;
+      const norm = ((dxRaw % span) + span) % span;
       if (norm) {
         const nextSteps = pat.steps.slice();
-        for (let i = 0; i < len; i++) {
-          const dest = (i + norm) % len;
-          nextSteps[dest] = pat.steps[i];
+        const start = barIdx == null ? 0 : barStart;
+        for (let i = 0; i < span; i++) {
+          const dest = start + ((i + norm) % span);
+          nextSteps[dest] = pat.steps[start + i];
         }
         pat.steps = nextSteps;
         changed = true;
@@ -1778,7 +1810,9 @@ export class MGridState {
         const next = ((deg + degreeDelta) % 7 + 7) % 7;
         return clamp(next, 0, 6);
       };
-      for (let i = 0; i < len; i++) {
+      const start = barIdx == null ? 0 : barStart;
+      const end = barIdx == null ? len : barStart + barLen;
+      for (let i = start; i < end; i++) {
         const step = pat.steps[i];
         if (!step?.on) continue;
         if (seqType === "poly" || seqType === "drum") {
@@ -1809,6 +1843,12 @@ export class MGridState {
 
     if (changed) {
       this.enqueueOctaveOverlay({ page, clearAll: true });
+      const overlays = this.octaveOverlaySnapshot?.();
+      const pageOverlays = Array.isArray(overlays?.[page]) ? overlays[page] : [];
+      pageOverlays.forEach((ov) => {
+        if (!ov) return;
+        this.enqueueOctaveOverlay({ page, x: ov.x, y: ov.y, octave: ov.octave, delta: 0, silent: true });
+      });
       this.heldStep = null;
       this.heldStepModified = false;
       this.heldStepPendingOff = false;
@@ -2489,14 +2529,11 @@ export class MGridState {
             const idx = row * WIDTH + x;
             frame[idx] = Math.max(frame[idx], level);
             if (step.mdSlide) {
-              const nextStep = pat.steps[abs + 1];
-              if (nextStep?.on) {
-                slideStarts.push({
-                  x1: x,
-                  y1: clamp(6 - step.degree, 0, 6),
-                  accent1: !!step.accent
-                });
-              }
+              slideStarts.push({
+                x1: x,
+                y1: clamp(6 - step.degree, 0, 6),
+                accent1: !!step.accent
+              });
             }
           } else {
             const degrees = ((page.sequencerType === "poly" || page.sequencerType === "drum") && Array.isArray(step.notes) && step.notes.length)

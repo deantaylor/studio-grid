@@ -627,14 +627,15 @@ function connectWS() {
         });
       }
       if (Array.isArray(msg.octaveOverlays)) {
-        const overlayFullScale = typeof msg.fullScaleMode === "boolean" ? msg.fullScaleMode : fullScaleMode;
         overlays = Array.from({ length: 9 }, (_, idx) => {
           const list = Array.isArray(msg.octaveOverlays[idx]) ? msg.octaveOverlays[idx] : [];
           return list
             .filter((o) => Number.isFinite(o?.x) && Number.isFinite(o?.y) && Number.isFinite(o?.octave) && o.octave !== 0)
             .map((o) => ({
               x: o.x,
-              y: mapOverlayY(o.y, o.octave, overlayFullScale),
+              y: o.y,
+              rawY: o.y,
+              octave: o.octave,
               text: o.octave > 0 ? `+${o.octave}` : `${o.octave}`,
               ts: Date.now()
             }));
@@ -768,7 +769,7 @@ function connectWS() {
         if (msg.page === currentPage) {
           applyPatternLengthUI();
           renderBarRow();
-          showToast(`Length set to ${msg.length}`);
+          if (!msg.silent) showToast(`Length set to ${msg.length}`);
         }
       }
     } else if (msg.type === "pattern_time_scale") {
@@ -1260,17 +1261,20 @@ function renderFrame(frame) {
   const currentOverlays = overlays[currentPage] || [];
   // keep numeric octave overlays persistent; only age out non-numeric markers
   const filtered = currentOverlays.filter((o) => {
-    const level = displayFrame[o.y * WIDTH + o.x] || 0;
-    if (level <= 0) return false;
     const isNumeric = /^[-+]?\d/.test(o.text);
+    const drawY = getOverlayDrawY(o);
+    if (drawY < 0 || drawY >= HEIGHT) return false;
+    const level = displayFrame[drawY * WIDTH + o.x] || 0;
+    if (!isNumeric && level <= 0) return false;
     if (isNumeric) return true;
     return (now - (o.ts || now)) < 1500;
   });
   overlays[currentPage] = filtered;
   overlays[currentPage].forEach((o) => {
     ctx.save();
+    const drawY = getOverlayDrawY(o);
     const px = o.x * (CELL_SIZE + CELL_GAP);
-    const py = o.y * (CELL_SIZE + CELL_GAP);
+    const py = drawY * (CELL_SIZE + CELL_GAP);
     ctx.translate(px, py);
     ctx.fillStyle = LABEL_COLOR;
     ctx.font = LABEL_FONT;
@@ -1921,14 +1925,17 @@ function applySettingsFromInputs() {
   if (clockSourceSel) {
     const prev = clockSource;
     const next = clockSourceSel.value === "external" ? "external" : "internal";
-    if (prev !== next) {
+    const changed = prev !== next;
+    if (changed) {
       clockSource = next;
       handleClockSourceChange(prev, next);
       if (prev === "external" && next === "internal") {
         lockTempoPrecision({ broadcast: true });
       }
     }
-    ws?.readyState === WebSocket.OPEN && ws.send(JSON.stringify({ type: "set_clock_source", source: clockSource }));
+    if (changed) {
+      ws?.readyState === WebSocket.OPEN && ws.send(JSON.stringify({ type: "set_clock_source", source: clockSource }));
+    }
     applyClockSourceUI();
   }
 
@@ -2724,16 +2731,39 @@ function enforceMDMidiOut(explicitTM1 = null) {
   }
 }
 
-canvas.addEventListener("click", (e) => {
+function sendGridTapFromClient(clientX, clientY) {
   const rect = canvas.getBoundingClientRect();
-  const x = Math.floor((e.clientX - rect.left) / (rect.width / WIDTH));
-  const y = Math.floor((e.clientY - rect.top) / (rect.height / HEIGHT));
+  const x = Math.floor((clientX - rect.left) / (rect.width / WIDTH));
+  const y = Math.floor((clientY - rect.top) / (rect.height / HEIGHT));
   if (x < 0 || x >= WIDTH || y < 0 || y >= HEIGHT) return;
   // send a full press+release tap so mouse input only toggles notes on/off
   if (ws?.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify({ type: "grid_key", x, y, s: 1 }));
     ws.send(JSON.stringify({ type: "grid_key", x, y, s: 0 }));
   }
+}
+
+function handleCanvasContextMenu(clientX, clientY) {
+  const rect = canvas.getBoundingClientRect();
+  const x = Math.floor((clientX - rect.left) / (rect.width / WIDTH));
+  const y = Math.floor((clientY - rect.top) / (rect.height / HEIGHT));
+  if (x < 0 || x >= WIDTH || y < 0 || y >= HEIGHT) {
+    closeNoteMenu();
+    return;
+  }
+  if (y >= getStepRows()) {
+    closeNoteMenu();
+    return;
+  }
+  closeNoteMenu();
+  if (ws?.readyState === WebSocket.OPEN) {
+    pendingNoteMenu = { x, y, clientX, clientY };
+    ws.send(JSON.stringify({ type: "get_step_state", x, y }));
+  }
+}
+
+canvas.addEventListener("click", (e) => {
+  sendGridTapFromClient(e.clientX, e.clientY);
 });
 canvas.addEventListener("mousemove", (e) => {
   const rect = canvas.getBoundingClientRect();
@@ -2818,22 +2848,7 @@ canvas.addEventListener("mouseleave", () => {
 });
 canvas.addEventListener("contextmenu", (e) => {
   e.preventDefault();
-  const rect = canvas.getBoundingClientRect();
-  const x = Math.floor((e.clientX - rect.left) / (rect.width / WIDTH));
-  const y = Math.floor((e.clientY - rect.top) / (rect.height / HEIGHT));
-  if (x < 0 || x >= WIDTH || y < 0 || y >= HEIGHT) {
-    closeNoteMenu();
-    return;
-  }
-  if (y >= getStepRows()) {
-    closeNoteMenu();
-    return;
-  }
-  closeNoteMenu();
-  if (ws?.readyState === WebSocket.OPEN) {
-    pendingNoteMenu = { x, y, clientX: e.clientX, clientY: e.clientY };
-    ws.send(JSON.stringify({ type: "get_step_state", x, y }));
-  }
+  handleCanvasContextMenu(e.clientX, e.clientY);
 });
 
 function nudgeStepOctave(delta) {
@@ -2930,6 +2945,15 @@ octaveControls.addEventListener("mouseleave", () => {
     if (!hoveredStep) octaveControls.style.display = "none";
   }, 150);
 });
+octaveControls.addEventListener("click", (e) => {
+  if (e.target !== octaveControls) return;
+  sendGridTapFromClient(e.clientX, e.clientY);
+});
+octaveControls.addEventListener("contextmenu", (e) => {
+  if (e.target !== octaveControls) return;
+  e.preventDefault();
+  handleCanvasContextMenu(e.clientX, e.clientY);
+});
 
 connectWS();
 initMIDI();
@@ -3019,20 +3043,29 @@ function addOverlay(page, x, y, octave, delta) {
   const val = Number.isFinite(octave) ? octave : (Number.isFinite(delta) ? delta : 0);
   if (!val) {
     // remove any existing numeric overlay when returning to zero
-    overlays[pageIdx] = overlays[pageIdx].filter((o) => !(o.x === x && o.y === y && /^[-+]?\d/.test(o.text)));
+    overlays[pageIdx] = overlays[pageIdx].filter((o) => {
+      if (!/^[-+]?\d/.test(o.text)) return true;
+      return !(o.x === x && getOverlayRawY(o) === y);
+    });
     if (pageIdx === currentPage) renderFrame(frames[currentPage]);
     return;
   }
   const text = val > 0 ? `+${val}` : `${val}`;
   const ts = Date.now();
-  overlays[pageIdx] = overlays[pageIdx].filter((o) => !(o.x === x && o.y === y && /^[-+]?\d/.test(o.text)));
-  overlays[pageIdx].push({ x, y, text, ts });
+  overlays[pageIdx] = overlays[pageIdx].filter((o) => {
+    if (!/^[-+]?\d/.test(o.text)) return true;
+    return !(o.x === x && getOverlayRawY(o) === y);
+  });
+  overlays[pageIdx].push({ x, y, rawY: y, octave: val, text, ts });
   if (pageIdx === currentPage) renderFrame(frames[currentPage]);
 }
 
 function clearOverlayAt(pageIdx, x, y) {
   if (!overlays[pageIdx]) overlays[pageIdx] = [];
-  overlays[pageIdx] = overlays[pageIdx].filter((o) => !(o.x === x && o.y === y && /^[-+]?\d/.test(o.text)));
+  overlays[pageIdx] = overlays[pageIdx].filter((o) => {
+    if (!/^[-+]?\d/.test(o.text)) return true;
+    return !(o.x === x && getOverlayRawY(o) === y);
+  });
 }
 
 function handleOctaveOverlayMessage(msg) {
@@ -3059,16 +3092,20 @@ function handleOctaveOverlayMessage(msg) {
     octaveControls.style.display = "none";
     return;
   }
-  addOverlay(pageIdx, msg.x, msg.y, msg.octave, msg.delta);
-  const overlayPage = pageIdx;
-  recentOctaveOverlay = {
-    page: overlayPage,
-    x: msg.x,
-    y: msg.y,
-    ts: Date.now()
-  };
-  if (!Number.isFinite(overlayPage) || overlayPage === currentPage) {
-    showOctaveControlsFromOverlay(msg);
+  const val = Number.isFinite(msg.octave) ? msg.octave : (Number.isFinite(msg.delta) ? msg.delta : 0);
+  const rawY = unmapOverlayY(msg.y, val, fullScaleMode);
+  addOverlay(pageIdx, msg.x, rawY, msg.octave, msg.delta);
+  if (!msg.silent) {
+    const overlayPage = pageIdx;
+    recentOctaveOverlay = {
+      page: overlayPage,
+      x: msg.x,
+      y: msg.y,
+      ts: Date.now()
+    };
+    if (!Number.isFinite(overlayPage) || overlayPage === currentPage) {
+      showOctaveControlsFromOverlay(msg);
+    }
   }
 }
 
@@ -3446,6 +3483,25 @@ function mapOverlayY(y, octave, useFullScale) {
   if (!useFullScale) return y;
   if (y === 6 && Number(octave) === 1) return 0;
   return y + 1;
+}
+
+function unmapOverlayY(y, octave, useFullScale) {
+  if (!useFullScale) return y;
+  if (y === 0) return 6;
+  return Math.max(0, Math.min(6, y - 1));
+}
+
+function getOverlayRawY(overlay) {
+  return Number.isFinite(overlay?.rawY) ? overlay.rawY : overlay.y;
+}
+
+function getOverlayDrawY(overlay) {
+  const rawY = getOverlayRawY(overlay);
+  if (!Number.isFinite(rawY)) return overlay?.y ?? 0;
+  if (Number.isFinite(overlay?.octave)) {
+    return mapOverlayY(rawY, overlay.octave, fullScaleMode);
+  }
+  return rawY;
 }
 
 function setFullScaleMode(next) {
@@ -3854,7 +3910,7 @@ function applySeqChange(type, clearPattern = true) {
     if (!barViews[currentPage]) barViews[currentPage] = [];
     barViews[currentPage][patIdx] = 0;
     if (ws?.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({ type: "set_pattern_length", pattern: patIdx, length: 16 }));
+      ws.send(JSON.stringify({ type: "set_pattern_length", pattern: patIdx, length: 16, silent: true }));
       ws.send(JSON.stringify({ type: "set_pattern_time_scale", pattern: patIdx, scale: 1 }));
       ws.send(JSON.stringify({ type: "set_bar_view", pattern: patIdx, bar: 0 }));
       ws.send(JSON.stringify({ type: "clear_pattern", pattern: patIdx }));
@@ -4004,7 +4060,9 @@ document.addEventListener("keydown", (e) => {
   }
   if (e.shiftKey && (e.key === "ArrowLeft" || e.key === "ArrowRight" || e.key === "ArrowUp" || e.key === "ArrowDown")) {
     if (isTypingTarget(e.target)) return;
-    const payload = { type: "shift_pattern", page: currentPage, pattern: activePatterns[currentPage] || 1, dx: 0, dy: 0 };
+    const patIdx = activePatterns[currentPage] || 1;
+    const bar = (barViews[currentPage] && barViews[currentPage][patIdx]) || 0;
+    const payload = { type: "shift_pattern", page: currentPage, pattern: patIdx, bar, dx: 0, dy: 0 };
     if (e.key === "ArrowLeft") payload.dx = -1;
     if (e.key === "ArrowRight") payload.dx = 1;
     if (e.key === "ArrowUp") payload.dy = -1;

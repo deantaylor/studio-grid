@@ -466,7 +466,11 @@ function handleClientMessage(ws, data) {
         data.length,
         { autoFill: autoFillBars }
       );
-      broadcastPatternLength(state.currentPage, data.pattern || state.pages[state.currentPage]?.active_pattern || 1);
+      broadcastPatternLength(
+        state.currentPage,
+        data.pattern || state.pages[state.currentPage]?.active_pattern || 1,
+        { silent: !!data.silent }
+      );
       renderAndPush();
       break;
     case "set_pattern_time_scale":
@@ -506,6 +510,9 @@ function handleClientMessage(ws, data) {
     }
     case "paste_pattern":
       state.applyPatternSnapshot(state.currentPage, state.pages[state.currentPage]?.active_pattern || 1, data.data || data.pattern);
+      broadcastPatternLength(state.currentPage, state.pages[state.currentPage]?.active_pattern || 1);
+      broadcastPatternTimeScale(state.currentPage, state.pages[state.currentPage]?.active_pattern || 1);
+      broadcastBarView(state.currentPage, state.pages[state.currentPage]?.active_pattern || 1);
       renderAndPush();
       break;
     case "paste_bar": {
@@ -527,9 +534,10 @@ function handleClientMessage(ws, data) {
     case "shift_pattern": {
       const page = data.page || state.currentPage;
       const patIdx = data.pattern || state.pages[page]?.active_pattern || 1;
+      const bar = Number.isFinite(Number(data.bar)) ? Number(data.bar) : null;
       const dx = Number.isFinite(Number(data.dx)) ? Number(data.dx) : 0;
       const dy = Number.isFinite(Number(data.dy)) ? Number(data.dy) : 0;
-      if (state.shiftPattern(page, patIdx, { dx, dy })) {
+      if (state.shiftPattern(page, patIdx, { dx, dy, bar })) {
         renderAndPush();
       }
       break;
@@ -974,11 +982,11 @@ function broadcastPatternStatus(page) {
   broadcast({ type: "pattern_status", page, active: p.active_pattern, pending: p.pending_pattern || null });
 }
 
-function broadcastPatternLength(page, pattern) {
+function broadcastPatternLength(page, pattern, opts = {}) {
   const p = state.pages[page];
   const pat = p?.patterns?.[pattern];
   if (!pat) return;
-  broadcast({ type: "pattern_length", page, pattern, length: pat.length_steps || 16 });
+  broadcast({ type: "pattern_length", page, pattern, length: pat.length_steps || 16, silent: !!opts.silent });
 }
 
 function broadcastPatternTimeScale(page, pattern) {
