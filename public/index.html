@@ -19,11 +19,6 @@
           <div class="badge-sub">v1.0</div>
         </div>
         <div class="top-controls">
-          <div class="transport">
-            <button id="transport-toggle" class="icon-btn" title="Play" aria-pressed="false">
-              <i class="iconoir-play" aria-hidden="true"></i>
-            </button>
-          </div>
           <div class="tempo-block" id="tempo-block">
             <span class="label" id="tempo-label-top">Tempo</span>
             <input type="number" class="input-sm" id="tempo" min="20" max="300" step="0.1" />
@@ -32,11 +27,22 @@
             <span class="label" id="swing-label-top">Swing</span>
             <input type="number" id="swing" min="50" max="80" step="1" />
           </div>
+          <div class="transport">
+            <button id="transport-toggle" class="icon-btn" title="Play" aria-pressed="false">
+              <i class="iconoir-play-solid" aria-hidden="true"></i>
+            </button>
+          </div>
           <div class="scale-inline">
             <span class="label">Scale</span>
             <div class="scale-pair">
-              <select id="scale-root" aria-label="Scale root" class="input-xsm"></select>
-              <select id="scale-mode" aria-label="Scale mode" class="input-md"></select>
+              <div class="select-wrap">
+                <select id="scale-root" aria-label="Scale root" class="input-xsm"></select>
+                <i class="iconoir-nav-arrow-down select-caret" aria-hidden="true"></i>
+              </div>
+              <div class="select-wrap">
+                <select id="scale-mode" aria-label="Scale mode" class="input-md"></select>
+                <i class="iconoir-nav-arrow-down select-caret" aria-hidden="true"></i>
+              </div>
             </div>
           </div>
         </div>
@@ -62,13 +68,16 @@
           <div class="device-toolbar">
             <div class="device-toolbar-left">
               <label>Type
-                <select id="seq-type" class="input-md">
-                  <option value="mono">Mono</option>
-                  <option value="poly">Poly</option>
-                  <option value="drum">Drum</option>
-                  <option value="mdtonal">MDTonal</option>
-                  <option value="cc">Control Change</option>
-                </select>
+                <div class="select-wrap">
+                  <select id="seq-type" class="input-md">
+                    <option value="mono">Mono</option>
+                    <option value="poly">Poly</option>
+                    <option value="drum">Drum</option>
+                    <option value="cc">Control Change</option>
+                    <option value="mdtonal">MDTonal</option>
+                  </select>
+                  <i class="iconoir-nav-arrow-down select-caret" aria-hidden="true"></i>
+                </div>
               </label>
               <div class="transpose-switch compact">
                 <span class="trans-label">Transpose</span>
@@ -80,8 +89,47 @@
                   <i class="iconoir-nav-arrow-right" aria-hidden="true"></i>
                 </button>
               </div>
+              <div class="cc-config md-config hidden" id="md-config">
+                <span class="cc-label">MD Track</span>
+                <div class="select-wrap">
+                  <select id="md-track" class="input-sm" aria-label="MD track">
+                    <option value="1">1 BD</option>
+                    <option value="2">2 SD</option>
+                    <option value="3">3 HT</option>
+                    <option value="4">4 MT</option>
+                    <option value="5">5 LT</option>
+                    <option value="6">6 CP</option>
+                    <option value="7">7 RS</option>
+                    <option value="8">8 CB</option>
+                    <option value="9">9 CH</option>
+                    <option value="10">10 OH</option>
+                    <option value="11">11 RC</option>
+                    <option value="12">12 CC</option>
+                    <option value="13">13 M1</option>
+                    <option value="14">14 M2</option>
+                    <option value="15">15 M3</option>
+                    <option value="16">16 M4</option>
+                  </select>
+                  <i class="iconoir-nav-arrow-down select-caret" aria-hidden="true"></i>
+                </div>
+              </div>
+              <div class="cc-config hidden" id="cc-config">
+                <span class="cc-label">CC</span>
+                <input
+                  type="number"
+                  id="cc-number"
+                  class="drum-note-input input-sm"
+                  min="0"
+                  max="127"
+                  value="1"
+                  aria-label="CC number"
+                  autocomplete="off"
+                  inputmode="numeric"
+                />
+              </div>
               <button id="export-td3" class="icon-btn hidden" title="Export TD-3 (.seq)">
                 <i class="iconoir-emoji" aria-hidden="true"></i>
+                <i class="iconoir-emoji-blink-left" aria-hidden="true"></i>
               </button>
               <label class ="hidden">Notes
                 <input type="text" id="device-notes" class="input-lg" placeholder="Notes for this device" />
@@ -89,7 +137,10 @@
             </div>
             <div class="device-toolbar-right">
               <label>MIDI Out
-                <select id="midi-out" class="input-lg"></select>
+                <div class="select-wrap">
+                  <select id="midi-out" class="input-lg"></select>
+                  <i class="iconoir-nav-arrow-down select-caret" aria-hidden="true"></i>
+                </div>
               </label>
               <label>Ch
                 <input type="number" id="midi-chan" class="input-xsm" min="1" max="16" value="1" />
@@ -97,41 +148,6 @@
             </div>
           </div>
           <div class="grid-wrap">
-            <div class="cc-config hidden" id="cc-config">
-              <span class="cc-label">CC</span>
-              <input
-                type="number"
-                id="cc-number"
-                class="drum-note-input input-sm"
-                min="0"
-                max="127"
-                value="1"
-                aria-label="CC number"
-                autocomplete="off"
-                inputmode="numeric"
-              />
-            </div>
-            <div class="cc-config md-config hidden" id="md-config">
-              <span class="cc-label">MD Track</span>
-              <select id="md-track" class="input-sm" aria-label="MD track">
-                <option value="1">1 BD</option>
-                <option value="2">2 SD</option>
-                <option value="3">3 HT</option>
-                <option value="4">4 MT</option>
-                <option value="5">5 LT</option>
-                <option value="6">6 CP</option>
-                <option value="7">7 RS</option>
-                <option value="8">8 CB</option>
-                <option value="9">9 CH</option>
-                <option value="10">10 OH</option>
-                <option value="11">11 RC</option>
-                <option value="12">12 CC</option>
-                <option value="13">13 M1</option>
-                <option value="14">14 M2</option>
-                <option value="15">15 M3</option>
-                <option value="16">16 M4</option>
-              </select>
-            </div>
             <div class="drum-notes" id="drum-notes">
               <span class="drum-notes-label">Notes</span>
               <input type="number" class="drum-note-input input-sm" data-row="6" min="0" max="127" value="36" aria-label="Drum row 1 note" />
@@ -142,6 +158,7 @@
               <input type="number" class="drum-note-input input-sm" data-row="1" min="0" max="127" value="51" aria-label="Drum row 6 note" />
               <input type="number" class="drum-note-input input-sm" data-row="0" min="0" max="127" value="57" aria-label="Drum row 7 note" />
             </div>
+            <div class="scale-notes hidden" id="scale-notes" aria-hidden="true"></div>
             <canvas id="grid" width="640" height="320"></canvas>
             <div id="toast" class="toast hidden"></div>
           </div>
@@ -150,20 +167,23 @@
             <div class="pattern-controls">
               <div class="pattern-controls-left">
                 <label>Pattern
-                  <select id="pattern-select" class="input-xsm">
-                    <option value="1">1</option>
-                    <option value="2">2</option>
-                    <option value="3">3</option>
-                    <option value="4">4</option>
-                    <option value="5">5</option>
-                    <option value="6">6</option>
-                    <option value="7">7</option>
-                    <option value="8">8</option>
-                  </select>
+                  <div class="select-wrap">
+                    <select id="pattern-select" class="input-xsm">
+                      <option value="1">1</option>
+                      <option value="2">2</option>
+                      <option value="3">3</option>
+                      <option value="4">4</option>
+                      <option value="5">5</option>
+                      <option value="6">6</option>
+                      <option value="7">7</option>
+                      <option value="8">8</option>
+                    </select>
+                    <i class="iconoir-nav-arrow-down select-caret" aria-hidden="true"></i>
+                  </div>
                 </label>
                 <div class="pattern-actions inline">
-                  <button id="copy-pattern-btn" type="button" title="Copy Pattern" class="icon-btn"><i class="iconoir-table" aria-hidden="true"></i></button>
                   <button id="copy-bar-btn" type="button" title="Copy Bar" class="icon-btn"><i class="iconoir-table-rows" aria-hidden="true"></i></button>
+                  <button id="copy-pattern-btn" type="button" title="Copy Pattern" class="icon-btn"><i class="iconoir-table" aria-hidden="true"></i></button>
                   <button id="paste-btn" type="button" title="Paste" class="icon-btn"><i class="iconoir-paste-clipboard" aria-hidden="true"></i></button>
                   <button id="clear-btn" type="button" class="icon-btn xmark" title="Clear"><i class="iconoir-xmark" aria-hidden="true"></i></button>
                 </div>
@@ -186,7 +206,7 @@
                   <div class="bar-row" id="bar-row"></div>
                 </div>
                 <button id="follow-btn" class="icon-btn follow-btn" type="button" title="Follow playhead">
-                  <i class="iconoir-arrow-right-circle" aria-hidden="true"></i>
+                  <i class="iconoir-arrow-right-circle-solid" aria-hidden="true"></i>
                 </button>
               </div>
             </div>
@@ -198,37 +218,56 @@
     <div id="settings-modal" class="modal hidden">
       <div class="modal-body">
         <div class="modal-head">
-          <h4>LED Settings</h4>
+          <h4>Settings</h4>
           <button id="settings-close" aria-label="Close">×</button>
         </div>
           <div class="modal-grid">
-            <label>Tempo
+            <h4>General</h4>
+
+              <label>UI Scale
+              <div class="select-wrap">
+                <select id="ui-scale">
+                  <option value="1">1x</option>
+                  <option value="1.25">1.25x</option>
+                  <option value="1.5" selected>1.5x</option>
+                </select>
+                <i class="iconoir-nav-arrow-down select-caret" aria-hidden="true"></i>
+              </div>
+            </label>
+             <div class="default-color-row">
+              <span class="label">Default device color</span>
+              <button type="button" id="default-color-trigger" class="color-chip" aria-label="Choose default device color"></button>
+            </div>
+            <h4>Clock Settings</h4>
+                        <label>Tempo
               <input type="number" id="settings-tempo" min="20" max="300" step="0.1" />
             </label>
-            <label>UI Scale
-              <select id="ui-scale">
-                <option value="1">1x</option>
-                <option value="1.25">1.25x</option>
-                <option value="1.5" selected>1.5x</option>
-              </select>
-            </label>
-        
           <label>Clock
-            <select id="clock-source">
-              <option value="internal">Internal</option>
-              <option value="external">External</option>
-            </select>
+            <div class="select-wrap">
+              <select id="clock-source">
+                <option value="internal">Internal</option>
+                <option value="external">External</option>
+              </select>
+              <i class="iconoir-nav-arrow-down select-caret" aria-hidden="true"></i>
+            </div>
           </label>
           <label id="clock-source-wrap" class="hidden">Clock In
-            <select id="clock-input"></select>
+            <div class="select-wrap">
+              <select id="clock-input"></select>
+              <i class="iconoir-nav-arrow-down select-caret" aria-hidden="true"></i>
+            </div>
           </label>
           <label class="switch-option">
               <input type="checkbox" id="clock-out-enable" />
               Send MIDI clock out
           </label>
           <label id="clock-out-wrap">Clock Out Port
-            <select id="clock-out-port"></select>
+            <div class="select-wrap">
+              <select id="clock-out-port"></select>
+              <i class="iconoir-nav-arrow-down select-caret" aria-hidden="true"></i>
+            </div>
           </label>
+            <h4>Workflow</h4>
           <label class="switch-option">
               <input type="checkbox" id="auto-fill" checked />
               Auto-fill new bars
@@ -242,16 +281,15 @@
               Latch pattern launch page
             </label>
             <label>Base note length
-              <select id="base-note-length">
-                <option value="8">1/8</option>
-                <option value="16" selected>1/16</option>
-                <option value="32">1/32</option>
-              </select>
+              <div class="select-wrap">
+                <select id="base-note-length">
+                  <option value="8">1/8</option>
+                  <option value="16" selected>1/16</option>
+                  <option value="32">1/32</option>
+                </select>
+                <i class="iconoir-nav-arrow-down select-caret" aria-hidden="true"></i>
+              </div>
             </label>
-            <div class="default-color-row">
-              <span class="default-color-label">Default device color</span>
-              <button type="button" id="default-color-trigger" class="color-chip" aria-label="Choose default device color"></button>
-            </div>
             <label class="switch-option">
               <input type="checkbox" id="allow-md-external" />
               Allow non-TM-1 output for MD
@@ -259,7 +297,8 @@
           </div>
           <div class="modal-actions">
             <button type="button" id="settings-restore-default" class="btn">Restore default</button>
-            <button type="button" id="settings-save-config" class="btn primary">Save config</button>
+            <button type="button" id="settings-save-config" class="btn">Save config</button>
+            <button type="button" id="settings-confirm" class="btn primary">Confirm</button>
           </div>
       </div>
     </div>
@@ -267,6 +306,7 @@
       <div class="modal-body">
         <div class="modal-head">
           <h4>Export TD-3</h4>
+
           <button id="td3-close" aria-label="Close">×</button>
         </div>
         <div class="modal-grid">
@@ -286,12 +326,13 @@
     <div id="td3-action-modal" class="modal hidden">
       <div class="modal-body">
         <div class="modal-head">
-          <h4>TD-3</h4>
+          <h4>TD-3 Options</h4>
           <button id="td3-action-close" aria-label="Close">×</button>
         </div>
+        <p>What would you like to do?</p>
         <div class="modal-actions">
-          <button id="td3-import-btn" type="button" class="btn">Import</button>
-          <button id="td3-export-btn" type="button" class="btn primary">Export</button>
+          <button id="td3-import-btn" type="button" class="btn">Import .seq</button>
+          <button id="td3-export-btn" type="button" class="btn primary">Export .seq</button>
         </div>
       </div>
     </div>

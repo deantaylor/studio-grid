@@ -14,7 +14,7 @@ const ON_COLOR_DEFAULT = "#ff8e8e";
 let onColor = ON_COLOR_DEFAULT;
 const LABEL_COLOR = (getComputedStyle(document.documentElement).getPropertyValue("--panel-strong") || "#424242").trim() || "#424242";
 const LABEL_FONT = "400 8px 'Inter', sans-serif";
-const STEP_ROWS = 7;
+const DEFAULT_STEP_ROWS = 7;
 const STEP_ON = 8;
 const STEP_MICRO = 6;
 const PLAYHEAD = 10;
@@ -82,6 +82,7 @@ const settingsBackdrop = document.getElementById("settings-backdrop");
 const settingsClose = document.getElementById("settings-close");
 const settingsSaveCfg = document.getElementById("settings-save-config");
 const settingsRestoreCfg = document.getElementById("settings-restore-default");
+const settingsConfirm = document.getElementById("settings-confirm");
 const showLogToggle = document.getElementById("show-log");
 const autoFillToggle = document.getElementById("auto-fill");
 const autoLoadToggle = document.getElementById("auto-load-set");
@@ -107,6 +108,7 @@ const patternLengthBtns = document.querySelectorAll("[data-pattern-length]");
 const patternScaleToggle = document.getElementById("pattern-scale-toggle");
 const barRow = document.getElementById("bar-row");
 const drumInputs = Array.from(document.querySelectorAll(".drum-note-input"));
+const scaleNotesWrap = document.getElementById("scale-notes");
 const followBtn = document.getElementById("follow-btn");
 const copyPatternBtn = document.getElementById("copy-pattern-btn");
 const copyBarBtn = document.getElementById("copy-bar-btn");
@@ -188,6 +190,19 @@ const td3ScaleFit = document.getElementById("td3-scale-fit");
 const td3ScaleSwitch = document.getElementById("td3-scale-switch");
 const td3ScaleMessage = document.getElementById("td3-scale-message");
 const NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
+const SCALE_STEPS = {
+  major: [0, 2, 4, 5, 7, 9, 11],
+  minor: [0, 2, 3, 5, 7, 8, 10],
+  dorian: [0, 2, 3, 5, 7, 9, 10],
+  mixolydian: [0, 2, 4, 5, 7, 9, 10],
+  lydian: [0, 2, 4, 6, 7, 9, 11],
+  phrygian: [0, 1, 3, 5, 7, 8, 10],
+  locrian: [0, 1, 3, 5, 6, 8, 10],
+  harmonic_minor: [0, 2, 3, 5, 7, 8, 11],
+  melodic_minor: [0, 2, 3, 5, 7, 9, 11],
+  whole_tone: [0, 2, 4, 6, 8, 10, 12],
+  chromatic: [0, 1, 2, 3, 4, 5, 6],
+};
 const formatRoot = (root) => NOTE_NAMES[((Number(root) || 0) % 12 + 12) % 12];
 const formatScaleStr = (scale) => {
   if (!scale) return "major (C)";
@@ -198,10 +213,53 @@ const td3ReplaceModal = document.getElementById("td3-replace-modal");
 const td3ReplaceConfirm = document.getElementById("td3-replace-confirm");
 const td3ReplaceCancel = document.getElementById("td3-replace-cancel");
 
+const initNumberSteppers = () => {
+  const numberInputs = Array.from(document.querySelectorAll("input[type=\"number\"]"));
+
+  numberInputs.forEach((input) => {
+    if (input.dataset.stepperAttached === "true") {
+      return;
+    }
+
+    const wrap = document.createElement("div");
+    wrap.className = "number-wrap";
+    input.parentNode.insertBefore(wrap, input);
+    wrap.appendChild(input);
+
+    const stepper = document.createElement("button");
+    stepper.type = "button";
+    stepper.className = "number-stepper";
+    stepper.setAttribute("aria-label", "Adjust value");
+    stepper.innerHTML = "<i class=\"iconoir-arrow-separate-vertical\" aria-hidden=\"true\"></i>";
+    wrap.appendChild(stepper);
+
+    stepper.addEventListener("click", (event) => {
+      const rect = stepper.getBoundingClientRect();
+      const isUp = event.clientY - rect.top < rect.height / 2;
+
+      if (isUp) {
+        input.stepUp();
+      } else {
+        input.stepDown();
+      }
+
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+      input.dispatchEvent(new Event("change", { bubbles: true }));
+      input.focus();
+    });
+
+    input.dataset.stepperAttached = "true";
+  });
+};
+
+initNumberSteppers();
+
 const DEVICE_COLOR_PALETTE = ["#d7ff73", "#ff8e8e", "#9ad7ff", "#f0c674", "#c6b8ff"];
 const BASE_DEFAULT_DEVICE_COLOR = "#ffe070";
 let defaultDeviceColor = BASE_DEFAULT_DEVICE_COLOR;
 const AUTO_MDTONAL_COLOR = ON_COLOR_DEFAULT;
+let settingsOpen = false;
+let pendingDefaultDeviceColor = null;
 
 // context menu for device tabs
 const deviceMenu = document.getElementById("device-menu");
@@ -391,6 +449,7 @@ let mdBaseSweep = 80;
 let monoSlidePad = 0.1; // fraction of a step to trim slide gates
 let sequencerTypes = Array.from({ length: 9 }, () => "mono");
 let gridConnected = null;
+let fullScaleMode = false;
 const LOCAL_CONFIG_KEY = "studio_grid_config";
 let pendingTd3Import = null; // { data, page }
 const DEFAULT_DRUMS = [36, 38, 41, 43, 45, 47, 55]; // C1..G1 bottom->top
@@ -568,13 +627,14 @@ function connectWS() {
         });
       }
       if (Array.isArray(msg.octaveOverlays)) {
+        const overlayFullScale = typeof msg.fullScaleMode === "boolean" ? msg.fullScaleMode : fullScaleMode;
         overlays = Array.from({ length: 9 }, (_, idx) => {
           const list = Array.isArray(msg.octaveOverlays[idx]) ? msg.octaveOverlays[idx] : [];
           return list
             .filter((o) => Number.isFinite(o?.x) && Number.isFinite(o?.y) && Number.isFinite(o?.octave) && o.octave !== 0)
             .map((o) => ({
               x: o.x,
-              y: o.y,
+              y: mapOverlayY(o.y, o.octave, overlayFullScale),
               text: o.octave > 0 ? `+${o.octave}` : `${o.octave}`,
               ts: Date.now()
             }));
@@ -594,13 +654,16 @@ function connectWS() {
       applyPatternScaleUI();
       applyMdSlideSpeedUI();
       applyPatternControlLatchUI();
+      if (typeof msg.fullScaleMode === "boolean") {
+        setFullScaleMode(msg.fullScaleMode);
+      }
       if (typeof msg.gridConnected === "boolean") {
-        handleGridStatus(msg.gridConnected);
+        handleGridStatus(msg.gridConnected, msg.fullScaleMode);
       }
     } else if (msg.type === "page_change") {
       updatePage(msg.page || currentPage, { fromServer: true });
     } else if (msg.type === "grid_status") {
-      handleGridStatus(!!msg.connected);
+      handleGridStatus(!!msg.connected, msg.fullScaleMode);
     } else if (msg.type === "tempo") {
       tempo = msg.bpm || tempo;
       updateTempo(tempo, { broadcast: false });
@@ -948,7 +1011,7 @@ function setRunningState(isRunning) {
   transportBtn.title = running ? "Stop" : "Play";
   transportBtn.setAttribute("aria-pressed", running);
   transportBtn.classList.toggle("active", running);
-  if (icon) icon.className = running ? "iconoir-pause" : "iconoir-play";
+  if (icon) icon.className = running ? "iconoir-pause-solid" : "iconoir-play-solid";
 }
 
 function toggleTransport() {
@@ -1162,8 +1225,9 @@ function renderFrame(frame) {
   const lastBar = Math.max(0, bars - 1);
   if (rem > 0 && bar === lastBar) {
     const dimLevel = Math.max(1, Math.round((ledLevels.pattern_inactive || 4) * 0.5));
+    const rows = getStepRows();
     for (let x = rem; x < 16; x++) {
-      for (let y = 0; y < STEP_ROWS; y++) {
+      for (let y = 0; y < rows; y++) {
         const idx = y * WIDTH + x;
         displayFrame[idx] = Math.max(1, Math.min(displayFrame[idx] || dimLevel, dimLevel));
       }
@@ -1287,12 +1351,15 @@ if (swingBlock && swingInput) {
   };
 }
 if (settingsTempoInput) {
-  const commitSettingsTempo = () => updateTempo(settingsTempoInput.value);
+  const commitSettingsTempo = () => {
+    if (settingsOpen) return;
+    updateTempo(settingsTempoInput.value);
+  };
   const nudgeSettingsTempo = (delta) => {
     const cur = Number(settingsTempoInput.value);
     const safe = Number.isFinite(cur) ? Math.round(cur + delta) : Math.round(tempo);
     settingsTempoInput.value = safe;
-    commitSettingsTempo();
+    if (!settingsOpen) commitSettingsTempo();
   };
   settingsTempoInput.step = "1";
   settingsTempoInput.onchange = commitSettingsTempo;
@@ -1373,6 +1440,7 @@ if (clockToggleBtn) {
 }
 if (clockSourceSel) {
   clockSourceSel.onchange = () => {
+    if (settingsOpen) return;
     const prev = clockSource;
     clockSource = clockSourceSel.value;
     handleClockSourceChange(prev, clockSource);
@@ -1395,6 +1463,7 @@ if (clockSourceSel) {
 
 if (clockInputSel) {
   clockInputSel.onchange = () => {
+    if (settingsOpen) return;
     const name = clockInputSel.value;
     clockInputId = name;
     ws?.readyState === WebSocket.OPEN && ws.send(JSON.stringify({ type: "set_clock_input", name }));
@@ -1403,7 +1472,7 @@ if (clockInputSel) {
 }
 
 function applyClockSourceUI() {
-  if (clockSourceSel) clockSourceSel.value = clockSource || "internal";
+  if (clockSourceSel && !settingsOpen) clockSourceSel.value = clockSource || "internal";
   const wrap = document.getElementById("clock-source-wrap");
   if (wrap) wrap.classList.remove("hidden"); // keep clock input visible for both sources
   if (clockToggleBtn) {
@@ -1826,23 +1895,150 @@ document.getElementById("import").onclick = () => {
   };
   picker.click();
 };
+function syncSettingsInputs() {
+  if (settingsTempoInput) settingsTempoInput.value = formatTempoDisplay(tempo);
+  if (uiScaleSel) uiScaleSel.value = String(uiScale || 1.5);
+  if (clockSourceSel) clockSourceSel.value = clockSource || "internal";
+  if (clockInputSel && clockInputId) clockInputSel.value = clockInputId;
+  if (clockOutToggle) clockOutToggle.checked = !!clockOutEnabled;
+  if (clockOutPortSel && clockOutPortId) clockOutPortSel.value = clockOutPortId;
+  if (autoFillToggle) autoFillToggle.checked = !!autoFillBars;
+  if (autoLoadToggle) autoLoadToggle.checked = !!autoLoadSet;
+  if (patternControlLatchToggle) patternControlLatchToggle.checked = !!patternControlLatch;
+  if (allowMDExternalToggle) allowMDExternalToggle.checked = !!allowMDExternal;
+  if (mdBaseSweepInput) mdBaseSweepInput.value = mdBaseSweep;
+  if (monoSlidePadInput) monoSlidePadInput.value = Math.round((monoSlidePad || 0) * 100);
+  if (baseNoteLenSel) applyBaseNoteLenUI();
+  Object.entries(ledInputs).forEach(([k, el]) => {
+    if (el) el.value = ledLevels[k] ?? 0;
+  });
+  if (settingsOpen && pendingDefaultDeviceColor) {
+    updateDefaultColorTrigger(pendingDefaultDeviceColor, { preview: true });
+  } else {
+    updateDefaultColorTrigger();
+  }
+}
+
+function applySettingsFromInputs() {
+  if (settingsTempoInput) updateTempo(settingsTempoInput.value);
+  if (uiScaleSel) applyUiScale(uiScaleSel.value);
+
+  if (clockSourceSel) {
+    const prev = clockSource;
+    const next = clockSourceSel.value === "external" ? "external" : "internal";
+    if (prev !== next) {
+      clockSource = next;
+      handleClockSourceChange(prev, next);
+      if (prev === "external" && next === "internal") {
+        lockTempoPrecision({ broadcast: true });
+      }
+    }
+    ws?.readyState === WebSocket.OPEN && ws.send(JSON.stringify({ type: "set_clock_source", source: clockSource }));
+    applyClockSourceUI();
+  }
+
+  if (clockInputSel) {
+    const name = clockInputSel.value;
+    clockInputId = name;
+    ws?.readyState === WebSocket.OPEN && ws.send(JSON.stringify({ type: "set_clock_input", name }));
+    if (clockSource === "external") attachClockInput(clockInputId);
+  }
+
+  if (clockOutToggle) {
+    clockOutEnabled = !!clockOutToggle.checked;
+    ws?.readyState === WebSocket.OPEN && ws.send(JSON.stringify({ type: "set_clock_out", enabled: clockOutEnabled }));
+  }
+  if (clockOutPortSel) {
+    clockOutPortId = clockOutPortSel.value || "";
+    ws?.readyState === WebSocket.OPEN && ws.send(JSON.stringify({ type: "set_clock_out_device", id: clockOutPortId, name: clockOutPortId }));
+  }
+  if (autoFillToggle) {
+    autoFillBars = !!autoFillToggle.checked;
+    ws?.readyState === WebSocket.OPEN && ws.send(JSON.stringify({ type: "set_auto_fill", enabled: autoFillBars }));
+  }
+  if (autoLoadToggle) {
+    autoLoadSet = !!autoLoadToggle.checked;
+  }
+  if (showLogToggle) {
+    const show = showLogToggle.checked;
+    document.getElementById("log").classList.toggle("hidden", !show);
+  }
+  if (patternControlLatchToggle) {
+    patternControlLatch = !!patternControlLatchToggle.checked;
+    ws?.readyState === WebSocket.OPEN &&
+      ws.send(JSON.stringify({ type: "set_pattern_control_latch", enabled: patternControlLatch }));
+  }
+  if (allowMDExternalToggle) {
+    allowMDExternal = !!allowMDExternalToggle.checked;
+    enforceMDMidiOut();
+  }
+  if (baseNoteLenSel) {
+    let val = Math.max(1, Math.min(32, Math.round(Number(baseNoteLenSel.value) || baseDivision || 16)));
+    if (val <= 4) val = val * 4;
+    if (val === 6) val = 24;
+    baseDivision = val;
+    baseNoteLenSel.value = String(val);
+    ws?.readyState === WebSocket.OPEN && ws.send(JSON.stringify({ type: "set_base_division", division: val }));
+  }
+
+  Object.entries(ledInputs).forEach(([k, el]) => {
+    if (!el) return;
+    const val = Math.max(0, Math.min(15, Math.round(Number(el.value) || 0)));
+    ledLevels[k] = val;
+  });
+  ws?.readyState === WebSocket.OPEN && ws.send(JSON.stringify({ type: "set_led_levels", levels: { ...ledLevels } }));
+
+  if (mdBaseSweepInput) {
+    const val = Math.max(20, Math.min(200, Math.round(Number(mdBaseSweepInput.value) || mdBaseSweep)));
+    mdBaseSweep = val;
+    mdBaseSweepInput.value = val;
+    ws?.readyState === WebSocket.OPEN && ws.send(JSON.stringify({ type: "set_md_slide_params", factor: mdSlideSpeed, curve: mdSlideCurve, baseMs: mdBaseSweep }));
+  }
+  if (monoSlidePadInput) {
+    const pct = Math.max(0, Math.min(50, Math.round(Number(monoSlidePadInput.value) || (monoSlidePad * 100))));
+    monoSlidePad = pct / 100;
+    monoSlidePadInput.value = pct;
+    ws?.readyState === WebSocket.OPEN && ws.send(JSON.stringify({ type: "set_mono_slide_pad", value: monoSlidePad }));
+  }
+
+  if (pendingDefaultDeviceColor) {
+    defaultDeviceColor = pendingDefaultDeviceColor;
+    applyDefaultDeviceColor();
+    applyDeviceBadge();
+    renderTabs();
+    renderFrame(frames[currentPage]);
+  }
+  updateDefaultColorTrigger();
+}
+
 if (settingsBtn && settingsModal && settingsBackdrop) {
   const openSettings = () => {
-    applyLedSettingsUI();
-    applyMdSlideSpeedUI();
+    settingsOpen = true;
+    pendingDefaultDeviceColor = defaultDeviceColor;
+    syncSettingsInputs();
     settingsModal.classList.remove("hidden");
     settingsBackdrop.classList.remove("hidden");
   };
   const closeSettings = () => {
+    settingsOpen = false;
+    pendingDefaultDeviceColor = null;
+    updateDefaultColorTrigger();
     settingsModal.classList.add("hidden");
     settingsBackdrop.classList.add("hidden");
+  };
+  const confirmSettings = () => {
+    if (!settingsOpen) return;
+    applySettingsFromInputs();
+    closeSettings();
   };
   settingsBtn.onclick = openSettings;
   if (settingsClose) settingsClose.onclick = closeSettings;
   settingsBackdrop.onclick = closeSettings;
+  if (settingsConfirm) settingsConfirm.onclick = confirmSettings;
   Object.entries(ledInputs).forEach(([k, el]) => {
     if (!el) return;
     el.oninput = () => {
+      if (settingsOpen) return;
       const val = Math.max(0, Math.min(15, Math.round(Number(el.value) || 0)));
       ledLevels[k] = val;
       ws?.readyState === WebSocket.OPEN && ws.send(JSON.stringify({ type: "set_led_levels", levels: { [k]: val } }));
@@ -1850,18 +2046,21 @@ if (settingsBtn && settingsModal && settingsBackdrop) {
   });
   if (showLogToggle) {
     showLogToggle.onchange = () => {
+      if (settingsOpen) return;
       const show = showLogToggle.checked;
       document.getElementById("log").classList.toggle("hidden", !show);
     };
   }
   if (allowMDExternalToggle) {
     allowMDExternalToggle.onchange = () => {
+      if (settingsOpen) return;
       allowMDExternal = !!allowMDExternalToggle.checked;
       enforceMDMidiOut();
     };
   }
   if (patternControlLatchToggle) {
     patternControlLatchToggle.onchange = () => {
+      if (settingsOpen) return;
       patternControlLatch = !!patternControlLatchToggle.checked;
       ws?.readyState === WebSocket.OPEN &&
         ws.send(JSON.stringify({ type: "set_pattern_control_latch", enabled: patternControlLatch }));
@@ -1869,6 +2068,7 @@ if (settingsBtn && settingsModal && settingsBackdrop) {
   }
   if (mdBaseSweepInput) {
     const commitBaseSweep = () => {
+      if (settingsOpen) return;
       const val = Math.max(20, Math.min(200, Math.round(Number(mdBaseSweepInput.value) || mdBaseSweep)));
       mdBaseSweep = val;
       mdBaseSweepInput.value = val;
@@ -1879,6 +2079,7 @@ if (settingsBtn && settingsModal && settingsBackdrop) {
   }
   if (monoSlidePadInput) {
     const commitMonoSlidePad = () => {
+      if (settingsOpen) return;
       const pct = Math.max(0, Math.min(50, Math.round(Number(monoSlidePadInput.value) || (monoSlidePad * 100))));
       monoSlidePad = pct / 100;
       monoSlidePadInput.value = pct;
@@ -1889,6 +2090,7 @@ if (settingsBtn && settingsModal && settingsBackdrop) {
   }
   if (baseNoteLenSel) {
     const commitBaseDivision = () => {
+      if (settingsOpen) return;
       let val = Math.max(1, Math.min(32, Math.round(Number(baseNoteLenSel.value) || baseDivision || 16)));
       if (val <= 4) val = val * 4; // migrate old per-beat values (2->8, 4->16)
       if (val === 6) val = 24; // migrate old 6-per-beat
@@ -1907,12 +2109,12 @@ if (settingsSaveCfg) {
         ledLevels,
         clockSource,
         clockInput: clockInputId,
-        clockOut: !!(clockOutToggle && clockOutToggle.checked),
+        clockOut: !!clockOutEnabled,
         clockOutDevice: clockOutPortId,
         showLog: !!(showLogToggle && showLogToggle.checked),
-        autoFill: !!(autoFillToggle && autoFillToggle.checked),
-        autoLoadSet: !!(autoLoadToggle && autoLoadToggle.checked),
-        allowMDExternal: !!(allowMDExternalToggle && allowMDExternalToggle.checked),
+        autoFill: !!autoFillBars,
+        autoLoadSet: !!autoLoadSet,
+        allowMDExternal: !!allowMDExternal,
         baseDivision,
         midiSettings,
         patternControlLatch,
@@ -1932,6 +2134,22 @@ if (settingsSaveCfg) {
 }
 if (settingsRestoreCfg) {
   settingsRestoreCfg.onclick = () => {
+    if (settingsOpen) {
+      if (allowMDExternalToggle) allowMDExternalToggle.checked = false;
+      if (clockOutToggle) clockOutToggle.checked = false;
+      if (clockOutPortSel) clockOutPortSel.value = "";
+      if (autoFillToggle) autoFillToggle.checked = true;
+      if (autoLoadToggle) autoLoadToggle.checked = false;
+      if (patternControlLatchToggle) patternControlLatchToggle.checked = false;
+      if (baseNoteLenSel) baseNoteLenSel.value = "16";
+      if (mdBaseSweepInput) mdBaseSweepInput.value = 80;
+      if (monoSlidePadInput) monoSlidePadInput.value = 10;
+      Object.entries(ledInputs).forEach(([k, el]) => {
+        if (el) el.value = DEFAULT_LED_LEVELS[k] ?? 0;
+      });
+      showToast("Defaults staged");
+      return;
+    }
     allowMDExternal = false;
     enforceMDMidiOut();
     if (allowMDExternalToggle) allowMDExternalToggle.checked = false;
@@ -2404,6 +2622,7 @@ function applySeqTypeUI() {
   if (midiChan) midiChan.disabled = type === "mdtonal";
   applyPageTranspose();
   applyDrumNotesUI();
+  applyScaleNotesUI();
   applyCCUI();
   applyMDTonalUI();
   enforceMDMidiOut();
@@ -2437,6 +2656,29 @@ function applyDrumNotesUI() {
       input.disabled = type !== "drum";
     }
   });
+}
+
+function applyScaleNotesUI() {
+  if (!scaleNotesWrap) return;
+  const type = sequencerTypes[currentPage] || "mono";
+  const show = type === "mono" || type === "poly" || type === "mdtonal";
+  scaleNotesWrap.classList.toggle("hidden", !show);
+  if (!show) return;
+
+  const mode = scale?.mode || "major";
+  const root = Number(scale?.root) || 0;
+  const steps = SCALE_STEPS[mode] || SCALE_STEPS.major;
+  const labels = [];
+  const rows = getStepRows();
+  for (let row = 0; row < rows; row += 1) {
+    const degree = (fullScaleMode && row === 0) ? 0 : (rows - 1 - row);
+    const note = NOTE_NAMES[((root + steps[degree]) % 12 + 12) % 12];
+    labels.push(note);
+  }
+
+  scaleNotesWrap.innerHTML = labels
+    .map((note) => `<span class="scale-note label">${note}</span>`)
+    .join("");
 }
 
 function applyCCUI() {
@@ -2523,7 +2765,7 @@ canvas.addEventListener("mousemove", (e) => {
     return;
   }
   const seqType = sequencerTypes[currentPage] || "mono";
-  const inStepRows = y < STEP_ROWS;
+  const inStepRows = y < getStepRows();
   const allowedSeq = seqType !== "drum" && seqType !== "cc";
   if (!inStepRows || !allowedSeq) {
     hoveredStep = null;
@@ -2533,6 +2775,12 @@ canvas.addEventListener("mousemove", (e) => {
 
   const frame = frames[currentPage] || [];
   const val = frame[y * WIDTH + x] || 0;
+  const playVal = ledLevels.playhead || 0;
+  if (!running && playVal > 0 && val === playVal) {
+    hoveredStep = null;
+    if (!isOverOctaveControls) octaveControls.style.display = "none";
+    return;
+  }
   if (val <= 0) {
     hoveredStep = null;
     if (!isOverOctaveControls) octaveControls.style.display = "none";
@@ -2582,7 +2830,7 @@ canvas.addEventListener("contextmenu", (e) => {
     closeNoteMenu();
     return;
   }
-  if (y >= STEP_ROWS) {
+  if (y >= getStepRows()) {
     closeNoteMenu();
     return;
   }
@@ -2608,7 +2856,7 @@ function showOctaveControls(hover) {
   hoveredStep = { x, y };
   lastOctaveTarget = { x, y };
   const hasUp = y > 0;
-  const hasDown = y < STEP_ROWS - 1;
+  const hasDown = y < getStepRows() - 1;
   if (!hasUp && !hasDown) {
     if (!isOverOctaveControls) octaveControls.style.display = "none";
     return;
@@ -2705,7 +2953,10 @@ applyLedSettingsUI();
 loadSavedConfig();
 if (uiScaleSel) {
   uiScaleSel.value = "1.5";
-  uiScaleSel.onchange = () => applyUiScale(uiScaleSel.value);
+  uiScaleSel.onchange = () => {
+    if (settingsOpen) return;
+    applyUiScale(uiScaleSel.value);
+  };
 }
 applyUiScale(uiScaleSel?.value || uiScale || 1.5);
 applyPatternControlLatchUI();
@@ -2715,7 +2966,8 @@ function patternHasData(page) {
   const frame = frames[page] || [];
   // Only consider step rows (exclude bottom device row)
   const playVal = ledLevels.playhead || 0;
-  for (let y = 0; y < STEP_ROWS; y++) {
+  const rows = getStepRows();
+  for (let y = 0; y < rows; y++) {
     for (let x = 0; x < WIDTH; x++) {
       if (isBarSelectorCell(x, y)) continue;
       const v = frame[y * WIDTH + x] || 0;
@@ -2726,6 +2978,7 @@ function patternHasData(page) {
 }
 
 function isBarSelectorCell(x, y) {
+  if (fullScaleMode) return false;
   return y === 7 && x >= 9 && x <= 12;
 }
 
@@ -2922,6 +3175,7 @@ function applyScaleUI() {
   if (scaleModeSel) scaleModeSel.value = scale.mode || "major";
   if (settingsScaleRootSel) settingsScaleRootSel.value = scale.root ?? 0;
   if (settingsScaleModeSel) settingsScaleModeSel.value = scale.mode || "major";
+  applyScaleNotesUI();
 }
 
 function applyUiScale(val) {
@@ -3054,18 +3308,21 @@ if (followBtn) {
 
 if (autoFillToggle) {
   autoFillToggle.onchange = () => {
+    if (settingsOpen) return;
     autoFillBars = !!autoFillToggle.checked;
     ws?.readyState === WebSocket.OPEN && ws.send(JSON.stringify({ type: "set_auto_fill", enabled: autoFillBars }));
   };
 }
 if (clockOutToggle) {
   clockOutToggle.onchange = () => {
+    if (settingsOpen) return;
     clockOutEnabled = !!clockOutToggle.checked;
     ws?.readyState === WebSocket.OPEN && ws.send(JSON.stringify({ type: "set_clock_out", enabled: clockOutEnabled }));
   };
 }
 if (clockOutPortSel) {
   clockOutPortSel.onchange = () => {
+    if (settingsOpen) return;
     clockOutPortId = clockOutPortSel.value || "";
     ws?.readyState === WebSocket.OPEN && ws.send(JSON.stringify({ type: "set_clock_out_device", id: clockOutPortId, name: clockOutPortId }));
   };
@@ -3113,7 +3370,8 @@ function showConfirmModal(show) {
 
 function isCurrentPatternEmpty() {
   const snap = frames[currentPage] || [];
-  for (let y = 0; y < STEP_ROWS; y++) {
+  const rows = getStepRows();
+  for (let y = 0; y < rows; y++) {
     for (let x = 0; x < WIDTH; x++) {
       if (isBarSelectorCell(x, y)) continue;
       const v = snap[y * WIDTH + x] || 0;
@@ -3125,7 +3383,8 @@ function isCurrentPatternEmpty() {
 
 function isCurrentBarEmpty() {
   const snap = frames[currentPage] || [];
-  for (let y = 0; y < STEP_ROWS; y++) {
+  const rows = getStepRows();
+  for (let y = 0; y < rows; y++) {
     for (let x = 0; x < WIDTH; x++) {
       if (isBarSelectorCell(x, y)) continue;
       const v = snap[y * WIDTH + x] || 0;
@@ -3174,11 +3433,33 @@ if (confirmClearBar) {
   };
 }
 
-function handleGridStatus(connected) {
+function handleGridStatus(connected, nextFullScaleMode = null) {
   const prev = gridConnected;
   gridConnected = !!connected;
+  if (typeof nextFullScaleMode === "boolean") {
+    setFullScaleMode(nextFullScaleMode);
+  }
   if (gridConnected === prev) return;
   showToast(gridConnected ? "Grid connected" : "Grid disconnected");
+}
+
+function getStepRows() {
+  return fullScaleMode ? 8 : DEFAULT_STEP_ROWS;
+}
+
+function mapOverlayY(y, octave, useFullScale) {
+  if (!useFullScale) return y;
+  if (y === 6 && Number(octave) === 1) return 0;
+  return y + 1;
+}
+
+function setFullScaleMode(next) {
+  const enabled = !!next;
+  if (fullScaleMode === enabled) return;
+  fullScaleMode = enabled;
+  document.documentElement.classList.toggle("full-scale", fullScaleMode);
+  applyScaleNotesUI();
+  renderFrame(frames[currentPage]);
 }
 
 
@@ -3244,12 +3525,22 @@ function contrastForColor(hex) {
 function renderDefaultColorOptions() {
   if (!defaultColorModalOptions) return;
   defaultColorModalOptions.innerHTML = "";
+  const activeColor = (settingsOpen && pendingDefaultDeviceColor) ? pendingDefaultDeviceColor : defaultDeviceColor;
   DEVICE_COLOR_PALETTE.forEach((c) => {
     const sw = document.createElement("button");
     sw.className = "color-swatch";
     sw.style.background = c;
     sw.setAttribute("aria-label", `Default color ${c}`);
     sw.onclick = () => {
+      if (settingsOpen) {
+        pendingDefaultDeviceColor = c;
+        defaultColorModalOptions.querySelectorAll(".color-swatch").forEach((btn) => {
+          btn.classList.toggle("selected", btn === sw);
+        });
+        updateDefaultColorTrigger(c, { preview: true });
+        closeDefaultColorModal();
+        return;
+      }
       defaultDeviceColor = c;
       applyDefaultDeviceColor();
       applyDeviceBadge();
@@ -3258,7 +3549,7 @@ function renderDefaultColorOptions() {
       updateDefaultColorTrigger();
       closeDefaultColorModal();
     };
-    if (c.toLowerCase() === (defaultDeviceColor || BASE_DEFAULT_DEVICE_COLOR).toLowerCase()) {
+    if (c.toLowerCase() === (activeColor || BASE_DEFAULT_DEVICE_COLOR).toLowerCase()) {
       sw.classList.add("selected");
     }
     defaultColorModalOptions.append(sw);
@@ -3271,13 +3562,15 @@ function applyDefaultDeviceColor() {
   }
 }
 
-function updateDefaultColorTrigger() {
+function updateDefaultColorTrigger(colorOverride, opts = {}) {
+  const preview = !!opts.preview;
+  const color = colorOverride || (settingsOpen && pendingDefaultDeviceColor) || defaultDeviceColor;
   if (defaultColorTrigger) {
-    defaultColorTrigger.style.background = defaultDeviceColor;
+    defaultColorTrigger.style.background = color;
     defaultColorTrigger.style.borderColor = "var(--border)";
   }
-  if (document?.documentElement?.style) {
-    document.documentElement.style.setProperty("--cta", defaultDeviceColor);
+  if (!preview && document?.documentElement?.style) {
+    document.documentElement.style.setProperty("--cta", color);
   }
 }
 
@@ -3700,6 +3993,18 @@ document.addEventListener("keydown", (e) => {
   if (e.key === "Escape") {
     closeColorModal();
     closeDefaultColorModal();
+    return;
+  }
+  if ((e.metaKey || e.ctrlKey) && (e.key === "ArrowUp" || e.key === "ArrowDown")) {
+    if (isTypingTarget(e.target)) return;
+    e.preventDefault();
+    adjustTranspose(e.key === "ArrowUp" ? 1 : -1);
+    return;
+  }
+  if ((e.code === "Space" || e.key === " ") && clockSource === "internal") {
+    if (isTypingTarget(e.target)) return;
+    e.preventDefault();
+    toggleTransport();
     return;
   }
   if (e.shiftKey && (e.key === "ArrowLeft" || e.key === "ArrowRight" || e.key === "ArrowUp" || e.key === "ArrowDown")) {

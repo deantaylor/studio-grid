@@ -78,8 +78,10 @@ let lastBroadcastPage = state.currentPage;
 let followEnabled = false;
 let autoFillBars = true;
 let gridConnected = false;
+let fullScaleMode = true;
 let clockOutEnabled = false;
 let clockOutDevice = ""; // MIDI clock out target (id/name hint)
+updateFullScaleMode(serial.deviceList?.() || []);
 // LED throttling to avoid flooding monome / browser
 const LED_MIN_INTERVAL = 40; // ~25fps
 const SLIDE_ANIM_INTERVAL = LED_MIN_INTERVAL; // reuse LED cadence for slide animation
@@ -101,6 +103,18 @@ function patternControllerDevices() {
 
 function hasPatternControllers() {
   return patternControllerDevices().length > 0;
+}
+
+function hasLargeGrid(devices = null) {
+  const list = devices || (typeof serial.deviceList === "function" ? serial.deviceList() : []);
+  return list.some((d) => d?.connected && ((d?.cols || 0) > 8 || (d?.rows || 0) > 8));
+}
+
+function updateFullScaleMode(devices = null) {
+  const next = !hasLargeGrid(devices);
+  if (next === fullScaleMode) return false;
+  fullScaleMode = next;
+  return true;
 }
 
 function cropFrame(frame, cols, rows, sourceWidth = 16) {
@@ -216,13 +230,16 @@ serial.on("error", (err) => {
 serial.on("grid_status", (payload) => {
   const connected = !!(payload && payload.connected);
   gridConnected = connected;
-  broadcast({ type: "grid_status", connected, devices: payload?.devices || [] });
+  updateFullScaleMode(payload?.devices || []);
+  broadcast({ type: "grid_status", connected, devices: payload?.devices || [], fullScaleMode });
   renderAndPush(true);
 });
 
 serial.on("device_ready", (info) => {
   // Force a full redraw on the specific device and broadcast fresh state
-  broadcast({ type: "grid_status", connected: true, devices: serial.deviceList?.() || [] });
+  const devices = serial.deviceList?.() || [];
+  updateFullScaleMode(devices);
+  broadcast({ type: "grid_status", connected: true, devices, fullScaleMode });
   renderAndPush(true);
   if (info?.id) {
     serial.fullResync?.({ deviceId: info.id });
@@ -299,7 +316,8 @@ function broadcastState(ws = null) {
     autoFill: autoFillBars,
     monoSlidePad: state.monoSlidePad,
     patternControlLatch: state.patternControlLatch,
-    gridConnected
+    gridConnected,
+    fullScaleMode
   });
   if (ws) {
     ws.send(msg);
@@ -318,7 +336,7 @@ function handleClientMessage(ws, data) {
       break;
     case "grid_key":
       {
-        const resp = state.handleGridKey(data.x, data.y, data.s);
+        const resp = state.handleGridKey(data.x, data.y, data.s, { uiMode: fullScaleMode });
         const events = Array.isArray(resp) ? resp : (resp ? [resp] : []);
         events.forEach((ev) => {
           if (ev.type === "octave") {
@@ -351,13 +369,13 @@ function handleClientMessage(ws, data) {
       break;
     case "get_step_state":
       {
-        const info = state.getStepInfo(data.x, data.y);
+        const info = state.getStepInfo(data.x, data.y, { uiMode: fullScaleMode });
         ws.send(JSON.stringify({ type: "step_state", page: state.currentPage, x: data.x, y: data.y, ...info }));
       }
       break;
     case "set_step_accent":
       {
-        const res = state.setStepAccent(data.x, data.y, data.accent);
+        const res = state.setStepAccent(data.x, data.y, data.accent, { uiMode: fullScaleMode });
         if (res) {
           broadcast({ type: "accent_overlay", page: state.currentPage, x: data.x, y: data.y, accent: res.accent });
           renderAndPush();
@@ -366,7 +384,7 @@ function handleClientMessage(ws, data) {
       break;
     case "set_step_slide":
       {
-        const res = state.setStepSlide(data.x, data.y, data.slide);
+        const res = state.setStepSlide(data.x, data.y, data.slide, { uiMode: fullScaleMode });
         if (res) {
           broadcast({ type: "slide_overlay", page: state.currentPage, x: data.x, y: data.y, slide: res.slide });
           renderAndPush();
@@ -375,7 +393,7 @@ function handleClientMessage(ws, data) {
       break;
     case "set_step_octave":
       {
-        const res = state.setStepOctave(data.x, data.y, data.delta);
+        const res = state.setStepOctave(data.x, data.y, data.delta, { uiMode: fullScaleMode });
         if (res) {
           broadcast({ type: "octave_overlay", page: state.currentPage, x: data.x, y: data.y, octave: res.octave, delta: res.delta });
           renderAndPush();
@@ -1060,7 +1078,9 @@ function scheduleLedSend(force = false) {
     }
     lastRenderedFrame = frameToSend;
     // broadcast a UI-safe frame without octave neighbor hints
-    const uiFrame = state.renderLED(Date.now(), { includeOctaveHint: false });
+    const uiFrame = fullScaleMode
+      ? state.renderUIFrame(Date.now(), { includeOctaveHint: false })
+      : state.renderLED(Date.now(), { includeOctaveHint: false });
     broadcast({ type: "led_frame", frame: uiFrame });
     if (pendingLedFrame) scheduleLedSend();
   }, wait);
