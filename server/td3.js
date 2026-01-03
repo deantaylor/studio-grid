@@ -13,6 +13,9 @@ const TD3_PAYLOAD_OFFSET = TD3_HEADER_LENGTH + TD3_FILL_LENGTH; // 36 (fallback;
 const TD3_PAYLOAD_LENGTH = 110; // pitches(32)+accent(32)+slide(32)+triplet(2)+len(2)+unk(2)+tie(4)+rest(4)
 const TD3_TOTAL_LENGTH = TD3_HEADER_LENGTH + TD3_FILL_LENGTH + TD3_PAYLOAD_LENGTH; // 146
 const BASE_PITCH = 48; // C3, matches state.js BASE_PITCH
+const TRANSPOSE_STEP = 12; // transpose is octave-only in the UI
+const OCTAVE_SHIFT_MIN = -2;
+const OCTAVE_SHIFT_MAX = 2;
 const SCALES = {
   "major": [0, 2, 4, 5, 7, 9, 11],
   "minor": [0, 2, 3, 5, 7, 8, 10],
@@ -419,17 +422,26 @@ export function detectScale(notes) {
 }
 
 function chooseTransposeForNotes(notes, scale, transposeRange = 24) {
-  let best = { transpose: 0, cost: Infinity };
-  for (let t = -transposeRange; t <= transposeRange; t++) {
+  if (!notes.length) return 0;
+  let best = { transpose: 0, zeroCount: -1, absOctave: Infinity, cost: Infinity };
+  for (let t = -transposeRange; t <= transposeRange; t += TRANSPOSE_STEP) {
     let cost = 0;
     let maxPenalty = 0;
+    let zeroCount = 0;
+    let absOctave = 0;
     for (const n of notes) {
-      const { error, penalty } = mapNoteToScale(n, scale, t, true);
+      const { error, penalty, octave } = mapNoteToScale(n, scale, t, true);
       cost += error;
       maxPenalty = Math.max(maxPenalty, penalty);
+      if (octave === 0) zeroCount += 1;
+      absOctave += Math.abs(octave);
     }
     const total = cost + maxPenalty * 10; // heavily penalize out-of-range octaves
-    if (total < best.cost) best = { transpose: t, cost: total };
+    const better =
+      zeroCount > best.zeroCount ||
+      (zeroCount === best.zeroCount && absOctave < best.absOctave) ||
+      (zeroCount === best.zeroCount && absOctave === best.absOctave && total < best.cost);
+    if (better) best = { transpose: t, zeroCount, absOctave, cost: total };
   }
   return best.transpose;
 }
@@ -444,10 +456,10 @@ function mapNoteToScale(note, scale, transpose, allowPenalty = false) {
     const oct = Math.round((note - ideal) / 12);
     const pitch = ideal + oct * 12;
     const err = Math.abs(note - pitch);
-    const penalty = (oct < -3 || oct > 4) ? (allowPenalty ? 1000 : 0) : 0;
+    const penalty = (oct < OCTAVE_SHIFT_MIN || oct > OCTAVE_SHIFT_MAX) ? (allowPenalty ? 1000 : 0) : 0;
     const total = err + penalty;
     if (total < best.error + best.penalty) {
-      best = { degree: idx, octave: clamp(oct, -3, 4), error: err, penalty };
+      best = { degree: idx, octave: clamp(oct, OCTAVE_SHIFT_MIN, OCTAVE_SHIFT_MAX), error: err, penalty };
     }
   });
   return best;
@@ -469,7 +481,7 @@ export function importTd3Pattern(state, buf, { page, applyMode = "fit_current" }
   const transpose = chooseTransposeForNotes(notes, targetScale);
 
   // apply transpose to page
-  pg.transpose = clamp(transpose, -24, 24);
+  pg.transpose = clamp(Math.round(transpose / TRANSPOSE_STEP) * TRANSPOSE_STEP, -24, 24);
   const importedLength = clamp(parsed.stepCount || 16, 1, 16);
   pat.scale_mode = targetScale.mode;
   pat.root = 0;
@@ -497,28 +509,32 @@ export function importTd3Pattern(state, buf, { page, applyMode = "fit_current" }
   });
 
   const newSteps = [];
+  const octaveDeltas = [];
   let lastGateMapping = null;
   for (let i = 0; i < maxSrc && newSteps.length < 16; i++) {
     const src = parsedSteps[i];
     if (!src || src.rest) {
       newSteps.push(emptyStep());
+      octaveDeltas.push(0);
       continue;
     }
     if (src.tie) {
       if (!lastGateMapping) {
         newSteps.push(emptyStep());
+        octaveDeltas.push(0);
         continue;
       }
       const tieStep = emptyStep();
       tieStep.on = true;
       tieStep.degree = lastGateMapping.degree;
-      tieStep.octave = lastGateMapping.octave;
+      tieStep.octave = 0;
       tieStep.tie = false;
       tieStep.td3TieSlot = false;
       if (newSteps.length > 0 && newSteps[newSteps.length - 1].on) {
         newSteps[newSteps.length - 1].slide = true; // link boundary into this tie
       }
       newSteps.push(tieStep);
+      octaveDeltas.push(lastGateMapping.octave || 0);
       continue;
     }
     const mapping = mapNoteToScale(src.midiNote, targetScale, pg.transpose);
@@ -526,7 +542,7 @@ export function importTd3Pattern(state, buf, { page, applyMode = "fit_current" }
     newSteps.push({
       on: true,
       degree: mapping.degree,
-      octave: mapping.octave,
+      octave: 0,
       micro: 0,
       accent: !!src.accent,
       slide: !!src.slide,
@@ -537,10 +553,23 @@ export function importTd3Pattern(state, buf, { page, applyMode = "fit_current" }
       accented: [],
       td3TieSlot: false
     });
+    octaveDeltas.push(mapping.octave || 0);
   }
-  while (newSteps.length < 16) newSteps.push(emptyStep());
+  while (newSteps.length < 16) {
+    newSteps.push(emptyStep());
+    octaveDeltas.push(0);
+  }
   pat.steps = newSteps;
   pat.length_steps = importedLength;
+  const prevPage = state.currentPage;
+  state.currentPage = pageIdx;
+  newSteps.forEach((st, idx) => {
+    const delta = octaveDeltas[idx];
+    if (!delta || !st?.on) return;
+    const y = clamp(6 - (st.degree || 0), 0, 6);
+    state.setStepOctave(idx, y, delta, { uiMode: false });
+  });
+  state.currentPage = prevPage;
 
   return { detectedScale, appliedScale: targetScale, transpose: pg.transpose, page: pageIdx, pattern: patIdx };
 }
