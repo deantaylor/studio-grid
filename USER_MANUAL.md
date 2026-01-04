@@ -3,13 +3,13 @@ studio:grid — User Manual
 
 Overview
 --------
-studio:grid is a grid-based pattern sequencer for monome grids and the built-in on-screen grid. Each project holds up to eight devices/pages, and every page contains eight patterns with lengths up to 128 steps. The app can run in a browser (localhost) or as an Electron wrapper, drives MIDI notes/CC, can follow internal or external clock, and exports/imports complete sets (.sgridset) plus TD-3 .seq files.
+studio:grid is a grid-based multi-sequencer and composer for monome grids (or without). Each project holds up to eight devices/pages, and every page contains eight patterns with lengths up to 128 steps. The app drives MIDI notes/CC, can follow internal or external clock, and exports/imports complete sets (.sgridset) plus TD-3 .seq files.
 
 Prerequisites
 -------------
-- Node.js 18+ installed.
+- Node.js 18+ installed. (dev)
 - If you use a monome grid: serialosc running on the same machine.
-- A WebMIDI-capable browser (Chrome/Chromium) or the bundled Electron app.
+- A WebMIDI-capable browser (Chrome/Chromium) or the bundled app. (dev)
 - MIDI destinations visible to the OS; Elektron TM-1 is auto-selected for MDTonal unless overridden.
 
 Starting the app
@@ -46,7 +46,7 @@ Editing the grid
 Sequencer types
 ---------------
 - Mono: single note per step; accent and slide available; octave per step.
-- Poly: multiple notes per step; per-note accents; per-note octave (hover ↑/↓ after selecting).
+- Poly: multiple notes per step; per-note accents; per-note octave switching
 - Drum: seven rows map to per-row MIDI notes (editable in the drum note inputs).
 - CC: each step stores a CC value; set CC number per page.
 - MDTonal: Elektron Machinedrum tonal tracks with slide handling; select MD track per page. TM-1 is auto-picked unless “Allow non-TM-1 output” is enabled in Settings. Slide is done by basic interpolation. Also sends velocity
@@ -61,21 +61,22 @@ MIDI, clock, and transport
 --------------------------
 - Transport: play/stop in the top bar; hardware grid start/stop respected when using external clock.
 - Clock source: Internal (app drives ticks) or External (expects incoming MIDI clock/start/stop). Select input in Settings when exposed.
-- Tempo & swing: available in the top bar and Settings; swing 50=straight to 80=max.
+- Send midi clock out.
+- Tempo & swing: available in the top bar and Settings; swing 50=straight to 80=max. Click Tempo to switch to Swing.
 - Base note length: choose 1/8, 1/16, or 1/32 to set tick resolution.
 - MIDI per page: choose output device and channel; saved with the set and local config.
 - WebMIDI: browser prompts for permission; enable it and choose outputs before sequencing.
 
 Scale and transpose
 -------------------
-- Global scale: pick root (C–B) and mode (major, minor, dorian, mixolydian, lydian, phrygian, locrian, harmonic minor, melodic minor, whole tone, chromatic). Notes quantize to the selected scale degrees.
+- Global scale: pick root note and mode (major, minor, dorian, mixolydian, lydian, phrygian, locrian, harmonic minor, melodic minor, whole tone, chromatic). Notes quantize to the selected scale degrees.
 - Per-page transpose: ±2 octaves in semitone steps; applied after scale quantization.
 - Octave overlays: hovering or holding a step shows current octave shift; edits mirror to the hardware grid overlay.
 
 TD-3 import/export
 ------------------
 - TD-3 button opens Import/Export choices.
-- Export: choose Group/Pattern numbers; downloads `td3_pattern.seq`.
+- Export: choose Group/Pattern numbers; downloads `sg_td3_pattern.seq`.
 - Import: choose a .seq file. If the current pattern has data, you’ll be asked to replace it. The app previews the scale; choose to fit to the current scale or switch the project scale to the detected one, then apply.
 
 Saving, loading, and sets
@@ -85,27 +86,28 @@ Saving, loading, and sets
 - New set: clears all patterns; optional “Keep device names” and “Keep MIDI settings”; default device color can be preserved.
 - Auto-load last set: toggle in Settings to reload the previous snapshot on startup.
 - Config save/restore: Settings → Save config writes LED levels, clock mode, MIDI selections, UI scale, default colors, and toggles to localStorage; Restore defaults clears localStorage and reverts to factory defaults.
+- Seamless import allows set switching whilst sequencer continues.
 
 Hardware grid specifics
 -----------------------
-- Uses serialosc discovery; LEDs are throttled and diffed to avoid flooding.
+- Uses serialosc discovery.
 - Grid key presses mirror mouse clicks; queued pattern changes and playheads display on the device.
 - Pattern-control latch (Settings): keeps the pattern-launch view active after releasing the pattern control button on the grid.
-- “Clear LEDs” endpoint is called on quit in Electron; a separate button is available via the WebSocket API if needed.
+- “Clear LEDs” endpoint is called on quit; a separate button is available via the WebSocket API if needed.
 
 Appearance and usability
 ------------------------
-- UI scale: 1.0/1.25/1.5 (resizes the Electron window where permitted).
-- LED levels: set brightness per role (steps, micro, accent, playhead, pattern active/pending/inactive, device present/active).
+- UI scale: 1.0/1.25/1.5 (resizes the window where permitted). Default : 1.5
+- LED levels: set brightness per role (steps, accent, playhead, pattern active/pending/inactive, device present/active).
 - Device colors: choose per device; set a global default color palette; MDTonal pages auto-tint to the accent color unless overridden.
-- Log panel: optional text log for serialosc/MIDI messages.
+- Log panel: optional text log for serialosc/MIDI messages. - to be removed
 
 Keyboard and mouse shortcuts
 ----------------------------
 - Shift + Arrow keys: shift the current pattern’s content.
 - Hover + ↑/↓ popup: nudge step octave.
 - Right-click step: open accent/slide context menu.
-- Clicking a tab with right-click: open device menu (rename/color).
+- Right-click device tab :  open device menu (rename/color).
 
 Troubleshooting
 ---------------
@@ -121,11 +123,11 @@ API endpoints
 
 Data files
 ----------
-- Sets: `.sgridset` JSON snapshots (export/import).
-- TD-3: `.seq` files for import/export.
+- Sets: `.sgridset` (export/import).
+- TD-3: `.seq` files for import/export to/from SynthTribe
 
 Extras & caveats
 ----------------
-- Program-change filtering: outgoing program changes are filtered; the server side handles this automatically (no UI control).
-- Device notes: an optional per-device notes field exists in the toolbar; it may be hidden in the current layout but loads/saves with the set when used.
-- TD-3 slide accuracy: exporting TD-3 patterns works for editing and playback, but slide timing may differ slightly on real 303/TB-3 hardware.
+- Program-change filtering: outgoing program changes are filtered; the server side handles this automatically (no UI control). - to be removed
+- Device notes: an optional per-device notes field exists in the toolbar; it may be hidden in the current layout but loads/saves with the set when used. - to be removed
+
