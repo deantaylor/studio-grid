@@ -5,7 +5,7 @@ import { fileURLToPath } from "url";
 import { WebSocketServer } from "ws";
 import { SerialOSCBridge } from "./serialosc-bridge.js";
 import { buildTd3Seq, parseTd3SeqBuffer, detectScale, importTd3Pattern } from "./td3.js";
-import { MGridState } from "./state.js";
+import { SGridState } from "./state.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = path.join(__dirname, "..", "public");
@@ -60,8 +60,8 @@ const server = http.createServer(async (req, res) => {
 });
 
 const wss = new WebSocketServer({ server });
-const serial = new SerialOSCBridge({ prefix: "mgrid" });
-const state = new MGridState();
+const serial = new SerialOSCBridge({ prefix: "sgrid" });
+const state = new SGridState();
 state.requestRender = () => renderAndPush(true);
 const PPQN = 24;
 const TICKS_PER_STEP = 6;
@@ -155,7 +155,7 @@ function buildExportPayload() {
 }
 
 wss.on("connection", (ws) => {
-  ws.send(JSON.stringify({ type: "hello", message: "mgrid web" }));
+  ws.send(JSON.stringify({ type: "hello", message: "sgrid web" }));
   broadcastState(ws);
 
   ws.on("message", (msg) => {
@@ -1128,7 +1128,7 @@ function midiInputsList() {
 export function startServer(port = PORT) {
   return new Promise((resolve) => {
     server.listen(port, () => {
-      console.log(`mgrid web listening on http://localhost:${port}`);
+      console.log(`sgrid web listening on http://localhost:${port}`);
       serial.start();
       resolve(server);
     });

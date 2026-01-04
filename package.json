@@ -1,4 +1,5 @@
 {
+  "author": "Dean Taylor",
   "name": "studio-grid",
   "productName": "studio:grid",
   "description": "Pattern sequencer and grid controller frontend for monome devices.",
@@ -13,7 +14,6 @@
     "dist": "electron-builder -mwl"
   },
   "dependencies": {
-    "abletonlink": "^0.2.0-beta.0",
     "iconoir": "^7.11.0",
     "osc": "^2.4.5",
     "ws": "^8.16.0"

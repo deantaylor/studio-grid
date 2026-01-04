@@ -32,7 +32,7 @@ function safeColor(color, fallback = BASE_DEFAULT_DEVICE_COLOR) {
   return /^#([0-9a-fA-F]{6})$/.test(color || "") ? color : fallback;
 }
 
-export class MGridState {
+export class SGridState {
   constructor() {
     this.tempo = 120;
     this.swing = 50; // 50 = straight, 80 max swing

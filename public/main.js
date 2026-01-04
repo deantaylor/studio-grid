@@ -2141,7 +2141,7 @@ if (settingsSaveCfg) {
       };
       localStorage.setItem(LOCAL_CONFIG_KEY, JSON.stringify(cfg));
       // keep old key for backward compat
-      localStorage.setItem("mgrid_led_config", JSON.stringify(ledLevels));
+      localStorage.setItem("sgrid_led_config", JSON.stringify(ledLevels));
       cachedConfig = cfg;
       pushSavedConfigToServer();
       log("Saved config");
@@ -3665,7 +3665,7 @@ function getDeviceDisplayColor(page) {
 function loadSavedConfig() {
   try {
     const rawFull = localStorage.getItem(LOCAL_CONFIG_KEY);
-    const rawLegacy = localStorage.getItem("mgrid_led_config");
+    const rawLegacy = localStorage.getItem("sgrid_led_config");
     const parsed = rawFull ? JSON.parse(rawFull) : (rawLegacy ? { ledLevels: JSON.parse(rawLegacy) } : null);
     if (!parsed || typeof parsed !== "object") return;
     if (parsed.ledLevels) ledLevels = { ...DEFAULT_LED_LEVELS, ...parsed.ledLevels };

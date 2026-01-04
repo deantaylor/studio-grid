@@ -103,7 +103,7 @@ export class SerialOSCBridge extends EventEmitter {
       rearmNotify();
     } else if (msg.address === "/serialosc/remove") {
       const id = this.argValue(msg.args[0]);
-      this.emit("log", `device removed ${id || ""}`.trim());
+      this.emit("log", `Grid removed ${id || ""}`.trim());
       if (this.pendingRemove.has(id)) return;
       const timeoutId = setTimeout(() => {
         this.pendingRemove.delete(id);
@@ -585,7 +585,7 @@ export class SerialOSCBridge extends EventEmitter {
     this.rediscoverTimer = setTimeout(() => {
       this.rediscoverTimer = null;
       if (!this.hasConnectedDevices() && this.serial) {
-        this.emit("log", "rediscovering monome (device missing)");
+        this.emit("log", "Looking for grids..");
         this.serial.send({
           address: "/serialosc/list",
           args: [

@@ -45,6 +45,7 @@ async function ensureServer() {
 function createWindow() {
   const win = new BrowserWindow({
     show: false,
+    useContentSize: true,
     webPreferences: {
       nodeIntegration: false,
       contextIsolation: true
