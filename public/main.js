@@ -465,7 +465,7 @@ let mdSlideCurve = 1.0;
 let mdBaseSweep = 80;
 let monoSlidePad = 0.1; // fraction of a step to trim slide gates
 let sequencerTypes = Array.from({ length: 9 }, () => "mono");
-let gridConnected = null;
+let gridConnected = false;
 let fullScaleMode = false;
 const LOCAL_CONFIG_KEY = "studio_grid_config";
 let pendingTd3Import = null; // { data, page }
