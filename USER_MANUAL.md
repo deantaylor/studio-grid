@@ -1,9 +1,15 @@
 studio:grid — User Manual
 ========================
 
+Thanks for trying out studio:grid!
+
+Born from real music making problems and embracing the worlds of both hardware and software.
+
+Leave your gear bias at the door, focus on the music and have fun :)
+
 Overview
 --------
-studio:grid is a grid-based multi-sequencer and composer for monome grids (or without). Each project holds up to eight devices/pages, and every page contains eight patterns with lengths up to 128 steps. The app drives MIDI notes/CC, can follow internal or external clock, and exports/imports complete sets (.sgridset) plus TD-3 .seq files.
+studio:grid is a grid-based multi-sequencer and composer for monome grids (or without). Each project (set) holds up to eight devices/pages, and every page contains eight patterns with lengths up to 128 steps. The app drives MIDI notes/CC, can follow internal or external clock, and exports/imports complete sets (.sgridset) plus TD-3 .seq files.
 
 It can be used with or without a grid controller.
 
