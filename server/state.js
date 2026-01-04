@@ -244,6 +244,7 @@ export class SGridState {
   buildDefaultPages() {
     const pages = [null];
     const defaultDrums = [36, 38, 41, 43, 45, 47, 55]; // C1..G1 bottom->top
+    const mdDrums = [36, 38, 40, 41, 43, 45, 47]; //first 7 tracks
     for (let p = 1; p <= 8; p++) {
       const patterns = [null];
       for (let pat = 1; pat <= 8; pat++) {
@@ -261,7 +262,7 @@ export class SGridState {
         sequencerStopped: false,
         pendingStop: null,
         sequencerType: "mono",
-        drumNotes: defaultDrums.slice(),
+        drumNotes: mdDrums.slice(), // change to defaultDrums for default
         ccNumber: DEFAULT_CC,
         mdTrack: 1
       });
