@@ -836,7 +836,7 @@ function connectWS() {
       currentSetFileHandle = null;
     } else if (msg.type === "export_td3") {
       if (msg.data) {
-        downloadBase64Binary(msg.data, "td3_pattern.seq");
+        downloadBase64Binary(msg.data, "sgrid_td3_pattern.seq");
         log("TD-3 export ready");
       } else {
         log("TD-3 export failed: no data");
@@ -906,7 +906,7 @@ function refreshMIDIDevices() {
   }
   let firstOut = null;
   let preferredOut = null;
-  const preferredOutName = "IAC Driver Bus 1";
+  const preferredOutName = "None"; // default midi outport name preference
   const outs = [];
   const ins = [];
   let tm1Out = null;
@@ -1786,7 +1786,7 @@ async function triggerTd3Export(tdGroup, tdPattern) {
     const resp = await fetch(`/api/export-td3?${params.toString()}`);
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
     const blob = await resp.blob();
-    downloadBlob(blob, "td3_pattern.seq");
+    downloadBlob(blob, "sgrid_td3_pattern.seq");
     log("Exported TD-3 .seq");
   } catch (e) {
     if (ws?.readyState === WebSocket.OPEN) {
@@ -2282,7 +2282,7 @@ async function requestSaveHandle(defaultName) {
     suggestedName: suggested,
     types: [
       {
-        description: "Studio Grid Set",
+        description: "studio grid Set",
         accept: {
           "application/json": [".sgridset"]
         }
