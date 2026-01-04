@@ -5,6 +5,8 @@ Overview
 --------
 studio:grid is a grid-based multi-sequencer and composer for monome grids (or without). Each project holds up to eight devices/pages, and every page contains eight patterns with lengths up to 128 steps. The app drives MIDI notes/CC, can follow internal or external clock, and exports/imports complete sets (.sgridset) plus TD-3 .seq files.
 
+It can be used with or without a grid controller.
+
 Prerequisites
 -------------
 - Node.js 18+ installed. (dev)
@@ -27,15 +29,18 @@ Interface tour
 - Grid canvas: 16 columns x 8 rows. Rows 0–6 are steps; bottom row holds pattern/device indicators. Works with mouse or hardware grid.
 - Pattern toolbar: pattern selector (1–8), copy/paste bar or pattern, clear bar/pattern, length toggle (cycles 16/32/64; server supports up to 128), time-scale toggle (1x/2x/4x), bar view buttons, Follow toggle.
 - Settings modal: tempo, swing, UI scale, scale root/mode, clock source/input, base note length, LED levels, auto-fill new bars, auto-load last set, pattern-control latch, MD slide/base sweep, mono slide pad, default device color, allow MD external, log visibility, save/restore config.
+- Devices are 'swappable' and will replace their respective column on the grid.
 
 Editing the grid
 ----------------
-- Click a cell to toggle a step. Mouse taps send press+release so clicks only toggle notes.
-- Hover an active step to show ↑/↓ octave buttons; applies per-step octave shift (mono/mdtonal) or per-note octave in poly mode.
-- Right-click an active step to open the note menu:
+- Press or click a button / cell to toggle a step
+- Press or click active note to remove 
+- Hold active note or hover over an active note to show ↑/↓ octave shifting options; applies to appropriate sequencer types only (mono, poly, mdtonal)
+- Hold active note and release to activate accent or right-click an active step to open the note menu:
   - Accent toggle (where supported).
   - Slide toggle (mono/mdtonal). Slides shorten gates by the configured mono slide pad.
-- Shift + Arrow keys: nudge the current pattern left/right (steps) or up/down (rows).
+- Hold active note and press step to the right to activate slide on active note.
+- Keyboard -  Shift + Arrow keys: nudge the current pattern left/right (steps) or up/down (rows).
 - Pattern copy/paste: copy/paste entire pattern; copy/paste bar affects current 16-step bar.
 - Clear: clears pattern immediately if empty; otherwise choose pattern vs current bar.
 - Follow: when on, the bar view follows the playhead; turning it off lets you edit a fixed bar.
@@ -49,11 +54,11 @@ Sequencer types
 - Poly: multiple notes per step; per-note accents; per-note octave switching
 - Drum: seven rows map to per-row MIDI notes (editable in the drum note inputs).
 - CC: each step stores a CC value; set CC number per page.
-- MDTonal: Elektron Machinedrum tonal tracks with slide handling; select MD track per page. TM-1 is auto-picked unless “Allow non-TM-1 output” is enabled in Settings. Slide is done by basic interpolation. Also sends velocity
+- MDTonal: Sequence Elektron Machinedrum tonal tracks with slide handling; select MD track per page. TM-1 is auto-picked unless “Allow non-TM-1 output” is enabled in Settings. Slide is done by basic interpolation. Also sends velocity!
 
 Patterns, bars, and switching
 -----------------------------
-- Each page has eight patterns. Selecting a new pattern queues the change for end-of-pattern; pending patterns show with a dimmer LED/state.
+- Each device has eight patterns. Selecting a new pattern queues the change for end-of-pattern; pending patterns show with a dimmer LED/state. - potentially will change
 - Bar view buttons (0–7) pick which 16-step chunk you edit; bar index is clamped to the current length.
 - End-of-pattern switching is honored both in the UI and on hardware grid.
 
@@ -76,7 +81,7 @@ Scale and transpose
 TD-3 import/export
 ------------------
 - TD-3 button opens Import/Export choices.
-- Export: choose Group/Pattern numbers; downloads `sg_td3_pattern.seq`.
+- Export: choose Group/Pattern numbers; downloads `sgrid_td3_pattern.seq`.
 - Import: choose a .seq file. If the current pattern has data, you’ll be asked to replace it. The app previews the scale; choose to fit to the current scale or switch the project scale to the detected one, then apply.
 
 Saving, loading, and sets
@@ -108,13 +113,15 @@ Keyboard and mouse shortcuts
 - Hover + ↑/↓ popup: nudge step octave.
 - Right-click step: open accent/slide context menu.
 - Right-click device tab :  open device menu (rename/color).
+- Cmd/Ctrl + ArrowUp / Cmd/Ctrl + ArrowDown: adjust transpose up/down
+- Click + Drag device changes column order
 
 Troubleshooting
 ---------------
 - No grid LEDs or input: confirm serialosc is running; replug the grid; the bridge will rediscover every few seconds.
 - No MIDI: confirm WebMIDI permission, select an output per page, and verify OS-level MIDI routing. MDTonal locks to TM-1 unless “Allow non-TM-1 output” is enabled.
 - External clock not advancing: ensure clock source is set to External and a valid input is selected; the app ignores UI start/stop when external clock is active.
-- Browser reload lost patterns: export sets regularly or enable “Auto-load last set.”
+- Browser reload lost patterns: export sets regularly or enable “Auto-load last set.” (Don't worry - this is unlikely!)
 
 API endpoints
 -------------
