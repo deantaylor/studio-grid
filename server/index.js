@@ -348,13 +348,21 @@ function handleClientMessage(ws, data) {
           } else if (ev.type === "bar_view") {
             followEnabled = false;
             broadcast({ type: "follow", enabled: followEnabled });
-            broadcast({ type: "bar_view", page: ev.page, pattern: ev.pattern, bar: ev.bar });
+            broadcastBarView(ev.page, ev.pattern, ev.bar);
           } else if (ev.type === "follow_toggle") {
             followEnabled = !followEnabled;
             broadcast({ type: "follow", enabled: followEnabled });
           } else if (ev.type === "follow") {
             followEnabled = !!ev.enabled;
             broadcast({ type: "follow", enabled: followEnabled });
+          } else if (ev.type === "pattern_control") {
+            if (ev.enabled) {
+              broadcast({ type: "octave_overlay", page: state.currentPage, clearAll: true });
+              broadcast({ type: "pattern_control", enabled: true });
+            } else {
+              broadcast({ type: "pattern_control", enabled: false, octaveOverlays: state.octaveOverlaySnapshot() });
+              broadcastPatternStatus(state.currentPage);
+            }
           } else if (ev.type === "pattern_length") {
             state.setPatternLength(ev.page, ev.pattern, ev.length, { autoFill: autoFillBars });
             broadcastPatternLength(ev.page, ev.pattern);
@@ -808,7 +816,7 @@ function broadcast(obj) {
 function maybeBroadcastPage() {
   if (state.currentPage !== lastBroadcastPage) {
     lastBroadcastPage = state.currentPage;
-    broadcast({ type: "page_change", page: state.currentPage });
+    broadcast({ type: "page_change", page: state.currentPage, octaveOverlays: state.octaveOverlaySnapshot() });
   }
 }
 
@@ -1007,7 +1015,13 @@ function broadcastBarView(page, pattern, bar) {
   const pat = p?.patterns?.[pattern];
   if (!pat) return;
   const barVal = typeof bar === "number" ? bar : (pat.barView || 0);
-  broadcast({ type: "bar_view", page, pattern, bar: barVal });
+  broadcast({
+    type: "bar_view",
+    page,
+    pattern,
+    bar: barVal,
+    octaveOverlays: state.octaveOverlaySnapshot()
+  });
 }
 
 function broadcastBarPlayhead(page, pattern, bar) {
@@ -1095,7 +1109,12 @@ function scheduleLedSend(force = false) {
     const uiFrame = fullScaleMode
       ? state.renderUIFrame(Date.now(), { includeOctaveHint: false })
       : state.renderLED(Date.now(), { includeOctaveHint: false });
-    broadcast({ type: "led_frame", frame: uiFrame });
+    const inPatternControl = state.patternControlMode || state.patternControlHeld || state.patternHeld;
+    broadcast({
+      type: "led_frame",
+      frame: uiFrame,
+      octaveOverlays: inPatternControl ? Array.from({ length: 9 }, () => []) : state.octaveOverlaySnapshot()
+    });
     if (pendingLedFrame) scheduleLedSend();
   }, wait);
 }

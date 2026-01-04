@@ -395,6 +395,18 @@ function applyOctaveOverlaysSnapshot(snapshot) {
       }));
   });
 }
+
+function clearNumericOverlays(pageIdx) {
+  if (!overlays[pageIdx]) return;
+  overlays[pageIdx] = overlays[pageIdx].filter((o) => !/^[-+]?\d/.test(o.text));
+}
+
+function resetOctaveOverlayUI() {
+  hoveredStep = null;
+  lastOctaveTarget = null;
+  octaveOverlayLock = false;
+  octaveControls.style.display = "none";
+}
 let scale = { root: 0, mode: "major" };
 let deviceNames = Array.from({ length: 9 }, (_, i) => (i === 0 ? null : `${i}`));
 let deviceNotes = Array.from({ length: 9 }, (_, i) => (i === 0 ? null : ""));
@@ -452,6 +464,7 @@ let transportTick = 0;
 let externalArmed = false;
 const activeNotes = new Map();
 let uiScale = 1.5;
+let uiScaleInitialized = false;
 // pattern lengths not tracked client-side
 let barViews = Array.from({ length: 9 }, () => Array(9).fill(0));
 let barPlayheads = Array.from({ length: 9 }, () => Array(9).fill(null));
@@ -577,6 +590,9 @@ function connectWS() {
         const page = currentPage;
         frames[page] = incoming.slice();
       }
+      if (Array.isArray(msg.octaveOverlays)) {
+        applyOctaveOverlaysSnapshot(msg.octaveOverlays);
+      }
       renderFrame(frames[currentPage]);
     } else if (msg.type === "scale") {
       if (msg.scale) scale = msg.scale;
@@ -668,6 +684,9 @@ function connectWS() {
         handleGridStatus(msg.gridConnected, msg.fullScaleMode);
       }
     } else if (msg.type === "page_change") {
+      if (Array.isArray(msg.octaveOverlays)) {
+        applyOctaveOverlaysSnapshot(msg.octaveOverlays);
+      }
       updatePage(msg.page || currentPage, { fromServer: true });
     } else if (msg.type === "grid_status") {
       handleGridStatus(!!msg.connected, msg.fullScaleMode);
@@ -803,6 +822,19 @@ function connectWS() {
         if (!barViews[msg.page]) barViews[msg.page] = [];
         barViews[msg.page][msg.pattern] = msg.bar;
         if (msg.page === currentPage) renderBarRow();
+      }
+      if (Array.isArray(msg.octaveOverlays)) {
+        applyOctaveOverlaysSnapshot(msg.octaveOverlays);
+        if (msg.page === currentPage) renderFrame(frames[currentPage]);
+      }
+    } else if (msg.type === "pattern_control") {
+      if (msg.enabled) {
+        clearNumericOverlays(currentPage);
+        resetOctaveOverlayUI();
+        renderFrame(frames[currentPage]);
+      } else if (Array.isArray(msg.octaveOverlays)) {
+        applyOctaveOverlaysSnapshot(msg.octaveOverlays);
+        renderFrame(frames[currentPage]);
       }
     } else if (msg.type === "bar_playhead") {
       if (typeof msg.page === "number" && typeof msg.pattern === "number") {
@@ -2147,7 +2179,7 @@ if (settingsSaveCfg) {
       // keep old key for backward compat
       localStorage.setItem("sgrid_led_config", JSON.stringify(ledLevels));
       cachedConfig = cfg;
-      pushSavedConfigToServer();
+      pushSavedConfigToServer({ skipClockSource: true });
       log("Saved config");
       showToast("Config saved");
     } catch (e) {
@@ -2518,6 +2550,8 @@ function renderBarRow() {
       btn.onclick = () => {
         if (!barViews[currentPage]) barViews[currentPage] = [];
         barViews[currentPage][patIdx] = i;
+        clearNumericOverlays(currentPage);
+        resetOctaveOverlayUI();
         if (followEnabled) {
           followEnabled = false;
           applyFollowUI();
@@ -3233,17 +3267,21 @@ function applyScaleUI() {
 
 function applyUiScale(val) {
   const num = Math.max(1, Math.min(1.5, Number(val) || 1));
+  const prev = uiScale;
   uiScale = num;
   document.documentElement.style.setProperty("--ui-scale", uiScale);
   if (uiScaleSel) uiScaleSel.value = String(uiScale);
   // Resize the Electron window to match scale (no-op in browser)
-  if (typeof window.resizeTo === "function" && window.innerWidth) {
-    const w = Math.round(BASE_WINDOW_WIDTH * uiScale);
-    const h = Math.round(BASE_WINDOW_HEIGHT * uiScale);
-    try {
-      window.resizeTo(w, h);
-    } catch (e) {
-      // ignore if blocked
+  if (!uiScaleInitialized || num !== prev) {
+    uiScaleInitialized = true;
+    if (typeof window.resizeTo === "function" && window.innerWidth) {
+      const w = Math.round(BASE_WINDOW_WIDTH * uiScale);
+      const h = Math.round(BASE_WINDOW_HEIGHT * uiScale);
+      try {
+        window.resizeTo(w, h);
+      } catch (e) {
+        // ignore if blocked
+      }
     }
   }
 }
@@ -3299,6 +3337,8 @@ function setPattern(val) {
   currentPattern = pat;
   pendingPatterns[currentPage] = null;
   if (patternSelect) patternSelect.value = String(pat);
+  clearNumericOverlays(currentPage);
+  resetOctaveOverlayUI();
   ws?.readyState === WebSocket.OPEN && ws.send(JSON.stringify({ type: "set_pattern", pattern: pat }));
   applyPatternSelectUI();
   applyPatternLengthUI();
@@ -3759,10 +3799,13 @@ function loadSavedConfig() {
   }
 }
 
-function pushSavedConfigToServer() {
+function pushSavedConfigToServer(opts = {}) {
   if (!cachedConfig || !ws || ws.readyState !== WebSocket.OPEN) return;
+  const skipClockSource = !!opts.skipClockSource;
   if (cachedConfig.ledLevels) ws.send(JSON.stringify({ type: "set_led_levels", levels: cachedConfig.ledLevels }));
-  if (cachedConfig.clockSource) ws.send(JSON.stringify({ type: "set_clock_source", source: cachedConfig.clockSource }));
+  if (cachedConfig.clockSource && !skipClockSource) {
+    ws.send(JSON.stringify({ type: "set_clock_source", source: cachedConfig.clockSource }));
+  }
   if (cachedConfig.clockInput) ws.send(JSON.stringify({ type: "set_clock_input", id: cachedConfig.clockInput, name: cachedConfig.clockInput }));
   if (typeof cachedConfig.clockOut === "boolean") {
     clockOutEnabled = !!cachedConfig.clockOut;
