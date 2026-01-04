@@ -3139,7 +3139,7 @@ function addAccentOverlay(page, x, y, accent) {
   if (!overlays[pageIdx]) overlays[pageIdx] = [];
   // remove any existing accent overlay but do not show a popup
   overlays[pageIdx] = overlays[pageIdx].filter((o) => !(o.x === x && o.y === y && o.text === "A"));
-  if (accent) overlays[pageIdx].push({ x, y, text: "A", ts: Date.now() });
+// if (accent) overlays[pageIdx].push({ x, y, text: "A", ts: Date.now() }); //remove accent overlay display for now
   if (pageIdx === currentPage) renderFrame(frames[currentPage]);
 }
 
@@ -3148,9 +3148,9 @@ function addSlideOverlay(page, x, y, slide) {
   if (!overlays[pageIdx]) overlays[pageIdx] = [];
   // remove any existing slide overlay but do not show a popup
   overlays[pageIdx] = overlays[pageIdx].filter((o) => !(o.x === x && o.y === y && o.text === "S"));
-  if (slide) overlays[pageIdx].push({ x, y, text: "S", ts: Date.now() });
+// if (slide) overlays[pageIdx].push({ x, y, text: "S", ts: Date.now() }); //remove slide overlay display for now
   if (pageIdx === currentPage) renderFrame(frames[currentPage]);
-}
+} 
 
 function handleStepStateMessage(msg) {
   if (typeof msg.page === "number" && msg.page !== currentPage) return;
