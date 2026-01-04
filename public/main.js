@@ -3,8 +3,8 @@ import { AudioEventScheduler } from "./scheduler.js";
 const WS_URL = `ws://${location.host}`;
 const WIDTH = 16;
 const HEIGHT = 8;
-const CELL_SIZE = 32;
-const CELL_GAP = 12;
+const CELL_SIZE = 32; //32
+const CELL_GAP = 12; //12
 const CANVAS_WIDTH = WIDTH * CELL_SIZE + (WIDTH - 1) * CELL_GAP;
 const CANVAS_HEIGHT = HEIGHT * CELL_SIZE + (HEIGHT - 1) * CELL_GAP;
 const BASE_WINDOW_WIDTH = 860;
@@ -15,6 +15,7 @@ let onColor = ON_COLOR_DEFAULT;
 const LABEL_COLOR = (getComputedStyle(document.documentElement).getPropertyValue("--panel-strong") || "#424242").trim() || "#424242";
 const LABEL_FONT = "400 8px 'Inter', sans-serif";
 const DEFAULT_STEP_ROWS = 7;
+// LED brightness levels (0-15)
 const STEP_ON = 8;
 const STEP_MICRO = 6;
 const PLAYHEAD = 10;
@@ -2124,6 +2125,9 @@ if (settingsBtn && settingsModal && settingsBackdrop) {
 if (settingsSaveCfg) {
   settingsSaveCfg.onclick = () => {
     try {
+      if (settingsOpen) {
+        applySettingsFromInputs();
+      }
       const cfg = {
         ledLevels,
         clockSource,

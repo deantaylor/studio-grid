@@ -1,7 +1,8 @@
 :root {
   --bg: #303030;
   --panel: #3b3b3b;        /* dark tile 1 */
-  --panel-strong: #424242; /* dark tile 2 */
+  --panel-strong: #424242; 
+  --primary-color: #ffe070; /* dark tile 2 */
   --fg: #f5f6f7;
   --muted: #a7abb0;
   --surface: #e3e3e3;      /* light gray tile */
@@ -13,7 +14,7 @@
   --danger: #ff7b73;        /* coral tile */
   --input-bg: #3a3d40;
   --accent-secondary: #d9f7a0; /* light green tile */
-  --cta: #ffe070;
+  --cta: var(--primary-color); /* main colour */
   --grid-width: 692px;
   --neutral-mid: #9d9d9d;
   --ui-scale: 1.5;
@@ -56,6 +57,10 @@ body {
   width: 100%;
   position: relative;
   zoom: var(--ui-scale);
+}
+
+.no-select {
+  user-select: none;         /* modern browsers */
 }
 
 .top-bar {
@@ -125,9 +130,7 @@ body {
   -webkit-appearance: none;
 }
 
-.tempo-block input.readonly[type=number] {
-  -moz-appearance: textfield;
-}
+
 
 
 .icon-btn,
@@ -190,8 +193,10 @@ body {
 }
 .icon-btn:hover,
 .transport button:hover,
-.follow-btn:hover {
-  filter: brightness(1.1);
+.follow-btn:hover,
+.icon-btn i:hover {
+  /*filter: brightness(1.1);*/
+  filter: opacity(80%);
 }
 #export-td3 .iconoir-emoji-blink-left {
   display: none;
@@ -465,7 +470,6 @@ textarea {
 
 /* Use custom steppers for number inputs */
 input[type="number"] {
-  -moz-appearance: textfield;
   padding-right: 28px;
 }
 input[type="number"]::-webkit-inner-spin-button,
@@ -760,8 +764,6 @@ canvas#grid {
   border: none !important;
   background: none;
   box-shadow: none;
-  -webkit-appearance: none;
-  -moz-appearance: none;
   cursor: pointer;
 }
 
@@ -817,7 +819,7 @@ canvas#grid {
 }
 .bar-row .bar-btn.disabled {
   opacity: 0.4;
-  cursor: not-allowed;
+  cursor: none;
 }
 
 .pattern-scale {
@@ -840,6 +842,7 @@ canvas#grid {
   font-size: 10px;
   line-height: 12px;
   font-weight: 400;
+  cursor: pointer;
 }
 .pattern-scale-btn { padding: 0 10px; }
 #pattern-length-buttons {
@@ -993,18 +996,18 @@ canvas#grid {
 
 .context-menu {
   position: absolute;
-  background: var(--panel-strong);
+  background: var(--panel);
   border-radius: var(--radius-md);
   box-shadow: 0 8px 20px rgba(0,0,0,0.15);
-  padding: var(--gap-md) 0;
-  z-index: 50;
+  padding: 0;
+  z-index: 80;
   pointer-events: auto;
   font-size: inherit;
 }
 .context-menu button {
   display: block;
   width: 100%;
-  padding: var(--gap-md) var(--gap-lg);
+  padding: var(--gap-sm) var(--gap-md);
   border: none;
   background: transparent;
   text-align: left;
