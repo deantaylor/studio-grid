@@ -377,6 +377,23 @@ logMissingDom([
 let frames = Array.from({ length: 9 }, () => new Array(WIDTH * HEIGHT).fill(0));
 let overlays = Array.from({ length: 9 }, () => []);
 let transposes = Array.from({ length: 9 }, () => 0);
+
+function applyOctaveOverlaysSnapshot(snapshot) {
+  if (!Array.isArray(snapshot)) return;
+  overlays = Array.from({ length: 9 }, (_, idx) => {
+    const list = Array.isArray(snapshot[idx]) ? snapshot[idx] : [];
+    return list
+      .filter((o) => Number.isFinite(o?.x) && Number.isFinite(o?.y) && Number.isFinite(o?.octave) && o.octave !== 0)
+      .map((o) => ({
+        x: o.x,
+        y: o.y,
+        rawY: o.y,
+        octave: o.octave,
+        text: o.octave > 0 ? `+${o.octave}` : `${o.octave}`,
+        ts: Date.now()
+      }));
+  });
+}
 let scale = { root: 0, mode: "major" };
 let deviceNames = Array.from({ length: 9 }, (_, i) => (i === 0 ? null : `${i}`));
 let deviceNotes = Array.from({ length: 9 }, (_, i) => (i === 0 ? null : ""));
@@ -627,19 +644,7 @@ function connectWS() {
         });
       }
       if (Array.isArray(msg.octaveOverlays)) {
-        overlays = Array.from({ length: 9 }, (_, idx) => {
-          const list = Array.isArray(msg.octaveOverlays[idx]) ? msg.octaveOverlays[idx] : [];
-          return list
-            .filter((o) => Number.isFinite(o?.x) && Number.isFinite(o?.y) && Number.isFinite(o?.octave) && o.octave !== 0)
-            .map((o) => ({
-              x: o.x,
-              y: o.y,
-              rawY: o.y,
-              octave: o.octave,
-              text: o.octave > 0 ? `+${o.octave}` : `${o.octave}`,
-              ts: Date.now()
-            }));
-        });
+        applyOctaveOverlaysSnapshot(msg.octaveOverlays);
       }
       updatePage(msg.currentPage || currentPage, { fromServer: true });
       updateTempo(tempo, { broadcast: false });
@@ -749,17 +754,29 @@ function connectWS() {
       applyClockSourceUI();
     } else if (msg.type === "pattern_status") {
       if (typeof msg.page === "number") {
+        const prevPattern = currentPattern;
         activePatterns[msg.page] = msg.active ?? activePatterns[msg.page];
         pendingPatterns[msg.page] = msg.pending ?? null;
         if (msg.page === currentPage) {
           if (typeof msg.active === "number") {
             currentPattern = msg.active;
           }
+          const patternChanged = typeof msg.active === "number" && msg.active !== prevPattern;
+          if (patternChanged) {
+            hoveredStep = null;
+            lastOctaveTarget = null;
+            octaveOverlayLock = false;
+            octaveControls.style.display = "none";
+          }
           applyPatternSelectUI();
           renderPatternRow();
           applyPatternLengthUI();
           applyPatternScaleUI();
           renderBarRow();
+        }
+        if (Array.isArray(msg.octaveOverlays)) {
+          applyOctaveOverlaysSnapshot(msg.octaveOverlays);
+          if (msg.page === currentPage) renderFrame(frames[currentPage]);
         }
       }
     } else if (msg.type === "pattern_length") {

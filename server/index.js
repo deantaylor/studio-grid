@@ -979,7 +979,13 @@ function broadcastTempo() {
 function broadcastPatternStatus(page) {
   const p = state.pages[page];
   if (!p) return;
-  broadcast({ type: "pattern_status", page, active: p.active_pattern, pending: p.pending_pattern || null });
+  broadcast({
+    type: "pattern_status",
+    page,
+    active: p.active_pattern,
+    pending: p.pending_pattern || null,
+    octaveOverlays: state.octaveOverlaySnapshot()
+  });
 }
 
 function broadcastPatternLength(page, pattern, opts = {}) {

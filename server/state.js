@@ -1167,7 +1167,8 @@ export class MGridState {
                 delete step2.noteOctaves[targetDeg];
               }
               if (prevOct) {
-                this.enqueueOctaveOverlay({ page: this.currentPage, x: hx, y: hy, clear: true });
+                const clearY = clamp(6 - targetDeg, 0, 6);
+                this.enqueueOctaveOverlay({ page: this.currentPage, x: hx, y: clearY, clear: true });
               }
             }
             if (!step2.notes.length) {
