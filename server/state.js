@@ -88,6 +88,7 @@ export class SGridState {
     this.pendingOctaveOverlays = [];
     this.holdTimers = new Map(); // key -> timeout id for entering edit mode
     this.requestRender = null; // optional callback wired by server to force a render
+    this.auditionHolds = new Map(); // key -> {page, note, channel, cc, ccValue, ccChannel}
   }
 
   normalizeDeviceOrder(order) {
@@ -784,6 +785,7 @@ export class SGridState {
   handleGridKey(x, y, s, opts = {}) {
     const forcePatternControl = !!opts.forcePatternControl;
     const uiMode = !!opts.uiMode;
+    const allowAudition = !!opts.allowAudition;
     if (forcePatternControl) {
       return this.handlePatternControlKey(x, y, s);
     }
@@ -856,7 +858,11 @@ export class SGridState {
       }
       if (x === 14) {
         // pattern switch modifier (immediate)
+        const wasHeld = this.patternHeld;
         this.patternHeld = s === 1;
+        if (allowAudition && wasHeld && s === 0) {
+          return this.releaseAuditionHolds();
+        }
         return null;
       }
       if (s !== 1) return;
@@ -874,6 +880,9 @@ export class SGridState {
     }
     const rowInfo = this.getRowInfo(y, { uiMode });
     if (rowInfo.stepRow) {
+      if (allowAudition && this.patternHeld && !uiMode) {
+        return this.handleAuditionKey(x, y, s, rowInfo);
+      }
       const page = this.pages[this.currentPage];
       const pat = this.getPattern();
       const len = Math.max(1, pat?.length_steps || 16);
@@ -1188,6 +1197,67 @@ export class SGridState {
       }
     }
     return null;
+  }
+
+  handleAuditionKey(x, y, s, rowInfo) {
+    const page = this.pages[this.currentPage];
+    if (!page || !rowInfo?.stepRow) return null;
+    const seqType = page.sequencerType || "mono";
+    if (seqType === "cc") return null;
+    const key = `${x},${y}`;
+    if (s === 1) {
+      if (this.auditionHolds.has(key)) return null;
+      const degree = rowInfo.degree ?? 0;
+      const octave = rowInfo.topRow ? rowInfo.octaveOffset : 0;
+      const pageIdx = this.currentPage;
+      const pageTranspose = page.transpose || 0;
+      let note = null;
+      let channel = clamp(this.midi[pageIdx]?.channel || 1, 1, 16);
+      let cc = null;
+      let ccValue = null;
+      let ccChannel = null;
+      if (seqType === "drum") {
+        const drumMap = Array.isArray(page.drumNotes) ? page.drumNotes : [];
+        note = drumMap[degree] ?? 36;
+      } else if (seqType === "mdtonal") {
+        const trackCfg = this.mdTrackConfig(pageIdx);
+        note = trackCfg.noteNumber;
+        channel = clamp(trackCfg.noteChannel || channel, 1, 16);
+        const value = this.mdCCFromDegree(degree, pageTranspose, octave);
+        if (value == null) return null;
+        cc = trackCfg.ccNumber;
+        ccValue = value;
+        ccChannel = clamp(trackCfg.ccChannel || channel, 1, 16);
+      } else {
+        const mode = (this.scale && this.scale.mode) || "major";
+        const pat = page.patterns?.[page.active_pattern];
+        const root = pat?.root || 0;
+        note = this.calcPitch(root, mode, degree || 0, octave || 0) + pageTranspose;
+      }
+      if (!Number.isFinite(note)) return null;
+      const safeNote = clamp(Math.round(note), 0, 127);
+      const vel = 96;
+      const hold = { page: pageIdx, note: safeNote, channel, cc, ccValue, ccChannel };
+      this.auditionHolds.set(key, hold);
+      return { type: "audition", action: "on", velocity: vel, ...hold };
+    }
+    if (s === 0) {
+      const hold = this.auditionHolds.get(key);
+      if (!hold) return null;
+      this.auditionHolds.delete(key);
+      return { type: "audition", action: "off", ...hold };
+    }
+    return null;
+  }
+
+  releaseAuditionHolds() {
+    if (!this.auditionHolds.size) return null;
+    const events = [];
+    this.auditionHolds.forEach((hold) => {
+      events.push({ type: "audition", action: "off", ...hold });
+    });
+    this.auditionHolds.clear();
+    return events;
   }
 
   getStepInfo(x, y, opts = {}) {
@@ -2414,7 +2484,10 @@ export class SGridState {
     const WIDTH = 16;
     const HEIGHT = 8;
     const STEP_ROWS = 7;
-    const baseFrame = this.renderLED(slideTimeMs, { includeOctaveHint: opts.includeOctaveHint });
+    const baseFrame = this.renderLED(slideTimeMs, {
+      includeOctaveHint: opts.includeOctaveHint,
+      ignorePatternHoldDim: opts.ignorePatternHoldDim
+    });
     const uiFrame = new Array(WIDTH * HEIGHT).fill(0);
     for (let y = 0; y < STEP_ROWS; y++) {
       for (let x = 0; x < WIDTH; x++) {
@@ -2470,6 +2543,7 @@ export class SGridState {
   // DO NOT CHANGE LOGIC: monome LED frame generation depends on this exact pipeline.
   renderLED(slideTimeMs, opts = {}) {
     const includeOctaveHint = opts.includeOctaveHint !== false;
+    const ignorePatternHoldDim = !!opts.ignorePatternHoldDim;
     const WIDTH = 16;
     const HEIGHT = 8;
     const STEP_ROWS = 7;
@@ -2622,6 +2696,25 @@ export class SGridState {
           const dim = Math.max(1, Math.round(bright * 0.4));
           const level = Math.round(dim + (bright - dim) * pulse);
           frame[sp.y1 * WIDTH + sp.x1] = level;
+        });
+      }
+    }
+    if (this.patternHeld && !ignorePatternHoldDim) {
+      for (let yy = 0; yy < STEP_ROWS; yy++) {
+        for (let xx = 0; xx < WIDTH; xx++) {
+          const idx = yy * WIDTH + xx;
+          if (frame[idx] > 0) {
+            frame[idx] = PATTERN_INACTIVE;
+          }
+        }
+      }
+      if (this.auditionHolds && this.auditionHolds.size) {
+        this.auditionHolds.forEach((hold, key) => {
+          const [sx, sy] = key.split(",").map((val) => Number(val));
+          if (!Number.isFinite(sx) || !Number.isFinite(sy)) return;
+          if (sy < 0 || sy >= STEP_ROWS) return;
+          const idx = sy * WIDTH + sx;
+          frame[idx] = Math.max(frame[idx], STEP_ON);
         });
       }
     }

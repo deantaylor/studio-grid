@@ -384,15 +384,21 @@ function applyOctaveOverlaysSnapshot(snapshot) {
   overlays = Array.from({ length: 9 }, (_, idx) => {
     const list = Array.isArray(snapshot[idx]) ? snapshot[idx] : [];
     return list
-      .filter((o) => Number.isFinite(o?.x) && Number.isFinite(o?.y) && Number.isFinite(o?.octave) && o.octave !== 0)
-      .map((o) => ({
-        x: o.x,
-        y: o.y,
-        rawY: o.y,
-        octave: o.octave,
-        text: o.octave > 0 ? `+${o.octave}` : `${o.octave}`,
-        ts: Date.now()
-      }));
+      .filter((o) => Number.isFinite(o?.x) && Number.isFinite(o?.y) && Number.isFinite(o?.octave))
+      .map((o) => {
+        const rawY = o.y;
+        const val = normalizeOctaveOverlay(rawY, o.octave);
+        if (!val) return null;
+        return {
+          x: o.x,
+          y: rawY,
+          rawY,
+          octave: val,
+          text: val > 0 ? `+${val}` : `${val}`,
+          ts: Date.now()
+        };
+      })
+      .filter(Boolean);
   });
 }
 
@@ -905,6 +911,8 @@ function connectWS() {
       ensureScheduler();
       scheduler?.enqueue(msg.events || []);
       scheduler?.tick();
+    } else if (msg.type === "audition") {
+      handleAuditionMessage(msg);
     } else if (msg.type === "base_division") {
       baseDivision = msg.division || baseDivision;
       applyBaseNoteLenUI();
@@ -1136,6 +1144,34 @@ function getMidiChannelForPage(page, fallbackChan) {
   const cfg = midiSettings[page] || midiSettings[currentPage] || {};
   if (Number.isFinite(fallbackChan)) return fallbackChan;
   return cfg.channel || 1;
+}
+
+function handleAuditionMessage(msg) {
+  const page = Number.isFinite(msg.page) ? msg.page : currentPage;
+  const out = getMidiOutForPage(page);
+  if (!out) return;
+  const note = Number.isFinite(msg.note) ? Math.round(msg.note) : null;
+  if (!Number.isFinite(note)) return;
+  const action = msg.action;
+  if (action === "on") {
+    if (Number.isFinite(msg.cc) && Number.isFinite(msg.ccValue)) {
+      const ccChan = getMidiChannelForPage(page, msg.ccChannel);
+      const status = 0xb0 + (ccChan - 1);
+      const ccNum = Math.max(0, Math.min(127, Math.round(msg.cc)));
+      const ccVal = Math.max(0, Math.min(127, Math.round(msg.ccValue)));
+      sendMIDISafe(out, [status, ccNum, ccVal], performance.now());
+    }
+    const channel = getMidiChannelForPage(page, msg.channel);
+    const status = 0x90 + (channel - 1);
+    const vel = Math.max(0, Math.min(127, Math.round(msg.velocity ?? 96)));
+    sendMIDISafe(out, [status, note, vel], performance.now());
+    trackNoteOn(out, channel, note);
+  } else if (action === "off") {
+    const channel = getMidiChannelForPage(page, msg.channel);
+    const status = 0x80 + (channel - 1);
+    sendMIDISafe(out, [status, note, 0], performance.now());
+    trackNoteOff(out, channel, note);
+  }
 }
 
 function noteKey(out, channel) {
@@ -3095,7 +3131,8 @@ if (seqTypeSel) {
 function addOverlay(page, x, y, octave, delta) {
   const pageIdx = Number.isFinite(page) ? page : currentPage;
   if (!overlays[pageIdx]) overlays[pageIdx] = [];
-  const val = Number.isFinite(octave) ? octave : (Number.isFinite(delta) ? delta : 0);
+  const rawVal = Number.isFinite(octave) ? octave : (Number.isFinite(delta) ? delta : 0);
+  const val = normalizeOctaveOverlay(y, rawVal);
   if (!val) {
     // remove any existing numeric overlay when returning to zero
     overlays[pageIdx] = overlays[pageIdx].filter((o) => {
@@ -3540,9 +3577,16 @@ function getStepRows() {
   return fullScaleMode ? 8 : DEFAULT_STEP_ROWS;
 }
 
+function normalizeOctaveOverlay(rawY, octave) {
+  if (!Number.isFinite(octave)) return 0;
+  if (!fullScaleMode) return octave;
+  if (rawY === 6 && octave > 0) return octave - 1;
+  return octave;
+}
+
 function mapOverlayY(y, octave, useFullScale) {
   if (!useFullScale) return y;
-  if (y === 6 && Number(octave) === 1) return 0;
+  if (y === 6 && Number(octave) >= 1) return 0;
   return y + 1;
 }
 

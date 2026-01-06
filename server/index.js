@@ -176,7 +176,7 @@ serial.on("grid_key", (evt) => {
   const rows = evt.rows || dev?.gridRows || 8;
   const supportsLevels = evt.supportsLevels ?? dev?.supportsLevels ?? true;
   const forcePatternControl = (!supportsLevels) || ((cols <= 8 && rows <= 8) && evt.deviceId !== primaryId);
-  const resp = state.handleGridKey(evt.x, evt.y, evt.s, { forcePatternControl });
+  const resp = state.handleGridKey(evt.x, evt.y, evt.s, { forcePatternControl, allowAudition: true });
   const events = Array.isArray(resp) ? resp : (resp ? [resp] : []);
   // When a held note is entered from the monome, show the octave arrows in the UI
   if (evt.s === 1) {
@@ -200,6 +200,8 @@ serial.on("grid_key", (evt) => {
       broadcast({ type: "accent_overlay", page: state.currentPage, ...ev });
     } else if (ev.type === "slide") {
       broadcast({ type: "slide_overlay", page: state.currentPage, ...ev });
+    } else if (ev.type === "audition") {
+      broadcast({ type: "audition", ...ev });
     } else if (ev.type === "bar_view") {
       followEnabled = false;
       broadcast({ type: "follow", enabled: followEnabled });
@@ -336,7 +338,7 @@ function handleClientMessage(ws, data) {
       break;
     case "grid_key":
       {
-        const resp = state.handleGridKey(data.x, data.y, data.s, { uiMode: fullScaleMode });
+        const resp = state.handleGridKey(data.x, data.y, data.s, { uiMode: fullScaleMode, allowAudition: false });
         const events = Array.isArray(resp) ? resp : (resp ? [resp] : []);
         events.forEach((ev) => {
           if (ev.type === "octave") {
@@ -345,6 +347,8 @@ function handleClientMessage(ws, data) {
             broadcast({ type: "accent_overlay", page: state.currentPage, ...ev });
           } else if (ev.type === "slide") {
             broadcast({ type: "slide_overlay", page: state.currentPage, ...ev });
+          } else if (ev.type === "audition") {
+            broadcast({ type: "audition", ...ev });
           } else if (ev.type === "bar_view") {
             followEnabled = false;
             broadcast({ type: "follow", enabled: followEnabled });
@@ -1107,8 +1111,8 @@ function scheduleLedSend(force = false) {
     lastRenderedFrame = frameToSend;
     // broadcast a UI-safe frame without octave neighbor hints
     const uiFrame = fullScaleMode
-      ? state.renderUIFrame(Date.now(), { includeOctaveHint: false })
-      : state.renderLED(Date.now(), { includeOctaveHint: false });
+      ? state.renderUIFrame(Date.now(), { includeOctaveHint: false, ignorePatternHoldDim: true })
+      : state.renderLED(Date.now(), { includeOctaveHint: false, ignorePatternHoldDim: true });
     const inPatternControl = state.patternControlMode || state.patternControlHeld || state.patternHeld;
     broadcast({
       type: "led_frame",
