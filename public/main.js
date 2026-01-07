@@ -9,7 +9,7 @@ const CANVAS_WIDTH = WIDTH * CELL_SIZE + (WIDTH - 1) * CELL_GAP;
 const CANVAS_HEIGHT = HEIGHT * CELL_SIZE + (HEIGHT - 1) * CELL_GAP;
 const BASE_WINDOW_WIDTH = 860;
 const BASE_WINDOW_HEIGHT = window.innerHeight || document.documentElement.clientHeight || 640;
-const OFF_COLOR = "#ececec";
+const OFF_COLOR = "#424242"; //formerly "#ececec"
 const ON_COLOR_DEFAULT = "#ff8e8e";
 let onColor = ON_COLOR_DEFAULT;
 const LABEL_COLOR = (getComputedStyle(document.documentElement).getPropertyValue("--panel-strong") || "#424242").trim() || "#424242";
@@ -254,6 +254,27 @@ const initNumberSteppers = () => {
 };
 
 initNumberSteppers();
+
+// splash screen handling
+
+const MIN_SPLASH_TIME = 2800; // ms
+const splashStart = performance.now();
+
+function hideSplash() {
+  const splash = document.getElementById("splash");
+  if (!splash) return;
+
+  splash.classList.add("fade-out");
+  setTimeout(() => splash.remove(), 800);
+}
+
+window.addEventListener("load", () => {
+  const elapsed = performance.now() - splashStart;
+  const remaining = Math.max(0, MIN_SPLASH_TIME - elapsed);
+
+  setTimeout(hideSplash, remaining);
+});
+
 
 const DEVICE_COLOR_PALETTE = ["#d7ff73", "#ff8e8e", "#9ad7ff", "#f0c674", "#c6b8ff"];
 const BASE_DEFAULT_DEVICE_COLOR = "#ffe070";

@@ -50,6 +50,40 @@ body {
   line-height: 12px;
 }
 
+#splash {
+
+  user-select: none;  
+  position: fixed;
+  inset: 0;
+  background: var(--bg); /* your color */
+  color: var(--surface);
+
+  display: flex;
+  align-items: center;
+  justify-content: center;
+
+  font-family: sans-serif;
+  font-size: 2rem;
+
+  z-index: 9999;
+
+  opacity: 1;
+  transition: opacity 0.8s ease;
+}
+
+#splash.fade-out {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.splash-title { 
+  display: block;
+  font-size: 48px; 
+  font-weight: 200; 
+  letter-spacing: -0.03em; 
+  color: var(--surface); 
+}
+
 .app-shell {
   display: flex;
   flex-direction: column;
@@ -600,7 +634,7 @@ textarea { resize: vertical; }
 
 canvas#grid {
   display: block;
-  background: var(--bg);
+  background: transparent;
   width: 100%;
   max-width: var(--grid-width);
   height: auto;
@@ -1089,3 +1123,5 @@ canvas#grid {
   color: #fff;
 }
 /* studio grid styles: layout, components, grid visuals, modals, and responsive tweaks */
+
+
