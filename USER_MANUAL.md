@@ -2,9 +2,7 @@ studio:grid — User Manual
 ========================
 
 Thanks for trying out studio:grid!
-
-Born from real music making problems and embracing the worlds of both hardware and software.
-
+Born from real problems whilst making music and embracing the worlds of both hardware and software.
 Leave your gear bias at the door, focus on the music and have fun :)
 
 Overview
