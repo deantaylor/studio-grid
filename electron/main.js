@@ -47,6 +47,7 @@ function createWindow() {
     show: false,
     useContentSize: true,
     webPreferences: {
+      backgroundThrottling: false,
       nodeIntegration: false,
       contextIsolation: true
     }

@@ -59,6 +59,7 @@ function createWindow() {
     //  titleBarStyle: 'hidden',
  // titleBarOverlay: true, //
     webPreferences: {
+      backgroundThrottling: false,
       nodeIntegration: false,
       contextIsolation: true
     }

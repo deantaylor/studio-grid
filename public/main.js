@@ -534,6 +534,35 @@ let autoLoadSet = false;
 let patternControlLatch = false;
 let resetNamesOnNextState = false;
 const TM1_NAME = "Elektron TM-1";
+const lastSentState = {
+  clockSource: null,
+  clockInputId: null,
+  clockOutEnabled: null,
+  clockOutPortId: null,
+  autoFillBars: null,
+  allowMDExternal: null,
+  patternControlLatch: null,
+  baseDivision: null,
+  mdSlideParams: { factor: null, curve: null, baseMs: null },
+  monoSlidePad: null,
+  ledLevels: {},
+  midiSettings: Array.from({ length: 9 }, () => ({ outId: null, channel: null }))
+};
+
+function resetLastSentState() {
+  lastSentState.clockSource = null;
+  lastSentState.clockInputId = null;
+  lastSentState.clockOutEnabled = null;
+  lastSentState.clockOutPortId = null;
+  lastSentState.autoFillBars = null;
+  lastSentState.allowMDExternal = null;
+  lastSentState.patternControlLatch = null;
+  lastSentState.baseDivision = null;
+  lastSentState.mdSlideParams = { factor: null, curve: null, baseMs: null };
+  lastSentState.monoSlidePad = null;
+  lastSentState.ledLevels = {};
+  lastSentState.midiSettings = Array.from({ length: 9 }, () => ({ outId: null, channel: null }));
+}
 
 const SCALE_ROOTS = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
 
@@ -544,6 +573,92 @@ function normalizeDeviceNames(names) {
     const str = raw == null ? "" : String(raw).trim();
     return str.length ? str : `${i}`;
   });
+}
+
+function resolveClockInputId(value) {
+  if (!value || !Array.isArray(clockInputs)) return "";
+  const match = clockInputs.find((entry) => entry?.id === value || entry?.name === value);
+  return match ? match.id : value;
+}
+
+function sendClockSourceIfChanged(source) {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  if (lastSentState.clockSource === source) return;
+  lastSentState.clockSource = source;
+  ws.send(JSON.stringify({ type: "set_clock_source", source }));
+}
+
+function sendClockInputIfChanged(id) {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  if (!id) return;
+  if (lastSentState.clockInputId === id) return;
+  lastSentState.clockInputId = id;
+  ws.send(JSON.stringify({ type: "set_clock_input", id, name: id }));
+}
+
+function sendClockOutIfChanged(enabled) {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  if (lastSentState.clockOutEnabled === enabled) return;
+  lastSentState.clockOutEnabled = enabled;
+  ws.send(JSON.stringify({ type: "set_clock_out", enabled }));
+}
+
+function sendClockOutDeviceIfChanged(id) {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  if (lastSentState.clockOutPortId === id) return;
+  lastSentState.clockOutPortId = id;
+  ws.send(JSON.stringify({ type: "set_clock_out_device", id, name: id }));
+}
+
+function sendAutoFillIfChanged(enabled) {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  if (lastSentState.autoFillBars === enabled) return;
+  lastSentState.autoFillBars = enabled;
+  ws.send(JSON.stringify({ type: "set_auto_fill", enabled }));
+}
+
+function sendPatternControlLatchIfChanged(enabled) {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  if (lastSentState.patternControlLatch === enabled) return;
+  lastSentState.patternControlLatch = enabled;
+  ws.send(JSON.stringify({ type: "set_pattern_control_latch", enabled }));
+}
+
+function sendBaseDivisionIfChanged(division) {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  if (lastSentState.baseDivision === division) return;
+  lastSentState.baseDivision = division;
+  ws.send(JSON.stringify({ type: "set_base_division", division }));
+}
+
+function sendMdSlideParamsIfChanged(factor, curve, baseMs) {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  const prev = lastSentState.mdSlideParams || {};
+  if (prev.factor === factor && prev.curve === curve && prev.baseMs === baseMs) return;
+  lastSentState.mdSlideParams = { factor, curve, baseMs };
+  ws.send(JSON.stringify({ type: "set_md_slide_params", factor, curve, baseMs }));
+}
+
+function sendMonoSlidePadIfChanged(value) {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  if (lastSentState.monoSlidePad === value) return;
+  lastSentState.monoSlidePad = value;
+  ws.send(JSON.stringify({ type: "set_mono_slide_pad", value }));
+}
+
+function sendLedLevelsIfChanged(levels) {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  if (!levels || typeof levels !== "object") return;
+  const delta = {};
+  Object.entries(levels).forEach(([key, value]) => {
+    if (lastSentState.ledLevels[key] !== value) delta[key] = value;
+  });
+  const keys = Object.keys(delta);
+  if (!keys.length) return;
+  keys.forEach((key) => {
+    lastSentState.ledLevels[key] = delta[key];
+  });
+  ws.send(JSON.stringify({ type: "set_led_levels", levels: delta }));
 }
 
 function buildScaleSelectors() {
@@ -590,6 +705,7 @@ function connectWS() {
   ws.onopen = () => {
     if (wsStatus) wsStatus.textContent = "WS: connected";
     log("WS connected");
+    resetLastSentState();
     ws.send(JSON.stringify({ type: "subscribe_events" }));
     panicAll();
     // push saved config (LED/clock/log/auto-fill) if we have it
@@ -1006,6 +1122,8 @@ function refreshMIDIDevices() {
     ins.push({ id: input.id, name: input.name });
   });
   clockInputs = ins;
+  const resolvedClockInputId = resolveClockInputId(clockInputId);
+  if (resolvedClockInputId) clockInputId = resolvedClockInputId;
   if (!clockInputId && ins.length) clockInputId = ins[0].id;
   populateClockInputs();
   // attach to selected clock input if using external clock
@@ -1570,15 +1688,18 @@ if (clockToggleBtn) {
     const next = prev === "external" ? "internal" : "external";
     clockSource = next;
     handleClockSourceChange(prev, next);
-    ws?.readyState === WebSocket.OPEN && ws.send(JSON.stringify({ type: "set_clock_source", source: next }));
+    sendClockSourceIfChanged(next);
     if (prev === "external" && next === "internal") {
       lockTempoPrecision({ broadcast: true });
     }
     applyClockSourceUI();
     if (clockSource === "external" && clockInputSel && clockInputSel.value) {
-      clockInputId = clockInputSel.value;
-      ws?.readyState === WebSocket.OPEN && ws.send(JSON.stringify({ type: "set_clock_input", name: clockInputId }));
-      attachClockInput(clockInputId);
+      const resolved = resolveClockInputId(clockInputSel.value);
+      if (resolved) {
+        clockInputId = resolved;
+        sendClockInputIfChanged(clockInputId);
+        attachClockInput(clockInputId);
+      }
     }
     if (clockSource !== "external") {
       externalArmed = false;
@@ -1592,15 +1713,18 @@ if (clockSourceSel) {
     const prev = clockSource;
     clockSource = clockSourceSel.value;
     handleClockSourceChange(prev, clockSource);
-    ws?.readyState === WebSocket.OPEN && ws.send(JSON.stringify({ type: "set_clock_source", source: clockSource }));
+    sendClockSourceIfChanged(clockSource);
     if (prev === "external" && clockSource === "internal") {
       lockTempoPrecision({ broadcast: true });
     }
     applyClockSourceUI();
     if (clockSource === "external" && clockInputSel && clockInputSel.value) {
-      clockInputId = clockInputSel.value;
-      ws?.readyState === WebSocket.OPEN && ws.send(JSON.stringify({ type: "set_clock_input", name: clockInputId }));
-      attachClockInput(clockInputId);
+      const resolved = resolveClockInputId(clockInputSel.value);
+      if (resolved) {
+        clockInputId = resolved;
+        sendClockInputIfChanged(clockInputId);
+        attachClockInput(clockInputId);
+      }
     }
     if (clockSource !== "external") {
       externalArmed = false;
@@ -1612,9 +1736,10 @@ if (clockSourceSel) {
 if (clockInputSel) {
   clockInputSel.onchange = () => {
     if (settingsOpen) return;
-    const name = clockInputSel.value;
-    clockInputId = name;
-    ws?.readyState === WebSocket.OPEN && ws.send(JSON.stringify({ type: "set_clock_input", name }));
+    const next = resolveClockInputId(clockInputSel.value);
+    if (!next || next === clockInputId) return;
+    clockInputId = next;
+    sendClockInputIfChanged(clockInputId);
     if (clockSource === "external") attachClockInput(clockInputId);
   };
 }
@@ -1662,6 +1787,8 @@ function populateClockInputs() {
     clockInputSel.append(opt);
     if (!clockInputId && idx === 0) clockInputId = id;
   });
+  const resolvedClockInputId = resolveClockInputId(clockInputId);
+  if (resolvedClockInputId) clockInputId = resolvedClockInputId;
   if (clockInputId) clockInputSel.value = clockInputId;
   log(`Clock inputs: ${clockInputs.map((i) => i.name || i).join(", ") || "none"}`);
 }
@@ -2047,7 +2174,11 @@ function syncSettingsInputs() {
   if (settingsTempoInput) settingsTempoInput.value = formatTempoDisplay(tempo);
   if (uiScaleSel) uiScaleSel.value = String(uiScale || 1.5);
   if (clockSourceSel) clockSourceSel.value = clockSource || "internal";
-  if (clockInputSel && clockInputId) clockInputSel.value = clockInputId;
+  if (clockInputSel && clockInputId) {
+    const resolved = resolveClockInputId(clockInputId);
+    if (resolved) clockInputId = resolved;
+    clockInputSel.value = clockInputId;
+  }
   if (clockOutToggle) clockOutToggle.checked = !!clockOutEnabled;
   if (clockOutPortSel && clockOutPortId) clockOutPortSel.value = clockOutPortId;
   if (autoFillToggle) autoFillToggle.checked = !!autoFillBars;
@@ -2082,30 +2213,39 @@ function applySettingsFromInputs() {
         lockTempoPrecision({ broadcast: true });
       }
     }
-    if (changed) {
-      ws?.readyState === WebSocket.OPEN && ws.send(JSON.stringify({ type: "set_clock_source", source: clockSource }));
-    }
+    if (changed) sendClockSourceIfChanged(clockSource);
     applyClockSourceUI();
   }
 
   if (clockInputSel) {
-    const name = clockInputSel.value;
-    clockInputId = name;
-    ws?.readyState === WebSocket.OPEN && ws.send(JSON.stringify({ type: "set_clock_input", name }));
-    if (clockSource === "external") attachClockInput(clockInputId);
+    const next = resolveClockInputId(clockInputSel.value);
+    if (next && next !== clockInputId) {
+      clockInputId = next;
+      sendClockInputIfChanged(clockInputId);
+      if (clockSource === "external") attachClockInput(clockInputId);
+    }
   }
 
   if (clockOutToggle) {
-    clockOutEnabled = !!clockOutToggle.checked;
-    ws?.readyState === WebSocket.OPEN && ws.send(JSON.stringify({ type: "set_clock_out", enabled: clockOutEnabled }));
+    const next = !!clockOutToggle.checked;
+    if (clockOutEnabled !== next) {
+      clockOutEnabled = next;
+      sendClockOutIfChanged(clockOutEnabled);
+    }
   }
   if (clockOutPortSel) {
-    clockOutPortId = clockOutPortSel.value || "";
-    ws?.readyState === WebSocket.OPEN && ws.send(JSON.stringify({ type: "set_clock_out_device", id: clockOutPortId, name: clockOutPortId }));
+    const next = clockOutPortSel.value || "";
+    if (clockOutPortId !== next) {
+      clockOutPortId = next;
+      sendClockOutDeviceIfChanged(clockOutPortId);
+    }
   }
   if (autoFillToggle) {
-    autoFillBars = !!autoFillToggle.checked;
-    ws?.readyState === WebSocket.OPEN && ws.send(JSON.stringify({ type: "set_auto_fill", enabled: autoFillBars }));
+    const next = !!autoFillToggle.checked;
+    if (autoFillBars !== next) {
+      autoFillBars = next;
+      sendAutoFillIfChanged(autoFillBars);
+    }
   }
   if (autoLoadToggle) {
     autoLoadSet = !!autoLoadToggle.checked;
@@ -2115,41 +2255,57 @@ function applySettingsFromInputs() {
     document.getElementById("log").classList.toggle("hidden", !show);
   }
   if (patternControlLatchToggle) {
-    patternControlLatch = !!patternControlLatchToggle.checked;
-    ws?.readyState === WebSocket.OPEN &&
-      ws.send(JSON.stringify({ type: "set_pattern_control_latch", enabled: patternControlLatch }));
+    const next = !!patternControlLatchToggle.checked;
+    if (patternControlLatch !== next) {
+      patternControlLatch = next;
+      sendPatternControlLatchIfChanged(patternControlLatch);
+    }
   }
   if (allowMDExternalToggle) {
-    allowMDExternal = !!allowMDExternalToggle.checked;
-    enforceMDMidiOut();
+    const next = !!allowMDExternalToggle.checked;
+    if (allowMDExternal !== next) {
+      allowMDExternal = next;
+      enforceMDMidiOut();
+    }
   }
   if (baseNoteLenSel) {
     let val = Math.max(1, Math.min(32, Math.round(Number(baseNoteLenSel.value) || baseDivision || 16)));
     if (val <= 4) val = val * 4;
     if (val === 6) val = 24;
-    baseDivision = val;
-    baseNoteLenSel.value = String(val);
-    ws?.readyState === WebSocket.OPEN && ws.send(JSON.stringify({ type: "set_base_division", division: val }));
+    if (baseDivision !== val) {
+      baseDivision = val;
+      baseNoteLenSel.value = String(val);
+      sendBaseDivisionIfChanged(baseDivision);
+    }
   }
 
+  const ledUpdates = {};
   Object.entries(ledInputs).forEach(([k, el]) => {
     if (!el) return;
     const val = Math.max(0, Math.min(15, Math.round(Number(el.value) || 0)));
-    ledLevels[k] = val;
+    if (ledLevels[k] !== val) {
+      ledLevels[k] = val;
+      ledUpdates[k] = val;
+    }
   });
-  ws?.readyState === WebSocket.OPEN && ws.send(JSON.stringify({ type: "set_led_levels", levels: { ...ledLevels } }));
+  if (Object.keys(ledUpdates).length) sendLedLevelsIfChanged(ledUpdates);
 
   if (mdBaseSweepInput) {
     const val = Math.max(20, Math.min(200, Math.round(Number(mdBaseSweepInput.value) || mdBaseSweep)));
-    mdBaseSweep = val;
-    mdBaseSweepInput.value = val;
-    ws?.readyState === WebSocket.OPEN && ws.send(JSON.stringify({ type: "set_md_slide_params", factor: mdSlideSpeed, curve: mdSlideCurve, baseMs: mdBaseSweep }));
+    if (mdBaseSweep !== val) {
+      mdBaseSweep = val;
+      mdBaseSweepInput.value = val;
+      sendMdSlideParamsIfChanged(mdSlideSpeed, mdSlideCurve, mdBaseSweep);
+    }
   }
   if (monoSlidePadInput) {
     const pct = Math.max(0, Math.min(50, Math.round(Number(monoSlidePadInput.value) || (monoSlidePad * 100))));
-    monoSlidePad = pct / 100;
-    monoSlidePadInput.value = pct;
-    ws?.readyState === WebSocket.OPEN && ws.send(JSON.stringify({ type: "set_mono_slide_pad", value: monoSlidePad }));
+    const next = pct / 100;
+    if (monoSlidePad !== next) {
+      monoSlidePad = next;
+      monoSlidePadInput.value = pct;
+      sendMonoSlidePadIfChanged(monoSlidePad);
+    }
   }
 
   if (pendingDefaultDeviceColor) {
@@ -2192,7 +2348,7 @@ if (settingsBtn && settingsModal && settingsBackdrop) {
       if (settingsOpen) return;
       const val = Math.max(0, Math.min(15, Math.round(Number(el.value) || 0)));
       ledLevels[k] = val;
-      ws?.readyState === WebSocket.OPEN && ws.send(JSON.stringify({ type: "set_led_levels", levels: { [k]: val } }));
+      sendLedLevelsIfChanged({ [k]: val });
     };
   });
   if (showLogToggle) {
@@ -2213,8 +2369,7 @@ if (settingsBtn && settingsModal && settingsBackdrop) {
     patternControlLatchToggle.onchange = () => {
       if (settingsOpen) return;
       patternControlLatch = !!patternControlLatchToggle.checked;
-      ws?.readyState === WebSocket.OPEN &&
-        ws.send(JSON.stringify({ type: "set_pattern_control_latch", enabled: patternControlLatch }));
+      sendPatternControlLatchIfChanged(patternControlLatch);
     };
   }
   if (mdBaseSweepInput) {
@@ -2223,7 +2378,7 @@ if (settingsBtn && settingsModal && settingsBackdrop) {
       const val = Math.max(20, Math.min(200, Math.round(Number(mdBaseSweepInput.value) || mdBaseSweep)));
       mdBaseSweep = val;
       mdBaseSweepInput.value = val;
-      ws?.readyState === WebSocket.OPEN && ws.send(JSON.stringify({ type: "set_md_slide_params", factor: mdSlideSpeed, curve: mdSlideCurve, baseMs: mdBaseSweep }));
+      sendMdSlideParamsIfChanged(mdSlideSpeed, mdSlideCurve, mdBaseSweep);
     };
     mdBaseSweepInput.addEventListener("change", commitBaseSweep);
     mdBaseSweepInput.addEventListener("blur", commitBaseSweep);
@@ -2234,7 +2389,7 @@ if (settingsBtn && settingsModal && settingsBackdrop) {
       const pct = Math.max(0, Math.min(50, Math.round(Number(monoSlidePadInput.value) || (monoSlidePad * 100))));
       monoSlidePad = pct / 100;
       monoSlidePadInput.value = pct;
-      ws?.readyState === WebSocket.OPEN && ws.send(JSON.stringify({ type: "set_mono_slide_pad", value: monoSlidePad }));
+      sendMonoSlidePadIfChanged(monoSlidePad);
     };
     monoSlidePadInput.addEventListener("change", commitMonoSlidePad);
     monoSlidePadInput.addEventListener("blur", commitMonoSlidePad);
@@ -2247,7 +2402,7 @@ if (settingsBtn && settingsModal && settingsBackdrop) {
       if (val === 6) val = 24; // migrate old 6-per-beat
       baseDivision = val;
       baseNoteLenSel.value = String(val);
-      ws?.readyState === WebSocket.OPEN && ws.send(JSON.stringify({ type: "set_base_division", division: val }));
+      sendBaseDivisionIfChanged(baseDivision);
     };
     baseNoteLenSel.addEventListener("change", commitBaseDivision);
   }
@@ -2309,28 +2464,27 @@ if (settingsRestoreCfg) {
     if (allowMDExternalToggle) allowMDExternalToggle.checked = false;
     clockOutEnabled = false;
     applyClockOutUI();
-    ws?.readyState === WebSocket.OPEN && ws.send(JSON.stringify({ type: "set_clock_out", enabled: clockOutEnabled }));
+    sendClockOutIfChanged(clockOutEnabled);
     clockOutPortId = "";
     if (clockOutPortSel) clockOutPortSel.value = "";
-    ws?.readyState === WebSocket.OPEN && ws.send(JSON.stringify({ type: "set_clock_out_device", id: "" }));
+    sendClockOutDeviceIfChanged(clockOutPortId);
     autoFillBars = true;
     applyAutoFillUI();
-    ws?.readyState === WebSocket.OPEN && ws.send(JSON.stringify({ type: "set_auto_fill", enabled: autoFillBars }));
+    sendAutoFillIfChanged(autoFillBars);
     autoLoadSet = false;
     if (autoLoadToggle) autoLoadToggle.checked = false;
     patternControlLatch = false;
     applyPatternControlLatchUI();
-    ws?.readyState === WebSocket.OPEN &&
-      ws.send(JSON.stringify({ type: "set_pattern_control_latch", enabled: patternControlLatch }));
+    sendPatternControlLatchIfChanged(patternControlLatch);
     ledLevels = { ...DEFAULT_LED_LEVELS };
     applyLedSettingsUI();
-    ws?.readyState === WebSocket.OPEN && ws.send(JSON.stringify({ type: "set_led_levels", levels: ledLevels }));
+    sendLedLevelsIfChanged(ledLevels);
     baseDivision = 16;
     applyBaseNoteLenUI();
-    ws?.readyState === WebSocket.OPEN && ws.send(JSON.stringify({ type: "set_base_division", division: baseDivision }));
+    sendBaseDivisionIfChanged(baseDivision);
     monoSlidePad = 0.1;
     applyMdSlideSpeedUI();
-    ws?.readyState === WebSocket.OPEN && ws.send(JSON.stringify({ type: "set_mono_slide_pad", value: monoSlidePad }));
+    sendMonoSlidePadIfChanged(monoSlidePad);
     if (showLogToggle) {
       showLogToggle.checked = false;
       document.getElementById("log").classList.add("hidden");
@@ -2573,10 +2727,16 @@ function renderTabs() {
     btn.style.color = isActive ? contrastForColor(activeBg) : "var(--surface)";
     btn.style.boxShadow = "none";
     btn.style.border = "none";
-    btn.onclick = () => {
-        updatePage(page, { fromServer: false });
-        ws?.readyState === WebSocket.OPEN && ws.send(JSON.stringify({ type: "set_page", page }));
+    const focusPage = () => {
+      if (page === currentPage) return;
+      updatePage(page, { fromServer: false });
+      ws?.readyState === WebSocket.OPEN && ws.send(JSON.stringify({ type: "set_page", page }));
     };
+    btn.onpointerdown = (e) => {
+      if (e.button !== 0) return;
+      focusPage();
+    };
+    btn.onclick = focusPage;
     btn.oncontextmenu = (e) => {
       e.preventDefault();
       e.stopPropagation();
@@ -2931,9 +3091,15 @@ function updateTd3ExportVisibility() {
   exportTd3Btn.classList.toggle("hidden", !show);
 }
 
-function sendMidiConfig() {
-  ws?.readyState === WebSocket.OPEN &&
-    ws.send(JSON.stringify({ type: "set_midi", page: currentPage, outId: midiSettings[currentPage].outId, channel: midiSettings[currentPage].channel }));
+function sendMidiConfig(page = currentPage) {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  const cfg = midiSettings[page] || { outId: "", channel: 1 };
+  const outId = cfg.outId || "";
+  const channel = cfg.channel || 1;
+  const last = lastSentState.midiSettings[page] || {};
+  if (last.outId === outId && last.channel === channel) return;
+  lastSentState.midiSettings[page] = { outId, channel };
+  ws.send(JSON.stringify({ type: "set_midi", page, outId, channel }));
 }
 
 function resetMidiSettings() {
@@ -2943,8 +3109,7 @@ function resetMidiSettings() {
   if (midiChan) midiChan.value = 1;
   applyPageMidi();
   for (let i = 1; i <= 8; i++) {
-    ws?.readyState === WebSocket.OPEN &&
-      ws.send(JSON.stringify({ type: "set_midi", page: i, outId: "", channel: 1 }));
+    sendMidiConfig(i);
   }
 }
 
@@ -3696,21 +3861,21 @@ if (autoFillToggle) {
   autoFillToggle.onchange = () => {
     if (settingsOpen) return;
     autoFillBars = !!autoFillToggle.checked;
-    ws?.readyState === WebSocket.OPEN && ws.send(JSON.stringify({ type: "set_auto_fill", enabled: autoFillBars }));
+    sendAutoFillIfChanged(autoFillBars);
   };
 }
 if (clockOutToggle) {
   clockOutToggle.onchange = () => {
     if (settingsOpen) return;
     clockOutEnabled = !!clockOutToggle.checked;
-    ws?.readyState === WebSocket.OPEN && ws.send(JSON.stringify({ type: "set_clock_out", enabled: clockOutEnabled }));
+    sendClockOutIfChanged(clockOutEnabled);
   };
 }
 if (clockOutPortSel) {
   clockOutPortSel.onchange = () => {
     if (settingsOpen) return;
     clockOutPortId = clockOutPortSel.value || "";
-    ws?.readyState === WebSocket.OPEN && ws.send(JSON.stringify({ type: "set_clock_out_device", id: clockOutPortId, name: clockOutPortId }));
+    sendClockOutDeviceIfChanged(clockOutPortId);
   };
 }
 
@@ -4019,6 +4184,8 @@ function loadSavedConfig() {
     }
     if (parsed.clockInput) {
       clockInputId = parsed.clockInput;
+      const resolved = resolveClockInputId(clockInputId);
+      if (resolved) clockInputId = resolved;
       if (clockInputSel) clockInputSel.value = clockInputId;
     }
     if (Array.isArray(parsed.midiSettings)) {
@@ -4060,7 +4227,7 @@ function loadSavedConfig() {
       patternControlLatch = parsed.patternControlLatch;
       applyPatternControlLatchUI();
       if (ws?.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({ type: "set_pattern_control_latch", enabled: patternControlLatch }));
+        sendPatternControlLatchIfChanged(patternControlLatch);
       }
     }
   if (typeof parsed.showLog === "boolean" && showLogToggle) {
@@ -4071,14 +4238,14 @@ function loadSavedConfig() {
     clockOutEnabled = !!parsed.clockOut;
     applyClockOutUI();
     if (ws?.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({ type: "set_clock_out", enabled: clockOutEnabled }));
+      sendClockOutIfChanged(clockOutEnabled);
     }
   }
   if (parsed.clockOutDevice) {
     clockOutPortId = parsed.clockOutDevice;
     applyClockOutUI();
     if (ws?.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({ type: "set_clock_out_device", id: clockOutPortId, name: clockOutPortId }));
+      sendClockOutDeviceIfChanged(clockOutPortId);
     }
   }
   if (parsed.defaultDeviceColor && /^#([0-9a-f]{6}|[0-9a-f]{3})$/i.test(parsed.defaultDeviceColor)) {
@@ -4102,22 +4269,31 @@ function loadSavedConfig() {
 function pushSavedConfigToServer(opts = {}) {
   if (!cachedConfig || !ws || ws.readyState !== WebSocket.OPEN) return;
   const skipClockSource = !!opts.skipClockSource;
-  if (cachedConfig.ledLevels) ws.send(JSON.stringify({ type: "set_led_levels", levels: cachedConfig.ledLevels }));
-  if (cachedConfig.clockSource && !skipClockSource) {
-    ws.send(JSON.stringify({ type: "set_clock_source", source: cachedConfig.clockSource }));
+  if (cachedConfig.ledLevels) {
+    sendLedLevelsIfChanged(cachedConfig.ledLevels);
   }
-  if (cachedConfig.clockInput) ws.send(JSON.stringify({ type: "set_clock_input", id: cachedConfig.clockInput, name: cachedConfig.clockInput }));
+  if (cachedConfig.clockSource && !skipClockSource) {
+    clockSource = cachedConfig.clockSource;
+    sendClockSourceIfChanged(clockSource);
+  }
+  if (cachedConfig.clockInput) {
+    clockInputId = cachedConfig.clockInput;
+    sendClockInputIfChanged(clockInputId);
+  }
   if (typeof cachedConfig.clockOut === "boolean") {
     clockOutEnabled = !!cachedConfig.clockOut;
     applyClockOutUI();
-    ws.send(JSON.stringify({ type: "set_clock_out", enabled: clockOutEnabled }));
+    sendClockOutIfChanged(clockOutEnabled);
   }
   if (cachedConfig.clockOutDevice) {
     clockOutPortId = cachedConfig.clockOutDevice;
     applyClockOutUI();
-    ws.send(JSON.stringify({ type: "set_clock_out_device", id: clockOutPortId, name: clockOutPortId }));
+    sendClockOutDeviceIfChanged(clockOutPortId);
   }
-  if (typeof cachedConfig.autoFill === "boolean") ws.send(JSON.stringify({ type: "set_auto_fill", enabled: cachedConfig.autoFill }));
+  if (typeof cachedConfig.autoFill === "boolean") {
+    autoFillBars = !!cachedConfig.autoFill;
+    sendAutoFillIfChanged(autoFillBars);
+  }
   if (typeof cachedConfig.allowMDExternal === "boolean") {
     allowMDExternal = !!cachedConfig.allowMDExternal;
     enforceMDMidiOut();
@@ -4131,12 +4307,12 @@ function pushSavedConfigToServer(opts = {}) {
     if (div <= 4) div = div * 4; // migrate old per-beat values
     if (div === 6) div = 24;
     baseDivision = Math.max(1, Math.min(32, div));
-    ws.send(JSON.stringify({ type: "set_base_division", division: baseDivision }));
+    sendBaseDivisionIfChanged(baseDivision);
   }
   if (typeof cachedConfig.patternControlLatch === "boolean") {
     patternControlLatch = !!cachedConfig.patternControlLatch;
     applyPatternControlLatchUI();
-    ws.send(JSON.stringify({ type: "set_pattern_control_latch", enabled: patternControlLatch }));
+    sendPatternControlLatchIfChanged(patternControlLatch);
   }
   if (Array.isArray(cachedConfig.midiSettings)) {
     cachedConfig.midiSettings.forEach((m, idx) => {
@@ -4144,7 +4320,10 @@ function pushSavedConfigToServer(opts = {}) {
       if (!m || page === 0) return;
       const outId = m.outId || "";
       const channel = m.channel || 1;
-      ws.send(JSON.stringify({ type: "set_midi", page, outId, channel }));
+      if (!midiSettings[page]) midiSettings[page] = { outId: "", channel: 1 };
+      midiSettings[page].outId = outId;
+      midiSettings[page].channel = channel;
+      sendMidiConfig(page);
     });
   }
 }
