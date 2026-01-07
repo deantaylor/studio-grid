@@ -26,6 +26,10 @@ const DEVICE_PRESENT = 8;
 const BASE_PITCH = 60;
 const PPQN = 24;
 const TICKS_PER_STEP = 6;
+const TAB_PROGRESS_BAR_HEIGHT = 2;
+const TAB_PROGRESS_BAR_GAP = 2;
+const TAB_PROGRESS_SEG_GAP = 2;
+const TAB_PROGRESS_BAR_X_PAD = 0;
 
 let ws;
 let midiAccess;
@@ -36,10 +40,13 @@ let running = false;
 let tickTimer = null;
 let currentPage = 1;
 let currentPattern = 1;
+let selectedDevicePage = currentPage;
 let baseDivision = 16; // denominator of base note (1/16)
 let playheads = Array(9).fill(0);
 let deviceHeld = false;
 let draggedDevicePage = null;
+let deviceHasData = Array(9).fill(null);
+let deviceStopped = Array(9).fill(null);
 let midiSettings = Array.from({ length: 9 }, () => ({ outId: "", channel: 1 }));
 
 const canvas = document.getElementById("grid");
@@ -61,6 +68,8 @@ const swingBlock = document.getElementById("swing-block");
 const midiSel = document.getElementById("midi-out");
 const midiChan = document.getElementById("midi-chan");
 const tabs = document.getElementById("page-tabs");
+const deviceTabProgressCanvas = document.getElementById("device-tab-progress");
+const deviceTabProgressCtx = deviceTabProgressCanvas?.getContext("2d") || null;
 const clockSourceSel = document.getElementById("clock-source");
 const clockInputSel = document.getElementById("clock-input");
 const clockToggleBtn = document.getElementById("clock-toggle-btn");
@@ -488,6 +497,9 @@ let autoStartPending = false;
 let autoStartFirstMs = 0;
 let autoStartTicks = 0;
 let transportTick = 0;
+let deviceTabProgressRaf = null;
+let deviceTabProgressCssWidth = 0;
+let deviceTabProgressCssHeight = 0;
 let externalArmed = false;
 const activeNotes = new Map();
 let uiScale = 1.5;
@@ -617,10 +629,13 @@ function connectWS() {
         const page = currentPage;
         frames[page] = incoming.slice();
       }
+      if (msg.deviceHasData) deviceHasData = msg.deviceHasData;
+      if (msg.deviceStopped) deviceStopped = msg.deviceStopped;
       if (Array.isArray(msg.octaveOverlays)) {
         applyOctaveOverlaysSnapshot(msg.octaveOverlays);
       }
       renderFrame(frames[currentPage]);
+      renderDeviceTabProgressFrame();
     } else if (msg.type === "scale") {
       if (msg.scale) scale = msg.scale;
       applyScaleUI();
@@ -665,6 +680,8 @@ function connectWS() {
       if (msg.patternTimeScales) patternTimeScales = msg.patternTimeScales;
       if (msg.barViews) barViews = msg.barViews;
       if (msg.barPlayheads) barPlayheads = msg.barPlayheads;
+      if (msg.deviceHasData) deviceHasData = msg.deviceHasData;
+      if (msg.deviceStopped) deviceStopped = msg.deviceStopped;
       if (Array.isArray(msg.deviceOrder)) {
         deviceOrder = normalizeDeviceOrder(msg.deviceOrder);
       }
@@ -825,6 +842,7 @@ function connectWS() {
           applyOctaveOverlaysSnapshot(msg.octaveOverlays);
           if (msg.page === currentPage) renderFrame(frames[currentPage]);
         }
+        renderDeviceTabProgressFrame();
       }
     } else if (msg.type === "pattern_length") {
       if (typeof msg.page === "number" && typeof msg.pattern === "number") {
@@ -835,6 +853,7 @@ function connectWS() {
           renderBarRow();
           if (!msg.silent) showToast(`Length set to ${msg.length}`);
         }
+        renderDeviceTabProgressFrame();
       }
     } else if (msg.type === "pattern_time_scale") {
       if (typeof msg.page === "number" && typeof msg.pattern === "number") {
@@ -1086,12 +1105,19 @@ function stopInternalTransport() {
 function setRunningState(isRunning) {
   running = !!isRunning;
   const transportBtn = document.getElementById("transport-toggle");
-  if (!transportBtn) return;
-  const icon = transportBtn.querySelector("i");
-  transportBtn.title = running ? "Stop" : "Play";
-  transportBtn.setAttribute("aria-pressed", running);
-  transportBtn.classList.toggle("active", running);
-  if (icon) icon.className = running ? "iconoir-pause-solid" : "iconoir-play-solid";
+  if (transportBtn) {
+    const icon = transportBtn.querySelector("i");
+    transportBtn.title = running ? "Stop" : "Play";
+    transportBtn.setAttribute("aria-pressed", running);
+    transportBtn.classList.toggle("active", running);
+    if (icon) icon.className = running ? "iconoir-pause-solid" : "iconoir-play-solid";
+  }
+  if (running) {
+    startDeviceTabProgressLoop();
+  } else {
+    stopDeviceTabProgressLoop();
+    renderDeviceTabProgressFrame();
+  }
 }
 
 function toggleTransport() {
@@ -1413,6 +1439,22 @@ function hexToRgb(hex) {
     g: (int >> 8) & 255,
     b: int & 255
   };
+}
+
+function colorWithAlpha(color, alpha) {
+  if (!color) return `rgba(0, 0, 0, ${alpha})`;
+  if (color.startsWith("rgb")) {
+    const raw = color.replace(/rgba?\(|\)/g, "");
+    const parts = raw.split(",").map((v) => Number(v.trim()));
+    const [r, g, b] = parts;
+    if (Number.isFinite(r) && Number.isFinite(g) && Number.isFinite(b)) {
+      return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+    }
+    return color;
+  }
+  if (!color.startsWith("#")) return color;
+  const rgb = hexToRgb(color);
+  return `rgba(${rgb.r}, ${rgb.g}, ${rgb.b}, ${alpha})`;
 }
 
 function log(msg) {
@@ -2522,7 +2564,11 @@ function renderTabs() {
     const isActive = page === currentPage;
     const activeBg = getDeviceDisplayColor(page);
     const inactiveBg = "var(--panel-strong)";
+    const patIdx = activePatterns[page] || 1;
+    const len = (patternLengths[page] && patternLengths[page][patIdx]) || null;
+    const hasPattern = Number.isFinite(len) && len > 0;
     if (isActive) btn.classList.add("active");
+    if (!hasPattern) btn.classList.add("no-pattern");
     btn.style.background = isActive ? activeBg : inactiveBg;
     btn.style.color = isActive ? contrastForColor(activeBg) : "var(--surface)";
     btn.style.boxShadow = "none";
@@ -2565,6 +2611,190 @@ function renderTabs() {
     tabs.append(btn);
   });
   applyDeviceBadge();
+  renderDeviceTabProgressFrame();
+}
+
+function getInterpolatedTransportTick() {
+  if (!running) return transportTick;
+  const nowSec = getNowSec();
+  if (clockSource === "internal" && internalTickPeriodSec > 0) {
+    return (nowSec - internalStartTimeSec) / internalTickPeriodSec;
+  }
+  if (clockSource === "external" && tempo > 0) {
+    if (!lastExternalTickMs || !audioTimeOriginMs) return transportTick;
+    const lastTickSec = (lastExternalTickMs - audioTimeOriginMs) / 1000;
+    const tickPeriodSec = 60 / (tempo * PPQN);
+    return transportTick + Math.max(0, (nowSec - lastTickSec) / tickPeriodSec);
+  }
+  return transportTick;
+}
+
+function syncDeviceTabProgressCanvas() {
+  if (!deviceTabProgressCanvas || !tabs) return;
+  const rect = tabs.getBoundingClientRect();
+  if (!rect.width) return;
+  const dpr = window.devicePixelRatio || 1;
+  const nextWidth = Math.max(1, Math.round(rect.width * dpr));
+  const nextHeight = Math.max(1, Math.round(TAB_PROGRESS_BAR_HEIGHT * dpr));
+  if (deviceTabProgressCanvas.width !== nextWidth) deviceTabProgressCanvas.width = nextWidth;
+  if (deviceTabProgressCanvas.height !== nextHeight) deviceTabProgressCanvas.height = nextHeight;
+  if (deviceTabProgressCssWidth !== rect.width) {
+    deviceTabProgressCanvas.style.width = `${rect.width}px`;
+    deviceTabProgressCssWidth = rect.width;
+  }
+  if (deviceTabProgressCssHeight !== TAB_PROGRESS_BAR_HEIGHT) {
+    deviceTabProgressCanvas.style.height = `${TAB_PROGRESS_BAR_HEIGHT}px`;
+    deviceTabProgressCssHeight = TAB_PROGRESS_BAR_HEIGHT;
+  }
+}
+
+function startDeviceTabProgressLoop() {
+  if (deviceTabProgressRaf != null) return;
+  const loop = (timeNow) => {
+    deviceTabProgressRaf = requestAnimationFrame(loop);
+    renderDeviceTabProgressFrame(timeNow);
+  };
+  deviceTabProgressRaf = requestAnimationFrame(loop);
+}
+
+function stopDeviceTabProgressLoop() {
+  if (deviceTabProgressRaf == null) return;
+  cancelAnimationFrame(deviceTabProgressRaf);
+  deviceTabProgressRaf = null;
+}
+
+function renderDeviceTabProgressFrame(timeNow = performance.now()) {
+  if (!deviceTabProgressCanvas || !deviceTabProgressCtx || !tabs) return;
+  syncDeviceTabProgressCanvas();
+  const canvasRect = deviceTabProgressCanvas.getBoundingClientRect();
+  if (!canvasRect.width) return;
+  const dpr = window.devicePixelRatio || 1;
+  deviceTabProgressCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  deviceTabProgressCtx.clearRect(0, 0, canvasRect.width, TAB_PROGRESS_BAR_HEIGHT);
+  const transportTickNow = getInterpolatedTransportTick();
+  const syncZeroTick = 0;
+  const beatTicks = PPQN;
+  const beatIndex = Math.floor((transportTickNow - syncZeroTick) / beatTicks);
+  const blinkOn = (beatIndex % 2) === 0;
+  const baseBg = getCssVar("--panel-strong", "#424242");
+  const mutedBg = colorWithAlpha(baseBg, 0.6);
+  const tabButtons = tabs.querySelectorAll("button");
+  tabButtons.forEach((btn) => {
+    const page = Number(btn.dataset.page);
+    if (!Number.isFinite(page)) return;
+    const tabRect = btn.getBoundingClientRect();
+    const tabX = tabRect.left - canvasRect.left;
+    const deviceColor = getDeviceDisplayColor(page) || ON_COLOR_DEFAULT;
+    const patIdx = activePatterns[page] || 1;
+    const lengthSteps = (patternLengths[page] && patternLengths[page][patIdx]) || null;
+    const hasPatternLength = Number.isFinite(lengthSteps) && lengthSteps > 0;
+    const playheadEntry = barPlayheads[page];
+    const playingBar = Array.isArray(playheadEntry) ? playheadEntry[patIdx] : playheadEntry;
+    const playheadKnown = playheadEntry !== undefined;
+    const hasPlayhead = Number.isFinite(playingBar);
+    const isQueued = pendingPatterns[page] != null;
+    const isSelected = page === selectedDevicePage;
+    let pageHasData = deviceHasData[page];
+    if (page === currentPage) {
+      pageHasData = patternHasData(currentPage);
+      deviceHasData[page] = pageHasData;
+    }
+    const hasDataKnown = pageHasData === true || pageHasData === false;
+    const showSequencer = (hasDataKnown ? pageHasData : true) || isSelected;
+    const hasPattern = hasPatternLength && showSequencer;
+    const hasPlayableData = pageHasData === true;
+    const pageStopped = deviceStopped[page] === true;
+    const allowEmptyPlay = isSelected && !hasPlayableData;
+    const isStopped = hasPattern && !allowEmptyPlay && hasPlayableData && (pageStopped || !running || (playheadKnown && !hasPlayhead));
+    const isPlaying = running && hasPattern && (hasPlayableData || allowEmptyPlay) && !pageStopped && (!playheadKnown || hasPlayhead);
+    const stoppedFill = getCssVar("--muted");
+    const deviceState = {
+      hasPattern,
+      isPlaying,
+      isStopped,
+      isQueued,
+      isSelected,
+      lengthSteps,
+      barX: tabX,
+      barW: tabRect.width,
+      bgColor: hasPattern ? baseBg : mutedBg,
+      fillColor: deviceColor,
+      stoppedFillColor: stoppedFill,
+      syncZeroTick,
+      blinkOn
+    };
+    drawDeviceTabProgress(deviceTabProgressCtx, { x: tabX, y: 0, width: tabRect.width }, deviceState, transportTickNow, timeNow);
+  });
+}
+
+function drawDeviceTabProgress(ctx, tabRect, deviceState, transportTickNow, timeNow) {
+  if (!deviceState || !ctx) return;
+  const barW = tabRect.width - 2 * TAB_PROGRESS_BAR_X_PAD;
+  if (barW <= 0) return;
+  const barX = tabRect.x + TAB_PROGRESS_BAR_X_PAD;
+  const barY = tabRect.y;
+  const barH = TAB_PROGRESS_BAR_HEIGHT;
+  const lengthSteps = deviceState.lengthSteps;
+  let visualBars = 1;
+  if (deviceState.hasPattern) {
+    const equalBars = lengthSteps === 16 || lengthSteps === 32 || lengthSteps === 48 || lengthSteps === 64;
+    visualBars = equalBars ? Math.min(4, Math.max(1, Math.ceil(lengthSteps / 16))) : 1;
+  }
+  const gapTotal = (visualBars - 1) * TAB_PROGRESS_SEG_GAP;
+  const segW = (barW - gapTotal) / visualBars;
+  if (segW <= 0) return;
+  for (let i = 0; i < visualBars; i += 1) {
+    const sx = barX + i * (segW + TAB_PROGRESS_SEG_GAP);
+    ctx.fillStyle = deviceState.bgColor;
+    ctx.fillRect(sx, barY, segW, barH);
+  }
+  if (deviceState.isStopped && deviceState.hasPattern) {
+    ctx.fillStyle = deviceState.stoppedFillColor;
+    for (let i = 0; i < visualBars; i += 1) {
+      const sx = barX + i * (segW + TAB_PROGRESS_SEG_GAP);
+      ctx.fillRect(sx, barY, segW, barH);
+    }
+    return;
+  }
+  if (!deviceState.isPlaying || !deviceState.hasPattern) return;
+  const patternTicks = Math.max(1, lengthSteps * TICKS_PER_STEP);
+  const baseTick = transportTickNow - deviceState.syncZeroTick;
+  const mod = ((baseTick % patternTicks) + patternTicks) % patternTicks;
+  const phase = mod / patternTicks;
+  let segIndex = visualBars - 1;
+  let segFill = 1;
+  let acc = 0;
+  for (let i = 0; i < visualBars; i += 1) {
+    const barSteps = visualBars === 1
+      ? lengthSteps
+      : Math.max(0, Math.min(16, lengthSteps - i * 16));
+    const frac = barSteps / lengthSteps;
+    const next = acc + frac;
+    if (phase <= next || i === visualBars - 1) {
+      segIndex = i;
+      segFill = frac > 0 ? (phase - acc) / frac : 0;
+      break;
+    }
+    acc = next;
+  }
+  const flicker = deviceState.isQueued;
+  const fillAlpha = flicker ? (deviceState.blinkOn ? 1 : 0.35) : 1;
+  ctx.fillStyle = colorWithAlpha(deviceState.fillColor, fillAlpha);
+  for (let i = 0; i < visualBars; i += 1) {
+    const sx = barX + i * (segW + TAB_PROGRESS_SEG_GAP);
+    if (i < segIndex) {
+      ctx.fillRect(sx, barY, segW, barH);
+    } else if (i === segIndex) {
+      const fillW = Math.max(0, Math.min(segW, segW * Math.max(0, Math.min(1, segFill))));
+      if (fillW > 0) ctx.fillRect(sx, barY, fillW, barH);
+    }
+  }
+}
+
+function getCssVar(name, fallback) {
+  const raw = getComputedStyle(document.documentElement).getPropertyValue(name);
+  const val = raw ? raw.trim() : "";
+  return val || fallback;
 }
 
 function renderPatternRow() {
@@ -2651,6 +2881,7 @@ function applyPatternScaleUI() {
 function updatePage(page, { fromServer = false } = {}) {
   if (!page || page < 1 || page > 8) return;
   currentPage = page;
+  if (!fromServer) selectedDevicePage = page;
   renderTabs();
   applyPageMidi();
   applyPageTranspose();
@@ -3091,6 +3322,10 @@ if (uiScaleSel) {
 }
 applyUiScale(uiScaleSel?.value || uiScale || 1.5);
 applyPatternControlLatchUI();
+window.addEventListener("resize", () => {
+  syncDeviceTabProgressCanvas();
+  renderDeviceTabProgressFrame();
+});
 updateSetTitle(setName);
 
 function patternHasData(page) {

@@ -284,6 +284,8 @@ function broadcastState(ws = null) {
     if (idx === 0 || !p) return null;
     return p.patterns.map((pat, pi) => (pi === 0 || !pat ? null : pat.barView || 0));
   });
+  const deviceHasData = state.pages.map((p, idx) => (idx === 0 ? null : state.deviceHasData(idx)));
+  const deviceStopped = state.pages.map((p, idx) => (idx === 0 ? null : !!p?.sequencerStopped));
   const msg = JSON.stringify({
     type: "state",
     tempo: state.tempo,
@@ -312,6 +314,8 @@ function broadcastState(ws = null) {
     patternTimeScales,
     barViews,
     barPlayheads,
+    deviceHasData,
+    deviceStopped,
     mdTracks,
     octaveOverlays,
     follow: followEnabled,
@@ -1117,7 +1121,9 @@ function scheduleLedSend(force = false) {
     broadcast({
       type: "led_frame",
       frame: uiFrame,
-      octaveOverlays: inPatternControl ? Array.from({ length: 9 }, () => []) : state.octaveOverlaySnapshot()
+      octaveOverlays: inPatternControl ? Array.from({ length: 9 }, () => []) : state.octaveOverlaySnapshot(),
+      deviceHasData: state.pages.map((p, idx) => (idx === 0 ? null : state.deviceHasData(idx))),
+      deviceStopped: state.pages.map((p, idx) => (idx === 0 ? null : !!p?.sequencerStopped))
     });
     if (pendingLedFrame) scheduleLedSend();
   }, wait);
