@@ -97,6 +97,36 @@ function remapDeviceColors(prevPalette, nextPalette) {
   }
 }
 
+function getDefaultDeviceColorForPage(page) {
+  if (page <= 0) return "";
+  if (multiColorDefault) {
+    if (!deviceColorPalette.length) refreshDevicePalette();
+    return deviceColorPalette[page - 1] || defaultDeviceColor;
+  }
+  if (defaultUsesMainWhite) return getCssVar("--fg");
+  return defaultDeviceColor;
+}
+
+function applyMultiColorDefault(next, opts = {}) {
+  const enabled = !!next;
+  multiColorDefault = enabled;
+  if (enabled) {
+    if (!deviceColorPalette.length) refreshDevicePalette();
+    for (let i = 1; i <= 8; i += 1) {
+      deviceColors[i] = deviceColorPalette[i - 1] || defaultDeviceColor;
+      deviceColorOverrides[i] = false;
+      ws?.readyState === WebSocket.OPEN &&
+        ws.send(JSON.stringify({ type: "set_device_color", page: i, color: deviceColors[i] }));
+    }
+    deviceColors[0] = "";
+  }
+  if (!opts.skipUi) updateDefaultColorTrigger();
+  if (!opts.skipRender) {
+    renderTabs();
+    renderFrame(frames[currentPage]);
+  }
+}
+
 let ws;
 let midiAccess;
 let midiOut = null; // for current page only
@@ -323,18 +353,29 @@ const initNumberSteppers = () => {
     stepper.type = "button";
     stepper.className = "number-stepper";
     stepper.setAttribute("aria-label", "Adjust value");
+    stepper.dataset.clickOnUp = "true";
     stepper.innerHTML = "<i class=\"iconoir-arrow-separate-vertical\" aria-hidden=\"true\"></i>";
     wrap.appendChild(stepper);
 
-    stepper.addEventListener("click", (event) => {
+    stepper.addEventListener("pointerdown", (event) => {
+      if (event.button !== 0) return;
+      event.preventDefault();
+      event.stopPropagation();
       const rect = stepper.getBoundingClientRect();
       const isUp = event.clientY - rect.top < rect.height / 2;
-
-      if (isUp) {
-        input.stepUp();
-      } else {
-        input.stepDown();
-      }
+      const stepAttr = input.step;
+      const stepVal = stepAttr && stepAttr !== "any" ? Number(stepAttr) : 1;
+      const step = Number.isFinite(stepVal) && stepVal > 0 ? stepVal : 1;
+      const decimals = stepAttr && stepAttr.includes(".") ? stepAttr.split(".")[1].length : 0;
+      const minVal = input.min !== "" ? Number(input.min) : NaN;
+      const maxVal = input.max !== "" ? Number(input.max) : NaN;
+      const baseVal = Number.isFinite(Number(input.value))
+        ? Number(input.value)
+        : (Number.isFinite(minVal) ? minVal : 0);
+      let next = baseVal + (isUp ? step : -step);
+      if (Number.isFinite(minVal)) next = Math.max(minVal, next);
+      if (Number.isFinite(maxVal)) next = Math.min(maxVal, next);
+      input.value = decimals > 0 ? String(Number(next.toFixed(decimals))) : String(Math.round(next));
 
       input.dispatchEvent(new Event("input", { bubbles: true }));
       input.dispatchEvent(new Event("change", { bubbles: true }));
@@ -421,13 +462,11 @@ window.addEventListener("load", () => {
 });
 
 let defaultDeviceColor = BASE_DEFAULT_DEVICE_COLOR;
-const AUTO_MDTONAL_COLOR = getCssVar("--dev-6") || BASE_DEFAULT_DEVICE_COLOR;
 let settingsOpen = false;
-let pendingDefaultDeviceColor = null;
+let multiColorDefault = true;
+let defaultUsesMainWhite = false;
 let whiteMode = document.documentElement.dataset.white || "warm";
 let colorMode = document.documentElement.dataset.colors || "pastel";
-let pendingWhiteMode = null;
-let pendingColorMode = null;
 
 // context menu for device tabs
 const deviceMenu = document.getElementById("device-menu");
@@ -979,12 +1018,17 @@ function connectWS() {
       }
       if (msg.notes) deviceNotes = msg.notes;
       if (Array.isArray(msg.colors)) {
-        deviceColors = msg.colors.slice(0, 9);
-        deviceColors[0] = "";
-        deviceColorOverrides = deviceColors.map((c, idx) => {
-          if (idx === 0 || !c) return false;
-          return c.toLowerCase() !== defaultDeviceColor.toLowerCase();
-        });
+        if (!multiColorDefault) {
+          deviceColors = msg.colors.slice(0, 9);
+          deviceColors[0] = "";
+          deviceColorOverrides = deviceColors.map((c, idx) => {
+            if (idx === 0 || !c) return false;
+            const defaultForPage = getDefaultDeviceColorForPage(idx);
+            return c.toLowerCase() !== defaultForPage.toLowerCase();
+          });
+        } else {
+          applyMultiColorDefault(true, { skipRender: true, skipUi: true });
+        }
       } else if (!deviceColorOverrides.some(Boolean)) {
         deviceColors = Array(9).fill(defaultDeviceColor);
         deviceColors[0] = "";
@@ -1091,9 +1135,13 @@ function connectWS() {
       applyDeviceBadge();
     } else if (msg.type === "device_color") {
       if (typeof msg.page === "number") {
-        const incoming = msg.color || defaultDeviceColor;
+        const incoming = msg.color || getDefaultDeviceColorForPage(msg.page);
+        const defaultForPage = getDefaultDeviceColorForPage(msg.page);
+        if (multiColorDefault && !deviceColorOverrides[msg.page] && incoming.toLowerCase() !== defaultForPage.toLowerCase()) {
+          return;
+        }
         deviceColors[msg.page] = incoming;
-        const isDefault = incoming.toLowerCase() === defaultDeviceColor.toLowerCase();
+        const isDefault = incoming.toLowerCase() === defaultForPage.toLowerCase();
         deviceColorOverrides[msg.page] = !isDefault;
       }
       applyDeviceBadge();
@@ -1879,14 +1927,13 @@ if (tempoLabelTop) {
 
 if (settingsTempoInput) {
   const commitSettingsTempo = () => {
-    if (settingsOpen) return;
     updateTempo(settingsTempoInput.value);
   };
   const nudgeSettingsTempo = (delta) => {
     const cur = Number(settingsTempoInput.value);
     const safe = Number.isFinite(cur) ? Math.round(cur + delta) : Math.round(tempo);
     settingsTempoInput.value = safe;
-    if (!settingsOpen) commitSettingsTempo();
+    commitSettingsTempo();
   };
   settingsTempoInput.step = "1";
   settingsTempoInput.onchange = commitSettingsTempo;
@@ -1970,7 +2017,6 @@ if (clockToggleBtn) {
 }
 if (clockSourceSel) {
   clockSourceSel.onchange = () => {
-    if (settingsOpen) return;
     const prev = clockSource;
     clockSource = clockSourceSel.value;
     handleClockSourceChange(prev, clockSource);
@@ -1996,7 +2042,6 @@ if (clockSourceSel) {
 
 if (clockInputSel) {
   clockInputSel.onchange = () => {
-    if (settingsOpen) return;
     const next = resolveClockInputId(clockInputSel.value);
     if (!next || next === clockInputId) return;
     clockInputId = next;
@@ -2006,7 +2051,7 @@ if (clockInputSel) {
 }
 
 function applyClockSourceUI() {
-  if (clockSourceSel && !settingsOpen) clockSourceSel.value = clockSource || "internal";
+  if (clockSourceSel) clockSourceSel.value = clockSource || "internal";
   const wrap = document.getElementById("clock-source-wrap");
   if (wrap) wrap.classList.remove("hidden"); // keep clock input visible for both sources
   if (clockToggleBtn) {
@@ -2433,7 +2478,7 @@ document.getElementById("import").onclick = () => {
 };
 function syncSettingsInputs() {
   if (settingsTempoInput) settingsTempoInput.value = formatTempoDisplay(tempo);
-  if (uiScaleSel) uiScaleSel.value = String(uiScale || 1.5);
+  if (uiScaleSel) uiScaleSel.value = String(uiScale || 1);
   if (clockSourceSel) clockSourceSel.value = clockSource || "internal";
   if (clockInputSel && clockInputId) {
     const resolved = resolveClockInputId(clockInputId);
@@ -2453,20 +2498,12 @@ function syncSettingsInputs() {
   Object.entries(ledInputs).forEach(([k, el]) => {
     if (el) el.value = ledLevels[k] ?? 0;
   });
-  const tempValue = settingsOpen && pendingWhiteMode ? pendingWhiteMode : whiteMode;
-  const colorValue = settingsOpen && pendingColorMode ? pendingColorMode : colorMode;
-  setToggleActive([tempWarmBtn, tempColdBtn], tempValue);
-  setToggleActive([colorsPastelBtn, colorsSolidBtn], colorValue);
-  if (settingsOpen && pendingDefaultDeviceColor) {
-    updateDefaultColorTrigger(pendingDefaultDeviceColor, { preview: true });
-  } else {
-    updateDefaultColorTrigger();
-  }
+  setToggleActive([tempWarmBtn, tempColdBtn], whiteMode);
+  setToggleActive([colorsPastelBtn, colorsSolidBtn], colorMode);
+  updateDefaultColorTrigger();
 }
 
 function applySettingsFromInputs() {
-  if (pendingWhiteMode) applyWhiteMode(pendingWhiteMode);
-  if (pendingColorMode) applyColorMode(pendingColorMode);
   if (settingsTempoInput) updateTempo(settingsTempoInput.value);
   if (uiScaleSel) applyUiScale(uiScaleSel.value);
 
@@ -2583,38 +2620,24 @@ function applySettingsFromInputs() {
     }
   }
 
-  if (pendingDefaultDeviceColor) {
-    defaultDeviceColor = pendingDefaultDeviceColor;
-    applyDefaultDeviceColor();
-    applyDeviceBadge();
-    renderTabs();
-    renderFrame(frames[currentPage]);
-  }
   updateDefaultColorTrigger();
 }
 
   if (settingsBtn && settingsModal && settingsBackdrop) {
     const openSettings = () => {
-      settingsOpen = true;
-      pendingDefaultDeviceColor = defaultDeviceColor;
-      pendingWhiteMode = whiteMode;
-      pendingColorMode = colorMode;
-      syncSettingsInputs();
-      settingsModal.classList.remove("hidden");
-      settingsBackdrop.classList.remove("hidden");
-    };
-    const closeSettings = () => {
-      settingsOpen = false;
-      pendingDefaultDeviceColor = null;
-      pendingWhiteMode = null;
-      pendingColorMode = null;
-      updateDefaultColorTrigger();
-      settingsModal.classList.add("hidden");
-      settingsBackdrop.classList.add("hidden");
-    };
+    settingsOpen = true;
+    syncSettingsInputs();
+    settingsModal.classList.remove("hidden");
+    settingsBackdrop.classList.remove("hidden");
+  };
+  const closeSettings = () => {
+    settingsOpen = false;
+    updateDefaultColorTrigger();
+    settingsModal.classList.add("hidden");
+    settingsBackdrop.classList.add("hidden");
+  };
   const confirmSettings = () => {
     if (!settingsOpen) return;
-    applySettingsFromInputs();
     closeSettings();
   };
   settingsBtn.onclick = openSettings;
@@ -2622,20 +2645,12 @@ function applySettingsFromInputs() {
   settingsBackdrop.onclick = closeSettings;
   if (settingsConfirm) settingsConfirm.onclick = confirmSettings;
   const updatePendingTemp = (mode) => {
-    if (settingsOpen) {
-      pendingWhiteMode = mode;
-      syncSettingsInputs();
-      return;
-    }
     applyWhiteMode(mode);
+    if (settingsOpen) syncSettingsInputs();
   };
   const updatePendingColors = (mode) => {
-    if (settingsOpen) {
-      pendingColorMode = mode;
-      syncSettingsInputs();
-      return;
-    }
     applyColorMode(mode);
+    if (settingsOpen) syncSettingsInputs();
   };
   if (tempWarmBtn) tempWarmBtn.onclick = () => updatePendingTemp("warm");
   if (tempColdBtn) tempColdBtn.onclick = () => updatePendingTemp("cold");
@@ -2644,7 +2659,6 @@ function applySettingsFromInputs() {
   Object.entries(ledInputs).forEach(([k, el]) => {
     if (!el) return;
     el.oninput = () => {
-      if (settingsOpen) return;
       const val = clampLedLevel(el.value);
       ledLevels[k] = val;
       sendLedLevelsIfChanged({ [k]: val });
@@ -2652,35 +2666,30 @@ function applySettingsFromInputs() {
   });
   if (showLogToggle) {
     showLogToggle.onchange = () => {
-      if (settingsOpen) return;
       const show = showLogToggle.checked;
       document.getElementById("log").classList.toggle("hidden", !show);
     };
   }
   if (allowMDExternalToggle) {
     allowMDExternalToggle.onchange = () => {
-      if (settingsOpen) return;
       allowMDExternal = !!allowMDExternalToggle.checked;
       enforceMDMidiOut();
     };
   }
   if (patternControlLatchToggle) {
     patternControlLatchToggle.onchange = () => {
-      if (settingsOpen) return;
       patternControlLatch = !!patternControlLatchToggle.checked;
       sendPatternControlLatchIfChanged(patternControlLatch);
     };
   }
   if (showMonomeControlsToggle) {
     showMonomeControlsToggle.onchange = () => {
-      if (settingsOpen) return;
       showMonomeControls = !!showMonomeControlsToggle.checked;
       sendMonomeControlsIfChanged(showMonomeControls);
     };
   }
   if (mdBaseSweepInput) {
     const commitBaseSweep = () => {
-      if (settingsOpen) return;
       const val = Math.max(20, Math.min(200, Math.round(Number(mdBaseSweepInput.value) || mdBaseSweep)));
       mdBaseSweep = val;
       mdBaseSweepInput.value = val;
@@ -2691,7 +2700,6 @@ function applySettingsFromInputs() {
   }
   if (monoSlidePadInput) {
     const commitMonoSlidePad = () => {
-      if (settingsOpen) return;
       const pct = Math.max(0, Math.min(50, Math.round(Number(monoSlidePadInput.value) || (monoSlidePad * 100))));
       monoSlidePad = pct / 100;
       monoSlidePadInput.value = pct;
@@ -2702,7 +2710,6 @@ function applySettingsFromInputs() {
   }
   if (baseNoteLenSel) {
     const commitBaseDivision = () => {
-      if (settingsOpen) return;
       let val = Math.max(1, Math.min(32, Math.round(Number(baseNoteLenSel.value) || baseDivision || 16)));
       if (val <= 4) val = val * 4; // migrate old per-beat values (2->8, 4->16)
       if (val === 6) val = 24; // migrate old 6-per-beat
@@ -2717,9 +2724,7 @@ function applySettingsFromInputs() {
 if (settingsSaveCfg) {
   settingsSaveCfg.onclick = () => {
     try {
-      if (settingsOpen) {
-        applySettingsFromInputs();
-      }
+      applySettingsFromInputs();
       const cfg = {
         ledLevels,
         clockSource,
@@ -2735,6 +2740,8 @@ if (settingsSaveCfg) {
         patternControlLatch,
         showMonomeControls,
         defaultDeviceColor,
+        multiColorDefault,
+        defaultUsesMainWhite,
         whiteMode,
         colorMode
       };
@@ -2752,27 +2759,6 @@ if (settingsSaveCfg) {
 }
 if (settingsRestoreCfg) {
   settingsRestoreCfg.onclick = () => {
-    if (settingsOpen) {
-      if (allowMDExternalToggle) allowMDExternalToggle.checked = false;
-      if (clockOutToggle) clockOutToggle.checked = false;
-      if (clockOutPortSel) clockOutPortSel.value = "";
-      if (autoFillToggle) autoFillToggle.checked = true;
-      if (autoLoadToggle) autoLoadToggle.checked = false;
-      if (patternControlLatchToggle) patternControlLatchToggle.checked = false;
-      if (showMonomeControlsToggle) showMonomeControlsToggle.checked = true;
-      if (baseNoteLenSel) baseNoteLenSel.value = "16";
-      if (mdBaseSweepInput) mdBaseSweepInput.value = 80;
-      if (monoSlidePadInput) monoSlidePadInput.value = 10;
-      pendingWhiteMode = "warm";
-      pendingColorMode = "pastel";
-      setToggleActive([tempWarmBtn, tempColdBtn], pendingWhiteMode);
-      setToggleActive([colorsPastelBtn, colorsSolidBtn], pendingColorMode);
-      Object.entries(ledInputs).forEach(([k, el]) => {
-        if (el) el.value = DEFAULT_LED_LEVELS[k] ?? 0;
-      });
-      showToast("Defaults staged");
-      return;
-    }
     allowMDExternal = false;
     enforceMDMidiOut();
     if (allowMDExternalToggle) allowMDExternalToggle.checked = false;
@@ -2804,9 +2790,15 @@ if (settingsRestoreCfg) {
     sendMonoSlidePadIfChanged(monoSlidePad);
     applyWhiteMode("warm");
     applyColorMode("pastel");
+    multiColorDefault = false;
+    defaultUsesMainWhite = false;
     if (showLogToggle) {
       showLogToggle.checked = false;
       document.getElementById("log").classList.add("hidden");
+    }
+    if (uiScaleSel) {
+      uiScaleSel.value = "1";
+      applyUiScale("1");
     }
     try {
       localStorage.removeItem("mgrid_led_config");
@@ -3527,14 +3519,6 @@ function applySeqTypeUI({ deferFrame = false } = {}) {
   applyDeviceBadge();
   applyPatternLauncherTypeUI();
   const hasOverride = deviceColorOverrides[currentPage];
-  if (type === "mdtonal" && !hasOverride) {
-    // Auto-apply MDTonal color when no user override
-    deviceColors[currentPage] = AUTO_MDTONAL_COLOR;
-    applyDeviceBadge();
-  } else if (!hasOverride) {
-    // Return to default when leaving MDTonal without a custom color
-    deviceColors[currentPage] = defaultDeviceColor;
-  }
   renderTabs();
   if (!deferFrame) renderFrameIfReady();
 }
@@ -4002,7 +3986,6 @@ loadSavedConfig();
 if (uiScaleSel) {
   uiScaleSel.value = "1.5";
   uiScaleSel.onchange = () => {
-    if (settingsOpen) return;
     applyUiScale(uiScaleSel.value);
   };
 }
@@ -4415,21 +4398,18 @@ if (followBtn) {
 
 if (autoFillToggle) {
   autoFillToggle.onchange = () => {
-    if (settingsOpen) return;
     autoFillBars = !!autoFillToggle.checked;
     sendAutoFillIfChanged(autoFillBars);
   };
 }
 if (clockOutToggle) {
   clockOutToggle.onchange = () => {
-    if (settingsOpen) return;
     clockOutEnabled = !!clockOutToggle.checked;
     sendClockOutIfChanged(clockOutEnabled);
   };
 }
 if (clockOutPortSel) {
   clockOutPortSel.onchange = () => {
-    if (settingsOpen) return;
     clockOutPortId = clockOutPortSel.value || "";
     sendClockOutDeviceIfChanged(clockOutPortId);
   };
@@ -4632,6 +4612,11 @@ function applyWhiteMode(next, opts = {}) {
   whiteMode = mode;
   document.documentElement.dataset.white = mode;
   setToggleActive([tempWarmBtn, tempColdBtn], mode);
+  if (defaultUsesMainWhite && !multiColorDefault) {
+    defaultDeviceColor = getCssVar("--fg");
+    applyDefaultDeviceColor();
+    updateDefaultColorTrigger();
+  }
   if (!opts.skipRefresh) refreshUiColors();
 }
 
@@ -4646,6 +4631,9 @@ function applyColorMode(next, opts = {}) {
   if (!opts.skipRemap && idx >= 0 && deviceColorPalette[idx]) {
     defaultDeviceColor = deviceColorPalette[idx];
     applyDefaultDeviceColor();
+  }
+  if (!opts.skipRemap && multiColorDefault) {
+    applyMultiColorDefault(true, { skipRender: true, skipUi: true });
   }
   setToggleActive([colorsPastelBtn, colorsSolidBtn], mode);
   if (!opts.skipUi) {
@@ -4717,31 +4705,66 @@ function renderDefaultColorOptions() {
   if (!defaultColorModalOptions) return;
   if (!deviceColorPalette.length) refreshDevicePalette();
   defaultColorModalOptions.innerHTML = "";
-  const activeColor = (settingsOpen && pendingDefaultDeviceColor) ? pendingDefaultDeviceColor : defaultDeviceColor;
+  const activeColor = defaultDeviceColor;
+  const activeMulti = multiColorDefault;
+  const activeWhite = defaultUsesMainWhite;
+  const applySingleColor = (c) => {
+    defaultDeviceColor = c;
+    multiColorDefault = false;
+    defaultUsesMainWhite = false;
+    applyDefaultDeviceColor();
+    applyDeviceBadge();
+    renderTabs();
+    renderFrame(frames[currentPage]);
+    updateDefaultColorTrigger();
+    closeDefaultColorModal();
+  };
+  const applyMainWhite = () => {
+    const white = getCssVar("--fg");
+    defaultDeviceColor = white;
+    multiColorDefault = false;
+    defaultUsesMainWhite = true;
+    applyDefaultDeviceColor();
+    applyDeviceBadge();
+    renderTabs();
+    renderFrame(frames[currentPage]);
+    updateDefaultColorTrigger();
+    closeDefaultColorModal();
+  };
+  const applyMultiColor = () => {
+    defaultUsesMainWhite = false;
+    applyMultiColorDefault(true);
+    updateDefaultColorTrigger();
+    closeDefaultColorModal();
+  };
+  const whiteSwatch = document.createElement("button");
+  whiteSwatch.className = "color-swatch";
+  whiteSwatch.dataset.value = "main-white";
+  whiteSwatch.style.setProperty("--base", "var(--fg)");
+  whiteSwatch.setAttribute("aria-label", "Default color main white");
+  whiteSwatch.onclick = applyMainWhite;
+  if (activeWhite) whiteSwatch.classList.add("selected");
+  defaultColorModalOptions.append(whiteSwatch);
+
+  const multiSwatch = document.createElement("button");
+  multiSwatch.className = "color-swatch";
+  multiSwatch.dataset.value = "multicolor";
+  multiSwatch.style.setProperty("--base",
+    "linear-gradient(90deg, var(--dev-1), var(--dev-2), var(--dev-3), var(--dev-4), var(--dev-5), var(--dev-6), var(--dev-7), var(--dev-8))"
+  );
+  multiSwatch.setAttribute("aria-label", "Default color multicolor");
+  multiSwatch.onclick = applyMultiColor;
+  if (activeMulti) multiSwatch.classList.add("selected");
+  defaultColorModalOptions.append(multiSwatch);
+
   deviceColorPalette.forEach((c) => {
     const sw = document.createElement("button");
     sw.className = "color-swatch";
+    sw.dataset.value = c;
     sw.style.setProperty("--base", c);
     sw.setAttribute("aria-label", `Default color ${c}`);
-    sw.onclick = () => {
-      if (settingsOpen) {
-        pendingDefaultDeviceColor = c;
-        defaultColorModalOptions.querySelectorAll(".color-swatch").forEach((btn) => {
-          btn.classList.toggle("selected", btn === sw);
-        });
-        updateDefaultColorTrigger(c, { preview: true });
-        closeDefaultColorModal();
-        return;
-      }
-      defaultDeviceColor = c;
-      applyDefaultDeviceColor();
-      applyDeviceBadge();
-      renderTabs();
-      renderFrame(frames[currentPage]);
-      updateDefaultColorTrigger();
-      closeDefaultColorModal();
-    };
-    if (c.toLowerCase() === (activeColor || BASE_DEFAULT_DEVICE_COLOR).toLowerCase()) {
+    sw.onclick = () => applySingleColor(c);
+    if (!activeMulti && !activeWhite && c.toLowerCase() === (activeColor || BASE_DEFAULT_DEVICE_COLOR).toLowerCase()) {
       sw.classList.add("selected");
     }
     defaultColorModalOptions.append(sw);
@@ -4749,16 +4772,33 @@ function renderDefaultColorOptions() {
 }
 
 function applyDefaultDeviceColor() {
+  if (multiColorDefault) {
+    if (!deviceColorPalette.length) refreshDevicePalette();
+    for (let i = 1; i <= 8; i++) {
+      deviceColors[i] = deviceColorPalette[i - 1] || defaultDeviceColor;
+      deviceColorOverrides[i] = false;
+    }
+    return;
+  }
   for (let i = 1; i <= 8; i++) {
-    if (!deviceColorOverrides[i]) deviceColors[i] = defaultDeviceColor;
+    if (!deviceColorOverrides[i]) deviceColors[i] = getDefaultDeviceColorForPage(i);
   }
 }
 
-function updateDefaultColorTrigger(colorOverride, opts = {}) {
-  const preview = !!opts.preview;
-  const color = colorOverride || (settingsOpen && pendingDefaultDeviceColor) || defaultDeviceColor;
+function updateDefaultColorTrigger(colorOverride) {
+  const color = colorOverride || defaultDeviceColor;
+  const isMulti = multiColorDefault;
+  const usesMainWhite = defaultUsesMainWhite;
   if (defaultColorTrigger) {
-    defaultColorTrigger.style.setProperty("--base", color);
+    if (isMulti) {
+      defaultColorTrigger.style.setProperty("--base",
+        "linear-gradient(90deg, var(--dev-1), var(--dev-2), var(--dev-3), var(--dev-4), var(--dev-5), var(--dev-6), var(--dev-7), var(--dev-8))"
+      );
+    } else if (usesMainWhite) {
+      defaultColorTrigger.style.setProperty("--base", "var(--fg)");
+    } else {
+      defaultColorTrigger.style.setProperty("--base", color);
+    }
     defaultColorTrigger.style.borderColor = "var(--border)";
   }
 }
@@ -4779,7 +4819,7 @@ function getDeviceDisplayColor(page) {
   const override = deviceColorOverrides[page];
   const base = deviceColors[page] || defaultDeviceColor;
   if (override) return base;
-  if (type === "mdtonal") return AUTO_MDTONAL_COLOR;
+  if (multiColorDefault) return base;
   return defaultDeviceColor;
 }
 
@@ -4792,6 +4832,8 @@ function loadSavedConfig() {
     if (parsed.whiteMode) applyWhiteMode(parsed.whiteMode, { skipRefresh: true });
     if (parsed.colorMode) applyColorMode(parsed.colorMode, { skipRefresh: true });
     if (parsed.ledLevels) ledLevels = { ...DEFAULT_LED_LEVELS, ...parsed.ledLevels };
+    if (typeof parsed.multiColorDefault === "boolean") multiColorDefault = parsed.multiColorDefault;
+    if (typeof parsed.defaultUsesMainWhite === "boolean") defaultUsesMainWhite = parsed.defaultUsesMainWhite;
     if (typeof parsed.clockSource === "string") {
       clockSource = parsed.clockSource === "external" ? "external" : "internal";
       if (clockSourceSel) clockSourceSel.value = clockSource;
@@ -4866,14 +4908,19 @@ function loadSavedConfig() {
       sendClockOutDeviceIfChanged(clockOutPortId);
     }
   }
-  if (parsed.defaultDeviceColor && /^#([0-9a-f]{6}|[0-9a-f]{3})$/i.test(parsed.defaultDeviceColor)) {
-    defaultDeviceColor = parsed.defaultDeviceColor;
-    applyDefaultDeviceColor();
-    updateDefaultColorTrigger();
-  } else {
-      updateDefaultColorTrigger();
+    if (parsed.defaultDeviceColor && /^#([0-9a-f]{6}|[0-9a-f]{3})$/i.test(parsed.defaultDeviceColor)) {
+      defaultDeviceColor = parsed.defaultDeviceColor;
     }
-    cachedConfig = parsed;
+  if (multiColorDefault) {
+    applyMultiColorDefault(true, { skipRender: true, skipUi: true });
+  } else if (defaultUsesMainWhite) {
+    defaultDeviceColor = getCssVar("--fg");
+    applyDefaultDeviceColor();
+  } else {
+    applyDefaultDeviceColor();
+  }
+  updateDefaultColorTrigger();
+  cachedConfig = parsed;
   applyLedSettingsUI();
   applyBaseNoteLenUI();
   applyMdSlideSpeedUI();
@@ -4918,6 +4965,19 @@ function pushSavedConfigToServer(opts = {}) {
   }
   if (cachedConfig.defaultDeviceColor && /^#([0-9a-f]{6}|[0-9a-f]{3})$/i.test(cachedConfig.defaultDeviceColor)) {
     defaultDeviceColor = cachedConfig.defaultDeviceColor;
+  }
+  if (typeof cachedConfig.multiColorDefault === "boolean") {
+    multiColorDefault = cachedConfig.multiColorDefault;
+  }
+  if (typeof cachedConfig.defaultUsesMainWhite === "boolean") {
+    defaultUsesMainWhite = cachedConfig.defaultUsesMainWhite;
+  }
+  if (multiColorDefault) {
+    applyMultiColorDefault(true, { skipRender: true, skipUi: true });
+  } else if (defaultUsesMainWhite) {
+    defaultDeviceColor = getCssVar("--fg");
+    applyDefaultDeviceColor();
+  } else {
     applyDefaultDeviceColor();
   }
   if (typeof cachedConfig.baseDivision === "number") {

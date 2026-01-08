@@ -7,7 +7,7 @@
 
   /* Whites */
   --fg-warm: #E6E1D4;
-  --fg-cold: #F4F3FF;
+  --fg-cold: #EFEFEF;
   --fg: var(--fg-warm);
 
   /* Icon color */
@@ -830,12 +830,6 @@ textarea { resize: vertical; }
   gap: 6px;
 }
 .transpose-switch .trans-label {
-  font-size: 8px;
-  line-height: 10px;
-  font-weight: 400;
-  font-style: normal;
-  text-transform: uppercase;
-  color: var(--neutral-mid);
   white-space: nowrap;
 }
 .transpose-step {
