@@ -432,6 +432,7 @@ logMissingDom([
 ]);
 
 let frames = Array.from({ length: 9 }, () => new Array(WIDTH * HEIGHT).fill(0));
+let frameReady = Array(9).fill(false);
 let overlays = Array.from({ length: 9 }, () => []);
 let transposes = Array.from({ length: 9 }, () => 0);
 
@@ -821,6 +822,7 @@ function connectWS() {
       if (Array.isArray(incoming)) {
         const page = currentPage;
         frames[page] = incoming.slice();
+        frameReady[page] = true;
       }
       if (msg.deviceHasData) deviceHasData = msg.deviceHasData;
       if (msg.deviceStopped) deviceStopped = msg.deviceStopped;
@@ -1656,6 +1658,11 @@ function renderFrame(frame) {
     ctx.fillText(o.text, CELL_SIZE / 2, CELL_SIZE / 2);
     ctx.restore();
   });
+}
+
+function renderFrameIfReady() {
+  if (!frameReady[currentPage]) return;
+  renderFrame(frames[currentPage]);
 }
 
 function setFrame(frame, x, y, level) {
@@ -2883,8 +2890,7 @@ function renderTabs() {
       applyPatternLauncherTypeUI();
       renderTabs();
       renderDeviceTabProgressFrame();
-      updatePage(page, { fromServer: false });
-      ws?.readyState === WebSocket.OPEN && ws.send(JSON.stringify({ type: "set_page", page }));
+      updatePage(page, { fromServer: false, deferFrame: !frameReady[page] });
     };
     btn.onpointerdown = (e) => {
       if (e.button !== 0) return;
@@ -3242,12 +3248,13 @@ function applyPatternScaleUI() {
   patternScaleToggle.dataset.patternScale = String(scaleVal);
 }
 
-function updatePage(page, { fromServer = false } = {}) {
+function updatePage(page, { fromServer = false, deferFrame = false } = {}) {
   if (!page || page < 1 || page > 8) return;
   currentPage = page;
   if (!patternControlActive) lastFocusedDevice = page;
   if (!patternControlActive) activeUiPage = page;
   selectedDevicePage = activeUiPage;
+  const deferFrameRender = deferFrame || !frameReady[page];
   renderTabs();
   applyPageMidi();
   applyPageTranspose();
@@ -3256,11 +3263,11 @@ function updatePage(page, { fromServer = false } = {}) {
   applyPatternSelectUI();
   applyPatternLengthUI();
   applyPatternScaleUI();
-  applySeqTypeUI();
+  applySeqTypeUI({ deferFrame: deferFrameRender });
   applyDrumNotesUI();
   applyCCUI();
   renderBarRow();
-  renderFrame(frames[currentPage]);
+  if (!deferFrameRender) renderFrameIfReady();
   if (!fromServer) {
     ws?.readyState === WebSocket.OPEN && ws.send(JSON.stringify({ type: "set_page", page }));
   }
@@ -3329,7 +3336,7 @@ function applyPageTranspose() {
   if (transposeInc) transposeInc.disabled = disableTranspose || oct >= 2;
 }
 
-function applySeqTypeUI() {
+function applySeqTypeUI({ deferFrame = false } = {}) {
   if (!seqTypeSel) return;
   const type = sequencerTypes[currentPage] || "mono";
   seqTypeSel.value = type;
@@ -3355,7 +3362,7 @@ function applySeqTypeUI() {
     deviceColors[currentPage] = defaultDeviceColor;
   }
   renderTabs();
-  renderFrame(frames[currentPage]);
+  if (!deferFrame) renderFrameIfReady();
 }
 
 function applyPatternLauncherTypeUI() {
@@ -4404,7 +4411,7 @@ function setFullScaleMode(next) {
   fullScaleMode = enabled;
   document.documentElement.classList.toggle("full-scale", fullScaleMode);
   applyScaleNotesUI();
-  renderFrame(frames[currentPage]);
+  renderFrameIfReady();
 }
 
 

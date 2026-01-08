@@ -165,6 +165,46 @@ function buildExportPayload() {
   };
 }
 
+function dispatchGridEvents(events) {
+  events.forEach((ev) => {
+    if (!ev) return;
+    if (ev.type === "octave") {
+      broadcast({ type: "octave_overlay", page: state.currentPage, ...ev });
+    } else if (ev.type === "micro") {
+      broadcast({ type: "micro_overlay", page: state.currentPage, ...ev });
+    } else if (ev.type === "accent") {
+      broadcast({ type: "accent_overlay", page: state.currentPage, ...ev });
+    } else if (ev.type === "slide") {
+      broadcast({ type: "slide_overlay", page: state.currentPage, ...ev });
+    } else if (ev.type === "audition") {
+      broadcast({ type: "audition", ...ev });
+    } else if (ev.type === "bar_view") {
+      followEnabled = false;
+      broadcast({ type: "follow", enabled: followEnabled });
+      broadcastBarView(ev.page, ev.pattern, ev.bar);
+    } else if (ev.type === "follow_toggle") {
+      followEnabled = !followEnabled;
+      broadcast({ type: "follow", enabled: followEnabled });
+    } else if (ev.type === "follow") {
+      followEnabled = !!ev.enabled;
+      broadcast({ type: "follow", enabled: followEnabled });
+    } else if (ev.type === "pattern_control") {
+      if (ev.enabled) {
+        broadcast({ type: "octave_overlay", page: state.currentPage, clearAll: true });
+        broadcast({ type: "pattern_control", enabled: true });
+      } else {
+        broadcast({ type: "pattern_control", enabled: false, octaveOverlays: state.octaveOverlaySnapshot() });
+        broadcastPatternStatus(state.currentPage);
+      }
+    } else if (ev.type === "pattern_length") {
+      state.setPatternLength(ev.page, ev.pattern, ev.length, { autoFill: autoFillBars });
+      broadcastPatternLength(ev.page, ev.pattern);
+    } else if (ev.type === "pattern_status") {
+      broadcastPatternStatus(ev.page || state.currentPage);
+    }
+  });
+}
+
 wss.on("connection", (ws) => {
   ws.send(JSON.stringify({ type: "hello", message: "sgrid web" }));
   broadcastState(ws);
@@ -194,11 +234,10 @@ serial.on("grid_key", (evt) => {
   const events = Array.isArray(resp) ? resp : (resp ? [resp] : []);
   // When a held note is entered from the monome, show the octave arrows in the UI
   if (evt.s === 1) {
-    const info = state.getStepInfo(evt.x, evt.y);
+    const info = state.getStepInfo(evt.x, evt.y, { uiMode: useUiMode });
     if (info?.on && info.seqType !== "drum" && info.seqType !== "cc") {
       events.push({
-        type: "octave_overlay",
-        page: state.currentPage,
+        type: "octave",
         x: evt.x,
         y: evt.y,
         octave: info.octave || 0,
@@ -207,42 +246,7 @@ serial.on("grid_key", (evt) => {
       });
     }
   }
-  events.forEach((ev) => {
-    if (ev.type === "octave") {
-      broadcast({ type: "octave_overlay", page: state.currentPage, ...ev });
-    } else if (ev.type === "micro") {
-      broadcast({ type: "micro_overlay", page: state.currentPage, ...ev });
-    } else if (ev.type === "accent") {
-      broadcast({ type: "accent_overlay", page: state.currentPage, ...ev });
-    } else if (ev.type === "slide") {
-      broadcast({ type: "slide_overlay", page: state.currentPage, ...ev });
-    } else if (ev.type === "audition") {
-      broadcast({ type: "audition", ...ev });
-    } else if (ev.type === "bar_view") {
-      followEnabled = false;
-      broadcast({ type: "follow", enabled: followEnabled });
-      broadcast({ type: "bar_view", page: ev.page, pattern: ev.pattern, bar: ev.bar });
-    } else if (ev.type === "follow_toggle") {
-      followEnabled = !followEnabled;
-      broadcast({ type: "follow", enabled: followEnabled });
-    } else if (ev.type === "follow") {
-      followEnabled = !!ev.enabled;
-      broadcast({ type: "follow", enabled: followEnabled });
-    } else if (ev.type === "pattern_control") {
-      if (ev.enabled) {
-        broadcast({ type: "octave_overlay", page: state.currentPage, clearAll: true });
-        broadcast({ type: "pattern_control", enabled: true });
-      } else {
-        broadcast({ type: "pattern_control", enabled: false, octaveOverlays: state.octaveOverlaySnapshot() });
-        broadcastPatternStatus(state.currentPage);
-      }
-    } else if (ev.type === "pattern_length") {
-      state.setPatternLength(ev.page, ev.pattern, ev.length, { autoFill: autoFillBars });
-      broadcastPatternLength(ev.page, ev.pattern);
-    } else if (ev.type === "pattern_status") {
-      broadcastPatternStatus(ev.page || state.currentPage);
-    }
-  });
+  dispatchGridEvents(events);
   renderAndPush();
 });
 serial.on("log", (msg) => {
@@ -374,41 +378,7 @@ function handleClientMessage(ws, data) {
         const uiMode = isPatternControlKey ? false : fullScaleMode;
         const resp = state.handleGridKey(data.x, data.y, data.s, { uiMode, allowAudition: false });
         const events = Array.isArray(resp) ? resp : (resp ? [resp] : []);
-        events.forEach((ev) => {
-          if (ev.type === "octave") {
-            broadcast({ type: "octave_overlay", page: state.currentPage, ...ev });
-          } else if (ev.type === "accent") {
-            broadcast({ type: "accent_overlay", page: state.currentPage, ...ev });
-          } else if (ev.type === "slide") {
-            broadcast({ type: "slide_overlay", page: state.currentPage, ...ev });
-          } else if (ev.type === "audition") {
-            broadcast({ type: "audition", ...ev });
-          } else if (ev.type === "bar_view") {
-            followEnabled = false;
-            broadcast({ type: "follow", enabled: followEnabled });
-            broadcastBarView(ev.page, ev.pattern, ev.bar);
-          } else if (ev.type === "follow_toggle") {
-            followEnabled = !followEnabled;
-            broadcast({ type: "follow", enabled: followEnabled });
-          } else if (ev.type === "follow") {
-            followEnabled = !!ev.enabled;
-            broadcast({ type: "follow", enabled: followEnabled });
-          } else if (ev.type === "pattern_control") {
-            if (ev.enabled) {
-              broadcast({ type: "octave_overlay", page: state.currentPage, clearAll: true });
-              broadcast({ type: "pattern_control", enabled: true });
-            } else {
-              broadcast({ type: "pattern_control", enabled: false, octaveOverlays: state.octaveOverlaySnapshot() });
-              broadcastPatternStatus(state.currentPage);
-            }
-          } else if (ev.type === "pattern_length") {
-            state.setPatternLength(ev.page, ev.pattern, ev.length, { autoFill: autoFillBars });
-            broadcastPatternLength(ev.page, ev.pattern);
-            renderAndPush();
-          } else if (ev.type === "pattern_status") {
-            broadcastPatternStatus(ev.page || state.currentPage);
-          }
-        });
+        dispatchGridEvents(events);
       }
       maybeBroadcastPage();
       renderAndPush();
@@ -483,6 +453,7 @@ function handleClientMessage(ws, data) {
     case "set_pattern_control_latch":
       state.patternControlLatch = !!data.enabled;
       broadcast({ type: "pattern_control_latch", enabled: state.patternControlLatch });
+      renderAndPush();
       break;
     case "set_monome_controls":
       if (typeof data.enabled === "boolean") {
