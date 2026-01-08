@@ -282,6 +282,59 @@ const initNumberSteppers = () => {
 
 initNumberSteppers();
 
+// Trigger click handlers on press instead of release, unless opted out.
+(() => {
+  let lastPointerDownTarget = null;
+  let lastPointerDownAt = 0;
+
+  const isAllowedInput = (el) => {
+    if (!el || el.tagName !== "INPUT") return true;
+    const type = (el.type || "").toLowerCase();
+    return ["button", "submit", "reset"].includes(type);
+  };
+
+  const resolveImmediateTarget = (start) => {
+    let node = start;
+    while (node && node !== document.documentElement) {
+      if (node.dataset?.clickOnUp === "true") return null;
+      if (node.disabled) return null;
+      if (node.tagName === "BUTTON" || node.tagName === "A" || node.tagName === "CANVAS") return node;
+      if (node.getAttribute?.("role") === "button") return node;
+      if (typeof node.onclick === "function") return node;
+      if (node.tagName === "INPUT" && isAllowedInput(node)) return node;
+      node = node.parentElement;
+    }
+    return null;
+  };
+
+  document.addEventListener("pointerdown", (e) => {
+    if (e.button !== 0) return;
+    const target = resolveImmediateTarget(e.target);
+    if (!target) return;
+    if (!isAllowedInput(target)) return;
+    lastPointerDownTarget = target;
+    lastPointerDownAt = e.timeStamp;
+    if (target.tagName === "CANVAS" && target.id === "grid") {
+      sendGridTapFromClient(e.clientX, e.clientY);
+      return;
+    }
+    if (typeof target.onpointerdown !== "function") {
+      target.click();
+    }
+  }, true);
+
+  document.addEventListener("click", (e) => {
+    if (!e.isTrusted) return;
+    const target = resolveImmediateTarget(e.target);
+    if (!target) return;
+    if (target === lastPointerDownTarget && e.timeStamp - lastPointerDownAt < 1000) {
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      lastPointerDownTarget = null;
+    }
+  }, true);
+})();
+
 // splash screen handling
 
 const MIN_SPLASH_TIME = 2800; // ms
