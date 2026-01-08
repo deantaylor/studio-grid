@@ -361,10 +361,10 @@ body {
 
 .tabs {
   display: grid;
-  grid-template-columns: repeat(8, 1fr);
+  grid-template-columns: repeat(8, minmax(0, 1fr)) minmax(0, 0.5fr);
   gap: var(--gap-md);
   width: 100%;
-  max-width: 692px;
+  max-width: var(--grid-width);
   padding: 0;
   margin: 0 auto;
 }
@@ -372,7 +372,7 @@ body {
 #device-tab-progress {
   display: block;
   width: 100%;
-  max-width: 692px;
+  max-width: var(--grid-width);
   height: 2px;
   margin: 0 auto;
   pointer-events: none;
@@ -411,6 +411,16 @@ body {
 .tabs button.drag-target {
   outline: 2px dashed var(--border);
   outline-offset: 2px;
+}
+.tabs button.pattern-launcher {
+  min-width: 32px;
+  padding: 0;
+}
+.tabs button.pattern-launcher i {
+  font-size: 14px;
+  width: 14px;
+  height: 14px;
+  line-height: 1;
 }
 
 .layout {
@@ -484,6 +494,13 @@ label {
   letter-spacing: 0.4px;
   color: var(--neutral-mid);
   white-space: nowrap;
+}
+.type-static {
+  font-size: 10px;
+  line-height: 12px;
+  font-weight: 400;
+  text-transform: none;
+  color: var(--surface);
 }
 
 input,

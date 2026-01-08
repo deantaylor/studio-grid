@@ -4,6 +4,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' https://fonts.googleapis.com https://cdn.jsdelivr.net; font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self' ws: http:; base-uri 'self'; form-action 'self';" />
   <title>studio:grid</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -78,7 +79,7 @@
           <div class="device-toolbar">
             <div class="device-toolbar-left">
               <label>Type
-                <div class="select-wrap">
+                <div class="select-wrap" id="seq-type-wrap">
                   <select id="seq-type" class="input-md">
                     <option value="mono">Mono</option>
                     <option value="poly">Poly</option>
@@ -88,6 +89,7 @@
                   </select>
                   <i class="iconoir-nav-arrow-down select-caret" aria-hidden="true"></i>
                 </div>
+                <span id="pattern-launcher-type" class="type-static hidden">Pattern Launcher</span>
               </label>
               <div class="transpose-switch compact">
                 <span class="trans-label">Transpose</span>
@@ -286,8 +288,12 @@
             Auto-load last set on start-up
           </label>
           <label class="switch-option">
-            <input type="checkbox" id="pattern-control-latch" />
+            <input type="checkbox" id="pattern-control-latch" checked />
             Latch pattern launch page
+          </label>
+          <label class="switch-option hidden" id="monome-controls-wrap">
+            <input type="checkbox" id="show-monome-controls" checked />
+            Show monome controls
           </label>
           <label>Base note length
             <div class="select-wrap">

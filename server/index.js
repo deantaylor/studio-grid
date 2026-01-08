@@ -65,6 +65,8 @@ const state = new SGridState();
 state.requestRender = () => renderAndPush(true);
 const PPQN = 24;
 const TICKS_PER_STEP = 6;
+const PATTERN_CONTROL_GRID_X = 15;
+const PATTERN_CONTROL_GRID_Y = 7;
 let clockSource = "external"; // default to external clock
 let clockInputId = "IAC Driver Bus 2"; // preferred default
 let transport = {
@@ -79,9 +81,11 @@ let followEnabled = false;
 let autoFillBars = true;
 let gridConnected = false;
 let fullScaleMode = true;
+let showMonomeControls = true;
 let clockOutEnabled = false;
 let clockOutDevice = ""; // MIDI clock out target (id/name hint)
-updateFullScaleMode(serial.deviceList?.() || []);
+let lastGridDevices = serial.deviceList?.() || [];
+updateFullScaleMode(lastGridDevices);
 // LED throttling to avoid flooding monome / browser
 const LED_MIN_INTERVAL = 40; // ~25fps
 const SLIDE_ANIM_INTERVAL = LED_MIN_INTERVAL; // reuse LED cadence for slide animation
@@ -111,7 +115,8 @@ function hasLargeGrid(devices = null) {
 }
 
 function updateFullScaleMode(devices = null) {
-  const next = !hasLargeGrid(devices);
+  const list = devices || lastGridDevices;
+  const next = hasLargeGrid(list) ? !showMonomeControls : true;
   if (next === fullScaleMode) return false;
   fullScaleMode = next;
   return true;
@@ -176,7 +181,10 @@ serial.on("grid_key", (evt) => {
   const rows = evt.rows || dev?.gridRows || 8;
   const supportsLevels = evt.supportsLevels ?? dev?.supportsLevels ?? true;
   const forcePatternControl = (!supportsLevels) || ((cols <= 8 && rows <= 8) && evt.deviceId !== primaryId);
-  const resp = state.handleGridKey(evt.x, evt.y, evt.s, { forcePatternControl, allowAudition: true });
+  const isPrimary = !primaryId || evt.deviceId === primaryId;
+  const isLarge = (cols > 8 || rows > 8);
+  const useUiMode = isPrimary && isLarge && !showMonomeControls;
+  const resp = state.handleGridKey(evt.x, evt.y, evt.s, { forcePatternControl, allowAudition: true, uiMode: useUiMode });
   const events = Array.isArray(resp) ? resp : (resp ? [resp] : []);
   // When a held note is entered from the monome, show the octave arrows in the UI
   if (evt.s === 1) {
@@ -212,6 +220,14 @@ serial.on("grid_key", (evt) => {
     } else if (ev.type === "follow") {
       followEnabled = !!ev.enabled;
       broadcast({ type: "follow", enabled: followEnabled });
+    } else if (ev.type === "pattern_control") {
+      if (ev.enabled) {
+        broadcast({ type: "octave_overlay", page: state.currentPage, clearAll: true });
+        broadcast({ type: "pattern_control", enabled: true });
+      } else {
+        broadcast({ type: "pattern_control", enabled: false, octaveOverlays: state.octaveOverlaySnapshot() });
+        broadcastPatternStatus(state.currentPage);
+      }
     } else if (ev.type === "pattern_length") {
       state.setPatternLength(ev.page, ev.pattern, ev.length, { autoFill: autoFillBars });
       broadcastPatternLength(ev.page, ev.pattern);
@@ -232,16 +248,18 @@ serial.on("error", (err) => {
 serial.on("grid_status", (payload) => {
   const connected = !!(payload && payload.connected);
   gridConnected = connected;
-  updateFullScaleMode(payload?.devices || []);
-  broadcast({ type: "grid_status", connected, devices: payload?.devices || [], fullScaleMode });
+  lastGridDevices = payload?.devices || [];
+  updateFullScaleMode(lastGridDevices);
+  broadcastGridStatus(connected, lastGridDevices);
   renderAndPush(true);
 });
 
 serial.on("device_ready", (info) => {
   // Force a full redraw on the specific device and broadcast fresh state
   const devices = serial.deviceList?.() || [];
+  lastGridDevices = devices;
   updateFullScaleMode(devices);
-  broadcast({ type: "grid_status", connected: true, devices, fullScaleMode });
+  broadcastGridStatus(true, devices);
   renderAndPush(true);
   if (info?.id) {
     serial.fullResync?.({ deviceId: info.id });
@@ -323,7 +341,9 @@ function broadcastState(ws = null) {
     monoSlidePad: state.monoSlidePad,
     patternControlLatch: state.patternControlLatch,
     gridConnected,
-    fullScaleMode
+    fullScaleMode,
+    showMonomeControls,
+    devices: lastGridDevices
   });
   if (ws) {
     ws.send(msg);
@@ -342,7 +362,9 @@ function handleClientMessage(ws, data) {
       break;
     case "grid_key":
       {
-        const resp = state.handleGridKey(data.x, data.y, data.s, { uiMode: fullScaleMode, allowAudition: false });
+        const isPatternControlKey = data.x === PATTERN_CONTROL_GRID_X && data.y === PATTERN_CONTROL_GRID_Y;
+        const uiMode = isPatternControlKey ? false : fullScaleMode;
+        const resp = state.handleGridKey(data.x, data.y, data.s, { uiMode, allowAudition: false });
         const events = Array.isArray(resp) ? resp : (resp ? [resp] : []);
         events.forEach((ev) => {
           if (ev.type === "octave") {
@@ -425,6 +447,14 @@ function handleClientMessage(ws, data) {
     case "set_pattern_control_latch":
       state.patternControlLatch = !!data.enabled;
       broadcast({ type: "pattern_control_latch", enabled: state.patternControlLatch });
+      break;
+    case "set_monome_controls":
+      if (typeof data.enabled === "boolean") {
+        showMonomeControls = data.enabled;
+        updateFullScaleMode(lastGridDevices);
+        broadcastGridStatus(gridConnected, lastGridDevices);
+        renderAndPush(true);
+      }
       break;
     case "tempo":
       state.setTempo(data.bpm);
@@ -821,6 +851,10 @@ function broadcast(obj) {
   });
 }
 
+function broadcastGridStatus(connected = gridConnected, devices = lastGridDevices) {
+  broadcast({ type: "grid_status", connected, devices: devices || [], fullScaleMode, showMonomeControls });
+}
+
 function maybeBroadcastPage() {
   if (state.currentPage !== lastBroadcastPage) {
     lastBroadcastPage = state.currentPage;
@@ -838,7 +872,10 @@ function guessContentType(p) {
 
 function renderAndPush(force = false) {
   maybeBroadcastPage();
-  const frame = state.renderLED();
+  const ignorePatternControl = !showMonomeControls && !state.patternControlMode;
+  const frame = fullScaleMode
+    ? state.renderUIFrame(Date.now(), { ignorePatternControl })
+    : state.renderLED();
   const forceRefresh = state.consumeForceRefresh?.() || false;
   queueLedFrame(frame, forceRefresh || force);
 }
@@ -896,8 +933,12 @@ function broadcastEvents(events) {
 }
 
 function processTick({ tick, externalStepMs = null }) {
-  const { midiEvents, ledFrame, patternSwitches, barChanges, barPlayheadChanges } = state.tick(followEnabled, externalStepMs);
-  queueLedFrame(ledFrame);
+  const { midiEvents, patternSwitches, barChanges, barPlayheadChanges } = state.tick(followEnabled, externalStepMs);
+  const ignorePatternControl = !showMonomeControls && !state.patternControlMode;
+  const frame = fullScaleMode
+    ? state.renderUIFrame(Date.now(), { ignorePatternControl })
+    : state.renderLED(Date.now());
+  queueLedFrame(frame);
   if (patternSwitches?.length) {
     patternSwitches.forEach((sw) => broadcastPatternStatus(sw.page));
   }
@@ -1047,7 +1088,10 @@ function manageLedAnimation(forceStop = false) {
         manageLedAnimation(true);
         return;
       }
-      const frame = state.renderLED(Date.now());
+      const ignorePatternControl = !showMonomeControls && !state.patternControlMode;
+      const frame = fullScaleMode
+        ? state.renderUIFrame(Date.now(), { ignorePatternControl })
+        : state.renderLED(Date.now());
       queueLedFrame(frame);
     }, SLIDE_ANIM_INTERVAL);
   } else if (slideAnimTimer) {

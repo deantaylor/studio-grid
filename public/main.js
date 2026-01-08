@@ -30,6 +30,8 @@ const TAB_PROGRESS_BAR_HEIGHT = 2;
 const TAB_PROGRESS_BAR_GAP = 2;
 const TAB_PROGRESS_SEG_GAP = 2;
 const TAB_PROGRESS_BAR_X_PAD = 0;
+const PATTERN_CONTROL_GRID_X = 15;
+const PATTERN_CONTROL_GRID_Y = 7;
 
 let ws;
 let midiAccess;
@@ -41,6 +43,10 @@ let tickTimer = null;
 let currentPage = 1;
 let currentPattern = 1;
 let selectedDevicePage = currentPage;
+let activeUiPage = currentPage; // 1-8 device pages, 0 = pattern launcher
+let lastFocusedDevice = currentPage;
+let pendingLauncherExitPage = null;
+let deviceToolbarBaseHeight = null;
 let baseDivision = 16; // denominator of base note (1/16)
 let playheads = Array(9).fill(0);
 let deviceHeld = false;
@@ -84,6 +90,8 @@ const settingsScaleModeSel = document.getElementById("settings-scale-mode");
 const transposeDisplay = document.getElementById("transpose-value");
 const transposeDec = document.getElementById("transpose-dec");
 const transposeInc = document.getElementById("transpose-inc");
+const seqTypeWrap = document.getElementById("seq-type-wrap");
+const patternLauncherType = document.getElementById("pattern-launcher-type");
 // legacy device pill (optional)
 const devicePill = document.getElementById("device-pill") || null;
 const settingsBtn = document.getElementById("settings-btn");
@@ -98,6 +106,8 @@ const autoFillToggle = document.getElementById("auto-fill");
 const autoLoadToggle = document.getElementById("auto-load-set");
 const allowMDExternalToggle = document.getElementById("allow-md-external");
 const patternControlLatchToggle = document.getElementById("pattern-control-latch");
+const showMonomeControlsToggle = document.getElementById("show-monome-controls");
+const monomeControlsWrap = document.getElementById("monome-controls-wrap");
 const mdBaseSweepInput = document.getElementById("md-base-sweep");
 const monoSlidePadInput = document.getElementById("mono-slide-pad");
 const uiScaleSel = document.getElementById("ui-scale");
@@ -119,6 +129,8 @@ const patternScaleToggle = document.getElementById("pattern-scale-toggle");
 const barRow = document.getElementById("bar-row");
 const drumInputs = Array.from(document.querySelectorAll(".drum-note-input"));
 const scaleNotesWrap = document.getElementById("scale-notes");
+const deviceToolbar = document.querySelector(".device-toolbar");
+const patternToolbar = document.querySelector(".pattern-toolbar");
 const followBtn = document.getElementById("follow-btn");
 const copyPatternBtn = document.getElementById("copy-pattern-btn");
 const copyBarBtn = document.getElementById("copy-bar-btn");
@@ -520,6 +532,9 @@ let monoSlidePad = 0.1; // fraction of a step to trim slide gates
 let sequencerTypes = Array.from({ length: 9 }, () => "mono");
 let gridConnected = false;
 let fullScaleMode = false;
+let showMonomeControls = true;
+let gridDevices = [];
+let monomeControlsAvailable = false;
 const LOCAL_CONFIG_KEY = "studio_grid_config";
 let pendingTd3Import = null; // { data, page }
 const DEFAULT_DRUMS = [36, 38, 41, 43, 45, 47, 55]; // C1..G1 bottom->top
@@ -531,7 +546,8 @@ let ccNumberEditing = false;
 let appliedLocalSnapshot = false;
 let cachedConfig = null;
 let autoLoadSet = false;
-let patternControlLatch = false;
+let patternControlLatch = true;
+let patternControlActive = false;
 let resetNamesOnNextState = false;
 const TM1_NAME = "Elektron TM-1";
 const lastSentState = {
@@ -542,6 +558,7 @@ const lastSentState = {
   autoFillBars: null,
   allowMDExternal: null,
   patternControlLatch: null,
+  showMonomeControls: null,
   baseDivision: null,
   mdSlideParams: { factor: null, curve: null, baseMs: null },
   monoSlidePad: null,
@@ -557,6 +574,7 @@ function resetLastSentState() {
   lastSentState.autoFillBars = null;
   lastSentState.allowMDExternal = null;
   lastSentState.patternControlLatch = null;
+  lastSentState.showMonomeControls = null;
   lastSentState.baseDivision = null;
   lastSentState.mdSlideParams = { factor: null, curve: null, baseMs: null };
   lastSentState.monoSlidePad = null;
@@ -573,6 +591,21 @@ function normalizeDeviceNames(names) {
     const str = raw == null ? "" : String(raw).trim();
     return str.length ? str : `${i}`;
   });
+}
+
+function hasLargeGrid(devices = null) {
+  const list = Array.isArray(devices) ? devices : gridDevices;
+  return list.some((d) => d?.connected && ((d?.cols || 0) > 8 || (d?.rows || 0) > 8));
+}
+
+function updateMonomeControlsAvailability(devices = null) {
+  const available = gridConnected && hasLargeGrid(devices);
+  monomeControlsAvailable = available;
+  if (monomeControlsWrap) monomeControlsWrap.classList.toggle("hidden", !available);
+}
+
+function applyMonomeControlsUI() {
+  if (showMonomeControlsToggle) showMonomeControlsToggle.checked = !!showMonomeControls;
 }
 
 function resolveClockInputId(value) {
@@ -622,6 +655,29 @@ function sendPatternControlLatchIfChanged(enabled) {
   if (lastSentState.patternControlLatch === enabled) return;
   lastSentState.patternControlLatch = enabled;
   ws.send(JSON.stringify({ type: "set_pattern_control_latch", enabled }));
+}
+
+function sendMonomeControlsIfChanged(enabled) {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  if (lastSentState.showMonomeControls === enabled) return;
+  lastSentState.showMonomeControls = enabled;
+  ws.send(JSON.stringify({ type: "set_monome_controls", enabled }));
+}
+
+function sendPatternControlToggleFromUI(action) {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  if (action === "enter") {
+    ws.send(JSON.stringify({ type: "grid_key", x: PATTERN_CONTROL_GRID_X, y: PATTERN_CONTROL_GRID_Y, s: 1 }));
+    return;
+  }
+  if (action === "exit") {
+    // Send both press+release so exit works regardless of latch setting.
+    ws.send(JSON.stringify({ type: "grid_key", x: PATTERN_CONTROL_GRID_X, y: PATTERN_CONTROL_GRID_Y, s: 1 }));
+    ws.send(JSON.stringify({ type: "grid_key", x: PATTERN_CONTROL_GRID_X, y: PATTERN_CONTROL_GRID_Y, s: 0 }));
+    return;
+  }
+  const s = patternControlLatch ? 1 : (patternControlActive ? 0 : 1);
+  ws.send(JSON.stringify({ type: "grid_key", x: PATTERN_CONTROL_GRID_X, y: PATTERN_CONTROL_GRID_Y, s }));
 }
 
 function sendBaseDivisionIfChanged(division) {
@@ -837,11 +893,9 @@ function connectWS() {
       applyPatternScaleUI();
       applyMdSlideSpeedUI();
       applyPatternControlLatchUI();
-      if (typeof msg.fullScaleMode === "boolean") {
-        setFullScaleMode(msg.fullScaleMode);
-      }
-      if (typeof msg.gridConnected === "boolean") {
-        handleGridStatus(msg.gridConnected, msg.fullScaleMode);
+      if (typeof msg.gridConnected === "boolean" || typeof msg.fullScaleMode === "boolean" || typeof msg.showMonomeControls === "boolean") {
+        const nextConnected = typeof msg.gridConnected === "boolean" ? msg.gridConnected : gridConnected;
+        handleGridStatus(nextConnected, msg.fullScaleMode ?? null, msg.devices ?? null, msg.showMonomeControls ?? null);
       }
     } else if (msg.type === "page_change") {
       if (Array.isArray(msg.octaveOverlays)) {
@@ -849,7 +903,7 @@ function connectWS() {
       }
       updatePage(msg.page || currentPage, { fromServer: true });
     } else if (msg.type === "grid_status") {
-      handleGridStatus(!!msg.connected, msg.fullScaleMode);
+      handleGridStatus(!!msg.connected, msg.fullScaleMode, msg.devices, msg.showMonomeControls);
     } else if (msg.type === "tempo") {
       tempo = msg.bpm || tempo;
       updateTempo(tempo, { broadcast: false });
@@ -990,6 +1044,23 @@ function connectWS() {
         if (msg.page === currentPage) renderFrame(frames[currentPage]);
       }
     } else if (msg.type === "pattern_control") {
+      const wasActive = patternControlActive;
+      patternControlActive = !!msg.enabled;
+      if (patternControlActive) {
+        if (!wasActive) lastFocusedDevice = currentPage;
+        activeUiPage = 0;
+        selectedDevicePage = 0;
+        pendingLauncherExitPage = null;
+      } else {
+        const nextPage = pendingLauncherExitPage || lastFocusedDevice || currentPage;
+        pendingLauncherExitPage = null;
+        activeUiPage = nextPage;
+        selectedDevicePage = nextPage;
+        updatePage(nextPage, { fromServer: false });
+      }
+      applyPatternLauncherTypeUI();
+      renderTabs();
+      renderDeviceTabProgressFrame();
       if (msg.enabled) {
         clearNumericOverlays(currentPage);
         resetOctaveOverlayUI();
@@ -2184,6 +2255,7 @@ function syncSettingsInputs() {
   if (autoFillToggle) autoFillToggle.checked = !!autoFillBars;
   if (autoLoadToggle) autoLoadToggle.checked = !!autoLoadSet;
   if (patternControlLatchToggle) patternControlLatchToggle.checked = !!patternControlLatch;
+  if (showMonomeControlsToggle) showMonomeControlsToggle.checked = !!showMonomeControls;
   if (allowMDExternalToggle) allowMDExternalToggle.checked = !!allowMDExternal;
   if (mdBaseSweepInput) mdBaseSweepInput.value = mdBaseSweep;
   if (monoSlidePadInput) monoSlidePadInput.value = Math.round((monoSlidePad || 0) * 100);
@@ -2259,6 +2331,13 @@ function applySettingsFromInputs() {
     if (patternControlLatch !== next) {
       patternControlLatch = next;
       sendPatternControlLatchIfChanged(patternControlLatch);
+    }
+  }
+  if (showMonomeControlsToggle) {
+    const next = !!showMonomeControlsToggle.checked;
+    if (showMonomeControls !== next) {
+      showMonomeControls = next;
+      sendMonomeControlsIfChanged(showMonomeControls);
     }
   }
   if (allowMDExternalToggle) {
@@ -2372,6 +2451,13 @@ if (settingsBtn && settingsModal && settingsBackdrop) {
       sendPatternControlLatchIfChanged(patternControlLatch);
     };
   }
+  if (showMonomeControlsToggle) {
+    showMonomeControlsToggle.onchange = () => {
+      if (settingsOpen) return;
+      showMonomeControls = !!showMonomeControlsToggle.checked;
+      sendMonomeControlsIfChanged(showMonomeControls);
+    };
+  }
   if (mdBaseSweepInput) {
     const commitBaseSweep = () => {
       if (settingsOpen) return;
@@ -2427,6 +2513,7 @@ if (settingsSaveCfg) {
         baseDivision,
         midiSettings,
         patternControlLatch,
+        showMonomeControls,
         defaultDeviceColor
       };
       localStorage.setItem(LOCAL_CONFIG_KEY, JSON.stringify(cfg));
@@ -2450,6 +2537,7 @@ if (settingsRestoreCfg) {
       if (autoFillToggle) autoFillToggle.checked = true;
       if (autoLoadToggle) autoLoadToggle.checked = false;
       if (patternControlLatchToggle) patternControlLatchToggle.checked = false;
+      if (showMonomeControlsToggle) showMonomeControlsToggle.checked = true;
       if (baseNoteLenSel) baseNoteLenSel.value = "16";
       if (mdBaseSweepInput) mdBaseSweepInput.value = 80;
       if (monoSlidePadInput) monoSlidePadInput.value = 10;
@@ -2476,6 +2564,9 @@ if (settingsRestoreCfg) {
     patternControlLatch = false;
     applyPatternControlLatchUI();
     sendPatternControlLatchIfChanged(patternControlLatch);
+    showMonomeControls = true;
+    applyMonomeControlsUI();
+    sendMonomeControlsIfChanged(showMonomeControls);
     ledLevels = { ...DEFAULT_LED_LEVELS };
     applyLedSettingsUI();
     sendLedLevelsIfChanged(ledLevels);
@@ -2715,7 +2806,7 @@ function renderTabs() {
     const label = deviceNames[page] && deviceNames[page].trim().length ? deviceNames[page] : `${page}`;
     btn.textContent = label;
     btn.dataset.page = page;
-    const isActive = page === currentPage;
+    const isActive = activeUiPage === page;
     const activeBg = getDeviceDisplayColor(page);
     const inactiveBg = "var(--panel-strong)";
     const patIdx = activePatterns[page] || 1;
@@ -2728,7 +2819,19 @@ function renderTabs() {
     btn.style.boxShadow = "none";
     btn.style.border = "none";
     const focusPage = () => {
-      if (page === currentPage) return;
+      if (activeUiPage === page) return;
+      if (activeUiPage === 0) {
+        if (patternControlActive) {
+          pendingLauncherExitPage = page;
+          sendPatternControlToggleFromUI("exit");
+          return;
+        }
+      }
+      activeUiPage = page;
+      selectedDevicePage = page;
+      applyPatternLauncherTypeUI();
+      renderTabs();
+      renderDeviceTabProgressFrame();
       updatePage(page, { fromServer: false });
       ws?.readyState === WebSocket.OPEN && ws.send(JSON.stringify({ type: "set_page", page }));
     };
@@ -2770,6 +2873,26 @@ function renderTabs() {
     });
     tabs.append(btn);
   });
+  const launcherBtn = document.createElement("button");
+  launcherBtn.type = "button";
+  launcherBtn.classList.add("pattern-launcher");
+  launcherBtn.dataset.patternLauncher = "true";
+  const launcherActive = activeUiPage === 0;
+  launcherBtn.title = launcherActive ? "Pattern Launcher (active)" : "Pattern Launcher";
+  launcherBtn.setAttribute("aria-pressed", launcherActive ? "true" : "false");
+  if (launcherActive) launcherBtn.classList.add("active");
+  const launcherActiveBg = defaultDeviceColor || ON_COLOR_DEFAULT;
+  const launcherInactiveBg = "var(--panel-strong)";
+  launcherBtn.style.background = launcherActive ? launcherActiveBg : launcherInactiveBg;
+  launcherBtn.style.color = launcherActive ? contrastForColor(launcherActiveBg) : "var(--surface)";
+  launcherBtn.innerHTML = "<i class=\"iconoir-table\" aria-hidden=\"true\"></i>";
+  launcherBtn.onclick = (e) => {
+    e.preventDefault();
+    if (activeUiPage === 0 || patternControlActive) return;
+    lastFocusedDevice = currentPage;
+    sendPatternControlToggleFromUI("enter");
+  };
+  tabs.append(launcherBtn);
   applyDeviceBadge();
   renderDeviceTabProgressFrame();
 }
@@ -2847,6 +2970,8 @@ function renderDeviceTabProgressFrame(timeNow = performance.now()) {
     const deviceColor = getDeviceDisplayColor(page) || ON_COLOR_DEFAULT;
     const patIdx = activePatterns[page] || 1;
     const lengthSteps = (patternLengths[page] && patternLengths[page][patIdx]) || null;
+    const timeScaleRaw = (patternTimeScales[page] && patternTimeScales[page][patIdx]) || 1;
+    const timeScale = Number.isFinite(timeScaleRaw) && timeScaleRaw > 0 ? timeScaleRaw : 1;
     const hasPatternLength = Number.isFinite(lengthSteps) && lengthSteps > 0;
     const playheadEntry = barPlayheads[page];
     const playingBar = Array.isArray(playheadEntry) ? playheadEntry[patIdx] : playheadEntry;
@@ -2875,6 +3000,7 @@ function renderDeviceTabProgressFrame(timeNow = performance.now()) {
       isQueued,
       isSelected,
       lengthSteps,
+      timeScale,
       barX: tabX,
       barW: tabRect.width,
       bgColor: hasPattern ? baseBg : mutedBg,
@@ -2885,6 +3011,29 @@ function renderDeviceTabProgressFrame(timeNow = performance.now()) {
     };
     drawDeviceTabProgress(deviceTabProgressCtx, { x: tabX, y: 0, width: tabRect.width }, deviceState, transportTickNow, timeNow);
   });
+  const launcherBtn = tabs.querySelector("button[data-pattern-launcher=\"true\"]");
+  if (launcherBtn) {
+    const tabRect = launcherBtn.getBoundingClientRect();
+    const tabX = tabRect.left - canvasRect.left;
+    const launcherFill = defaultDeviceColor || ON_COLOR_DEFAULT;
+    const showClock = running;
+    const launcherState = {
+      hasPattern: showClock,
+      isPlaying: showClock,
+      isStopped: false,
+      isQueued: false,
+      isSelected: false,
+      lengthSteps: 16,
+      barX: tabX,
+      barW: tabRect.width,
+      bgColor: baseBg,
+      fillColor: launcherFill,
+      stoppedFillColor: baseBg,
+      syncZeroTick,
+      blinkOn
+    };
+    drawDeviceTabProgress(deviceTabProgressCtx, { x: tabX, y: 0, width: tabRect.width }, launcherState, transportTickNow, timeNow);
+  }
 }
 
 function drawDeviceTabProgress(ctx, tabRect, deviceState, transportTickNow, timeNow) {
@@ -2917,7 +3066,7 @@ function drawDeviceTabProgress(ctx, tabRect, deviceState, transportTickNow, time
     return;
   }
   if (!deviceState.isPlaying || !deviceState.hasPattern) return;
-  const patternTicks = Math.max(1, lengthSteps * TICKS_PER_STEP);
+  const patternTicks = Math.max(1, lengthSteps * TICKS_PER_STEP * (deviceState.timeScale || 1));
   const baseTick = transportTickNow - deviceState.syncZeroTick;
   const mod = ((baseTick % patternTicks) + patternTicks) % patternTicks;
   const phase = mod / patternTicks;
@@ -3041,7 +3190,9 @@ function applyPatternScaleUI() {
 function updatePage(page, { fromServer = false } = {}) {
   if (!page || page < 1 || page > 8) return;
   currentPage = page;
-  if (!fromServer) selectedDevicePage = page;
+  if (!patternControlActive) lastFocusedDevice = page;
+  if (!patternControlActive) activeUiPage = page;
+  selectedDevicePage = activeUiPage;
   renderTabs();
   applyPageMidi();
   applyPageTranspose();
@@ -3138,6 +3289,7 @@ function applySeqTypeUI() {
   enforceMDMidiOut();
   updateTd3ExportVisibility();
   applyDeviceBadge();
+  applyPatternLauncherTypeUI();
   const hasOverride = deviceColorOverrides[currentPage];
   if (type === "mdtonal" && !hasOverride) {
     // Auto-apply MDTonal color when no user override
@@ -3149,6 +3301,53 @@ function applySeqTypeUI() {
   }
   renderTabs();
   renderFrame(frames[currentPage]);
+}
+
+function applyPatternLauncherTypeUI() {
+  if (!seqTypeWrap || !patternLauncherType) return;
+  const showLauncher = activeUiPage === 0;
+  seqTypeWrap.classList.toggle("hidden", showLauncher);
+  patternLauncherType.classList.toggle("hidden", !showLauncher);
+  if (patternToolbar) patternToolbar.classList.toggle("hidden", showLauncher);
+  if (scaleNotesWrap) scaleNotesWrap.classList.toggle("hidden", showLauncher);
+  const transposeWrap = document.querySelector(".transpose-switch");
+  if (transposeWrap) transposeWrap.classList.toggle("hidden", showLauncher);
+  if (midiSel) {
+    const midiLabel = midiSel.closest("label");
+    if (midiLabel) midiLabel.classList.toggle("hidden", showLauncher);
+  }
+  if (midiChan) {
+    const chanLabel = midiChan.closest("label");
+    if (chanLabel) chanLabel.classList.toggle("hidden", showLauncher);
+  }
+  const disableControls = (el) => {
+    if (!el) return;
+    el.disabled = showLauncher;
+  };
+  disableControls(seqTypeSel);
+  disableControls(transposeDec);
+  disableControls(transposeInc);
+  disableControls(midiSel);
+  disableControls(midiChan);
+  disableControls(patternSelect);
+  disableControls(patternScaleToggle);
+  patternLengthBtns.forEach((btn) => {
+    btn.disabled = showLauncher;
+  });
+  [copyPatternBtn, copyBarBtn, pasteBtn, clearBtn, followBtn].forEach(disableControls);
+  if (barRow) {
+    barRow.querySelectorAll("button").forEach((btn) => {
+      btn.disabled = showLauncher;
+    });
+  }
+  if (deviceToolbar) {
+    if (!showLauncher) {
+      deviceToolbarBaseHeight = deviceToolbar.offsetHeight || deviceToolbarBaseHeight;
+      deviceToolbar.style.minHeight = "";
+    } else if (deviceToolbarBaseHeight) {
+      deviceToolbar.style.minHeight = `${deviceToolbarBaseHeight}px`;
+    }
+  }
 }
 
 function applyDrumNotesUI() {
@@ -3984,9 +4183,19 @@ if (confirmClearBar) {
   };
 }
 
-function handleGridStatus(connected, nextFullScaleMode = null) {
+function handleGridStatus(connected, nextFullScaleMode = null, devices = null, nextShowMonomeControls = null) {
   const prev = gridConnected;
   gridConnected = !!connected;
+  if (Array.isArray(devices)) {
+    gridDevices = devices;
+    updateMonomeControlsAvailability(gridDevices);
+  } else {
+    updateMonomeControlsAvailability();
+  }
+  if (typeof nextShowMonomeControls === "boolean") {
+    showMonomeControls = nextShowMonomeControls;
+    applyMonomeControlsUI();
+  }
   if (typeof nextFullScaleMode === "boolean") {
     setFullScaleMode(nextFullScaleMode);
   }
@@ -4219,6 +4428,10 @@ function loadSavedConfig() {
     patternControlLatch = parsed.patternControlLatch;
     applyPatternControlLatchUI();
   }
+  if (typeof parsed.showMonomeControls === "boolean") {
+    showMonomeControls = parsed.showMonomeControls;
+    applyMonomeControlsUI();
+  }
   if (typeof parsed.autoLoadSet === "boolean" && autoLoadToggle) {
     autoLoadToggle.checked = parsed.autoLoadSet;
     autoLoadSet = parsed.autoLoadSet;
@@ -4313,6 +4526,11 @@ function pushSavedConfigToServer(opts = {}) {
     patternControlLatch = !!cachedConfig.patternControlLatch;
     applyPatternControlLatchUI();
     sendPatternControlLatchIfChanged(patternControlLatch);
+  }
+  if (typeof cachedConfig.showMonomeControls === "boolean") {
+    showMonomeControls = !!cachedConfig.showMonomeControls;
+    applyMonomeControlsUI();
+    sendMonomeControlsIfChanged(showMonomeControls);
   }
   if (Array.isArray(cachedConfig.midiSettings)) {
     cachedConfig.midiSettings.forEach((m, idx) => {

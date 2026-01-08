@@ -84,7 +84,7 @@ export class SGridState {
     // this.pendingMuteTick = Array(9).fill(null); // target tick to apply mute/unmute (legacy mute path)
     this.pendingStopTick = Array(9).fill(null); // target tick to apply stop/start
     this.pendingPatternTick = Array(9).fill(null); // target tick to apply pending pattern
-    this.patternControlLatch = false;
+    this.patternControlLatch = true;
     this.pendingOctaveOverlays = [];
     this.holdTimers = new Map(); // key -> timeout id for entering edit mode
     this.requestRender = null; // optional callback wired by server to force a render
@@ -790,11 +790,12 @@ export class SGridState {
       return this.handlePatternControlKey(x, y, s);
     }
     // Pattern control toggle (pattern launcher) is always handled first
-    if (!uiMode && y === 7 && x === PATTERN_CONTROL_BUTTON && this.patternHeld) {
+    const allowPatternControlKey = !uiMode || this.patternControlMode;
+    if (allowPatternControlKey && y === 7 && x === PATTERN_CONTROL_BUTTON && this.patternHeld) {
       if (s !== 1) return null;
       return { type: "follow_toggle" };
     }
-    if (!uiMode && y === 7 && x === PATTERN_CONTROL_BUTTON) {
+    if (allowPatternControlKey && y === 7 && x === PATTERN_CONTROL_BUTTON) {
       if (this.patternControlLatch) {
         if (s === 1) {
           this.patternControlMode = !this.patternControlMode;
@@ -1660,9 +1661,10 @@ export class SGridState {
     }
   }
 
-  clearStep(pat, abs, pageIdx = this.currentPage) {
+  clearStep(pat, abs, pageIdx = this.currentPage, opts = {}) {
     const step = pat.steps[abs];
     if (!step) return;
+    const { skipAutoClear = false, patternIdx = null } = opts || {};
     const prevDeg = step.degree || 0;
     const yPos = clamp(6 - prevDeg, 0, 6);
     const xPos = abs % 16;
@@ -1688,6 +1690,17 @@ export class SGridState {
       clears.push({ x: xPos, y: yPos });
     }
     this.enqueueOctaveOverlay({ page: pageIdx, clears, clear: true });
+    if (skipAutoClear) return;
+    const len = Math.max(1, pat.length_steps || 16);
+    const hasDataInLength = pat.steps.slice(0, len).some((s) => s?.on);
+    if (!hasDataInLength) {
+      const hasHiddenData = pat.steps.slice(len).some((s) => s?.on);
+      if (hasHiddenData) {
+        const pg = this.pages[pageIdx];
+        const targetPattern = patternIdx || pg?.active_pattern;
+        if (targetPattern) this.clearPattern(pageIdx, targetPattern);
+      }
+    }
   }
 
   patternSnapshot(page, pattern) {
@@ -1820,7 +1833,7 @@ export class SGridState {
     if (!pg || pattern < 1 || pattern > 8) return;
     const pat = pg.patterns[pattern];
     if (!pat) return;
-    pat.steps.forEach((_, idx) => this.clearStep(pat, idx, page));
+    pat.steps.forEach((_, idx) => this.clearStep(pat, idx, page, { skipAutoClear: true, patternIdx: pattern }));
     this.enqueueOctaveOverlay({ page, clearAll: true });
   }
 
@@ -1835,7 +1848,12 @@ export class SGridState {
     const barIdx = clamp(bar || 0, 0, bars - 1);
     const start = barIdx * 16;
     for (let i = 0; i < 16 && (start + i) < pat.steps.length; i++) {
-      this.clearStep(pat, start + i, page);
+      this.clearStep(pat, start + i, page, { skipAutoClear: true, patternIdx: pattern });
+    }
+    const hasDataInLength = pat.steps.slice(0, len).some((s) => s?.on);
+    if (!hasDataInLength) {
+      this.clearPattern(page, pattern);
+      return;
     }
     this.enqueueOctaveOverlay({ page, clearAll: true });
   }
@@ -2484,10 +2502,18 @@ export class SGridState {
     const WIDTH = 16;
     const HEIGHT = 8;
     const STEP_ROWS = 7;
+    const ignorePatternControl = !!opts.ignorePatternControl;
+    const prevPatternControl = this.patternControlMode;
+    if (ignorePatternControl && prevPatternControl) {
+      this.patternControlMode = false;
+    }
     const baseFrame = this.renderLED(slideTimeMs, {
       includeOctaveHint: opts.includeOctaveHint,
       ignorePatternHoldDim: opts.ignorePatternHoldDim
     });
+    if (ignorePatternControl && prevPatternControl) {
+      this.patternControlMode = prevPatternControl;
+    }
     const uiFrame = new Array(WIDTH * HEIGHT).fill(0);
     for (let y = 0; y < STEP_ROWS; y++) {
       for (let x = 0; x < WIDTH; x++) {
@@ -2499,7 +2525,7 @@ export class SGridState {
     if (!page || !pat) {
       return uiFrame;
     }
-    if (this.patternControlMode) {
+    if (this.patternControlMode && !ignorePatternControl) {
       return baseFrame;
     }
     const bar = pat.barView || 0;
