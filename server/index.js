@@ -120,9 +120,14 @@ function hasLargeGrid(devices = null) {
   return list.some((d) => d?.connected && ((d?.cols || 0) > 8 || (d?.rows || 0) > 8));
 }
 
+function hasConnectedGrid(devices = null) {
+  const list = devices || (typeof serial.deviceList === "function" ? serial.deviceList() : []);
+  return list.some((d) => d?.connected);
+}
+
 function updateFullScaleMode(devices = null) {
   const list = devices || lastGridDevices;
-  const next = hasLargeGrid(list) ? !showMonomeControls : true;
+  const next = hasConnectedGrid(list) ? !showMonomeControls : true;
   if (next === fullScaleMode) return false;
   fullScaleMode = next;
   return true;

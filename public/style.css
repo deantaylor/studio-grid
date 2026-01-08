@@ -709,7 +709,7 @@ canvas#grid {
   position: absolute;
   top: 0;
   left: calc(50% - (var(--grid-width) / 2));
-  transform: translateX(calc(-100% - 4px));
+  transform: translateX(calc(-100% - 16px));
   display: grid;
   grid-template-columns: auto auto;
   grid-template-rows: repeat(7, 44px);
@@ -717,6 +717,24 @@ canvas#grid {
   justify-items: end;
   gap: 0 8px;
   margin-top: -6px;
+}
+.drum-notes.compact {
+  transform: translateX(calc(-100% - 16px));
+}
+.drum-notes.full-scale-extra {
+  grid-template-rows: repeat(8, 44px);
+}
+.drum-notes .drum-note-extra {
+  display: none;
+}
+.drum-notes .drum-note-extra-wrap {
+  display: none;
+}
+.drum-notes.full-scale-extra .drum-note-extra {
+  display: inline-flex;
+}
+.drum-notes.full-scale-extra .drum-note-extra-wrap {
+  display: grid;
 }
 .scale-notes {
   position: absolute;

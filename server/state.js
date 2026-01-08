@@ -267,6 +267,15 @@ export class SGridState {
     return clamp(step.octave || 0, -3, 4);
   }
 
+  getDrumPitch(page, degree, octave = 0) {
+    const drumMap = Array.isArray(page?.drumNotes) ? page.drumNotes : [];
+    const safeDeg = clamp(Math.round(degree || 0), 0, 6);
+    if (safeDeg === 0 && Number(octave) === 1) {
+      return drumMap[7] ?? drumMap[0] ?? 36;
+    }
+    return drumMap[safeDeg] ?? drumMap[0] ?? 36;
+  }
+
   buildDefaultMidi() {
     const midi = [null];
     for (let i = 1; i <= 8; i++) {
@@ -277,8 +286,8 @@ export class SGridState {
 
   buildDefaultPages() {
     const pages = [null];
-    const defaultDrums = [36, 38, 41, 43, 45, 47, 55]; // C1..G1 bottom->top
-    const mdDrums = [36, 38, 40, 41, 43, 45, 47]; //first 7 tracks
+    const defaultDrums = [36, 38, 41, 43, 45, 47, 55, 60]; // C1..C2 bottom->top
+    const mdDrums = [36, 38, 40, 41, 43, 45, 47, 48]; // first 8 tracks
     for (let p = 1; p <= 8; p++) {
       const patterns = [null];
       for (let pat = 1; pat <= 8; pat++) {
@@ -332,7 +341,7 @@ export class SGridState {
       page.sequencerStopped = false;
       page.sequencerType = "mono";
       page.transpose = 0;
-      page.drumNotes = Array.isArray(page.drumNotes) ? page.drumNotes.slice(0, 7) : [36, 38, 41, 43, 45, 47, 55];
+      page.drumNotes = Array.isArray(page.drumNotes) ? page.drumNotes.slice(0, 8) : [36, 38, 41, 43, 45, 47, 55, 60];
       page.note = "";
       page.ccNumber = DEFAULT_CC;
       this.sequencerTypes[p] = "mono";
@@ -571,10 +580,10 @@ export class SGridState {
 
   setDrumNote(page, row, note) {
     if (page < 1 || page > 8) return;
-    if (row < 0 || row > 6) return;
+    if (row < 0 || row > 7) return;
     const pg = this.pages[page];
     if (!pg) return;
-    if (!Array.isArray(pg.drumNotes)) pg.drumNotes = [36, 38, 42, 46, 49, 51, 57];
+    if (!Array.isArray(pg.drumNotes)) pg.drumNotes = [36, 38, 42, 46, 49, 51, 57, 60];
     const val = clamp(Math.round(note || 0), 0, 127);
     pg.drumNotes[row] = val;
   }
@@ -632,7 +641,7 @@ export class SGridState {
         muted: !!p.muted, // legacy export
         transpose: p.transpose || 0,
         sequencerType: p.sequencerType || "mono",
-        drumNotes: Array.isArray(p.drumNotes) ? p.drumNotes.slice(0, 7) : undefined,
+        drumNotes: Array.isArray(p.drumNotes) ? p.drumNotes.slice(0, 8) : undefined,
         ccNumber: clamp(Math.round(p.ccNumber ?? DEFAULT_CC), 0, 127),
         mdTrack: clamp(Math.round(p.mdTrack || 1), 1, 16),
         patterns
@@ -731,7 +740,7 @@ export class SGridState {
         page.transpose = clamp(pageSnap.transpose || 0, -24, 24);
         page.ccNumber = clamp(Math.round(pageSnap.ccNumber ?? page.ccNumber ?? DEFAULT_CC), 0, 127);
         page.mdTrack = clamp(Math.round(pageSnap.mdTrack || page.mdTrack || 1), 1, 16);
-        if (Array.isArray(pageSnap.drumNotes)) page.drumNotes = pageSnap.drumNotes.slice(0, 7).map((n) => clamp(Number(n) || 0, 0, 127));
+        if (Array.isArray(pageSnap.drumNotes)) page.drumNotes = pageSnap.drumNotes.slice(0, 8).map((n) => clamp(Number(n) || 0, 0, 127));
         page.active_pattern = clamp(pageSnap.active_pattern || 1, 1, 8);
         if (Array.isArray(pageSnap.patterns)) {
           for (let pi = 1; pi <= 8; pi++) {
@@ -784,6 +793,7 @@ export class SGridState {
 
   getRowInfo(y, opts = {}) {
     const uiMode = !!opts.uiMode;
+    const seqType = opts.seqType || this.pages[this.currentPage]?.sequencerType || "mono";
     if (!Number.isFinite(y)) {
       return { stepRow: false, controlRow: false, degree: null, octaveOffset: 0, topRow: false, uiMode };
     }
@@ -796,6 +806,12 @@ export class SGridState {
     }
     if (y < 0 || y > 7) {
       return { stepRow: false, controlRow: false, degree: null, octaveOffset: 0, topRow: false, uiMode };
+    }
+    if (seqType === "drum") {
+      if (y === 0) {
+        return { stepRow: true, controlRow: false, degree: 0, octaveOffset: 1, topRow: true, uiMode };
+      }
+      return { stepRow: true, controlRow: false, degree: clamp(7 - y, 0, 6), octaveOffset: 0, topRow: false, uiMode };
     }
     if (y === 0) {
       return { stepRow: true, controlRow: false, degree: 0, octaveOffset: 1, topRow: true, uiMode };
@@ -1237,8 +1253,9 @@ export class SGridState {
           return null;
         }
         const targetDeg = rowInfo.degree;
-        // long press toggles accent
-        if (!holdInfo?.editMode && duration >= 150 && holdInfo?.wasOn && step2.on && !holdInfo?.octaveChanged && !holdInfo?.slideTriggered && (!holdInfo?.action || holdInfo.action === "accent")) {
+        // long press toggles accent (as long as no other edit action was taken)
+        const hasEditAction = !!(holdInfo?.octaveChanged || holdInfo?.slideTriggered || holdInfo?.microEdit || (holdInfo?.action && holdInfo.action !== "accent"));
+        if (duration >= 150 && holdInfo?.wasOn && step2.on && !hasEditAction) {
           if (seqType === "poly" || seqType === "drum") {
             if (!Array.isArray(step2.accented)) step2.accented = [];
             const idx = step2.accented.indexOf(targetDeg);
@@ -1249,7 +1266,10 @@ export class SGridState {
           } else {
             step2.accent = !step2.accent;
           }
-          if (holdInfo) holdInfo.actionDone = true;
+          if (holdInfo) {
+            holdInfo.action = "accent";
+            holdInfo.actionDone = true;
+          }
           this.heldStepModified = false;
           return { type: "accent", x: hx, y: hy, accent: seqType === "poly" ? step2.accented.includes(targetDeg) : step2.accent };
         }
@@ -1337,8 +1357,7 @@ export class SGridState {
       let ccValue = null;
       let ccChannel = null;
       if (seqType === "drum") {
-        const drumMap = Array.isArray(page.drumNotes) ? page.drumNotes : [];
-        note = drumMap[degree] ?? 36;
+        note = this.getDrumPitch(page, degree, octave);
       } else if (seqType === "mdtonal") {
         const trackCfg = this.mdTrackConfig(pageIdx);
         note = trackCfg.noteNumber;
@@ -1398,7 +1417,7 @@ export class SGridState {
       : (isNoteOn && !!step?.accent);
     const slideProp = seqType === "mdtonal" ? "mdSlide" : "slide";
     const canSlide = seqType === "mono" || seqType === "mdtonal";
-    const canAccent = seqType !== "cc";
+    const canAccent = seqType !== "cc" && seqType !== "drum";
     return {
       exists: !!step,
       on: isNoteOn,
@@ -2404,8 +2423,8 @@ export class SGridState {
             degrees.forEach((deg) => {
               let pitch;
               if (seqTypePlay === "drum") {
-                const drumMap = Array.isArray(page.drumNotes) ? page.drumNotes : [];
-                pitch = drumMap[deg] ?? 36;
+                const drumOct = this.getNoteOctave(step, deg);
+                pitch = this.getDrumPitch(page, deg, drumOct);
               } else {
                 const pageTranspose = this.pages[p].transpose || 0;
                 const octave = seqTypePlay === "poly" ? this.getNoteOctave(step, deg) : this.getNoteOctave(step, deg || 0);
@@ -2617,8 +2636,8 @@ export class SGridState {
               const eventTick = nextBaseTick + nextSwingOffsetTicks + microOffset;
               let pitch;
               if (seqTypePlay === "drum") {
-                const drumMap = Array.isArray(page.drumNotes) ? page.drumNotes : [];
-                pitch = drumMap[deg] ?? 36;
+                const drumOct = this.getNoteOctave(nextStepObj, deg);
+                pitch = this.getDrumPitch(page, deg, drumOct);
               } else {
                 const pageTranspose = this.pages[p].transpose || 0;
                 const octave = seqTypePlay === "poly" ? this.getNoteOctave(nextStepObj, deg) : this.getNoteOctave(nextStepObj, deg || 0);

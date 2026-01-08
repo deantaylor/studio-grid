@@ -248,6 +248,9 @@ const initNumberSteppers = () => {
 
     const wrap = document.createElement("div");
     wrap.className = "number-wrap";
+    if (input.classList.contains("drum-note-extra")) {
+      wrap.classList.add("drum-note-extra-wrap");
+    }
     input.parentNode.insertBefore(wrap, input);
     wrap.appendChild(input);
 
@@ -559,7 +562,7 @@ let gridDevices = [];
 let monomeControlsAvailable = false;
 const LOCAL_CONFIG_KEY = "studio_grid_config";
 let pendingTd3Import = null; // { data, page }
-const DEFAULT_DRUMS = [36, 38, 41, 43, 45, 47, 55]; // C1..G1 bottom->top
+const DEFAULT_DRUMS = [36, 38, 41, 43, 45, 47, 55, 60]; // C1..C2 bottom->top
 let drumNotes = Array.from({ length: 9 }, () => DEFAULT_DRUMS.slice());
 const DEFAULT_CC = 1;
 let ccNumbers = Array.from({ length: 9 }, (_, i) => (i === 0 ? null : DEFAULT_CC));
@@ -867,7 +870,7 @@ function connectWS() {
         deviceColors = Array(9).fill(defaultDeviceColor);
         deviceColors[0] = "";
       }
-      if (msg.drumNotes) drumNotes = msg.drumNotes.map((d, idx) => (idx === 0 ? null : (Array.isArray(d) ? d.slice(0, 7) : DEFAULT_DRUMS.slice())));
+      if (msg.drumNotes) drumNotes = msg.drumNotes.map((d, idx) => (idx === 0 ? null : (Array.isArray(d) ? d.slice(0, 8) : DEFAULT_DRUMS.slice())));
       if (msg.ccNumbers) ccNumbers = msg.ccNumbers.map((c, idx) => (idx === 0 ? null : (Number.isFinite(c) ? c : DEFAULT_CC)));
       if (msg.activePatterns) activePatterns = msg.activePatterns;
       if (msg.pendingPatterns) pendingPatterns = msg.pendingPatterns;
@@ -3371,7 +3374,11 @@ function applyPatternLauncherTypeUI() {
   seqTypeWrap.classList.toggle("hidden", showLauncher);
   patternLauncherType.classList.toggle("hidden", !showLauncher);
   if (patternToolbar) patternToolbar.classList.toggle("hidden", showLauncher);
-  if (scaleNotesWrap) scaleNotesWrap.classList.toggle("hidden", showLauncher);
+  if (scaleNotesWrap) {
+    const type = sequencerTypes[currentPage] || "mono";
+    const showScaleNotes = type === "mono" || type === "poly" || type === "mdtonal";
+    scaleNotesWrap.classList.toggle("hidden", showLauncher || !showScaleNotes);
+  }
   const transposeWrap = document.querySelector(".transpose-switch");
   if (transposeWrap) transposeWrap.classList.toggle("hidden", showLauncher);
   if (midiSel) {
@@ -3415,16 +3422,25 @@ function applyPatternLauncherTypeUI() {
 function applyDrumNotesUI() {
   const type = sequencerTypes[currentPage] || "mono";
   const drumWrap = document.getElementById("drum-notes");
-  if (drumWrap) drumWrap.classList.toggle("hidden", type !== "drum");
+  if (drumWrap) {
+    drumWrap.classList.toggle("hidden", type !== "drum");
+    drumWrap.classList.toggle("full-scale-extra", fullScaleMode && type === "drum");
+    drumWrap.classList.toggle("compact", !fullScaleMode && type === "drum");
+  }
   if (!drumInputs.length) return;
   if (!Array.isArray(drumNotes[currentPage])) drumNotes[currentPage] = DEFAULT_DRUMS.slice();
+  if (drumNotes[currentPage].length < 8) {
+    drumNotes[currentPage] = drumNotes[currentPage].concat(DEFAULT_DRUMS.slice(drumNotes[currentPage].length));
+  }
   const map = drumNotes[currentPage] || DEFAULT_DRUMS;
   drumInputs.forEach((input) => {
     const row = Number(input.dataset.row);
     if (Number.isFinite(row)) {
       const val = map[row] ?? DEFAULT_DRUMS[row] ?? 36;
       input.value = val;
-      input.disabled = type !== "drum";
+      const allowExtra = fullScaleMode && type === "drum";
+      const isExtra = row === 7;
+      input.disabled = type !== "drum" || (isExtra && !allowExtra);
     }
   });
 }
@@ -3561,8 +3577,8 @@ canvas.addEventListener("mousemove", (e) => {
   }
   const seqType = sequencerTypes[currentPage] || "mono";
   const inStepRows = y < getStepRows();
-  const allowedSeq = seqType !== "drum" && seqType !== "cc";
-  if (!inStepRows || !allowedSeq) {
+  const allowEdit = seqType !== "cc";
+  if (!inStepRows || !allowEdit) {
     hoveredStep = null;
     if (!isOverOctaveControls) octaveControls.style.display = "none";
     if (!isOverMicroControls) microControls.style.display = "none";
@@ -3646,9 +3662,16 @@ function nudgeStepMicro(delta) {
 
 function showOctaveControls(hover) {
   if (!hover) return;
+  const seqType = sequencerTypes[currentPage] || "mono";
+  const allowOctave = seqType !== "drum" && seqType !== "cc";
   const { x, y, rectLeft, rectTop, scaleX, scaleY } = hover;
   hoveredStep = { x, y };
   lastOctaveTarget = { x, y };
+  if (!allowOctave) {
+    if (!isOverOctaveControls) octaveControls.style.display = "none";
+    showMicroControls(hover);
+    return;
+  }
   const hasUp = y > 0;
   const hasDown = y < getStepRows() - 1;
   if (!hasUp && !hasDown) {
@@ -4411,6 +4434,7 @@ function setFullScaleMode(next) {
   fullScaleMode = enabled;
   document.documentElement.classList.toggle("full-scale", fullScaleMode);
   applyScaleNotesUI();
+  applyDrumNotesUI();
   renderFrameIfReady();
 }
 
@@ -4761,6 +4785,7 @@ if (drumInputs.length) {
     input.addEventListener("change", () => {
       const row = Number(input.dataset.row);
       if (!Number.isFinite(row)) return;
+      if (row === 7 && !fullScaleMode) return;
       const val = Math.max(0, Math.min(127, Math.round(Number(input.value) || 0)));
       if (!Array.isArray(drumNotes[currentPage])) drumNotes[currentPage] = DEFAULT_DRUMS.slice();
       drumNotes[currentPage][row] = val;
