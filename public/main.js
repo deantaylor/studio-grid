@@ -24,8 +24,11 @@ const PATTERN_INACTIVE = 4;
 const DEVICE_ACTIVE = 15;
 const DEVICE_PRESENT = 8;
 const BASE_PITCH = 60;
-const PPQN = 24;
-const TICKS_PER_STEP = 6;
+const PPQN_EXT = 24;
+const PPQN_INT = 96;
+const INT_MULT = PPQN_INT / PPQN_EXT;
+const TICKS_PER_STEP_EXT = PPQN_EXT / 4;
+const TICKS_PER_STEP_INT = TICKS_PER_STEP_EXT * INT_MULT;
 const TAB_PROGRESS_BAR_HEIGHT = 2;
 const TAB_PROGRESS_BAR_GAP = 2;
 const TAB_PROGRESS_SEG_GAP = 2;
@@ -325,11 +328,22 @@ octaveControls.innerHTML = `
 document.body.append(octaveControls);
 const octaveUpBtn = octaveControls.querySelector('[data-delta="1"]');
 const octaveDownBtn = octaveControls.querySelector('[data-delta="-1"]');
+const microControls = document.createElement("div");
+microControls.className = "note-micro-controls";
+microControls.innerHTML = `
+  <button type="button" data-delta="-1" aria-label="Nudge earlier"><i class="iconoir-transition-left" aria-hidden="true"></i></button>
+  <button type="button" data-delta="1" aria-label="Nudge later"><i class="iconoir-transition-right" aria-hidden="true"></i></button>
+`;
+document.body.append(microControls);
+const microLeftBtn = microControls.querySelector('[data-delta="-1"]');
+const microRightBtn = microControls.querySelector('[data-delta="1"]');
 let hoveredStep = null;
 let octaveHoverTimer = null;
 let isOverOctaveControls = false;
+let isOverMicroControls = false;
 let pendingOctaveHover = null;
 let octaveHideTimer = null;
+let microHideTimer = null;
 let lastOctaveTarget = null;
 let remoteOctaveTimer = null;
 let recentOctaveOverlay = null;
@@ -356,10 +370,10 @@ function updateTempo(val, opts = {}) {
   const display = formatTempoDisplay(displayTempoVal);
   if (tempoInput) tempoInput.value = display;
   if (settingsTempoInput) settingsTempoInput.value = display;
-      if (clockSource === "internal" && running) {
-        internalTickPeriodSec = 60 / (tempo * PPQN);
-        internalStartTimeSec = getNowSec() - transportTick * internalTickPeriodSec;
-      }
+  if (clockSource === "internal" && running) {
+    internalTickPeriodSec = 60 / (tempo * PPQN_EXT);
+    internalStartTimeSec = getNowSec() - transportTickExt * internalTickPeriodSec;
+  }
   if (broadcast) {
     ws?.readyState === WebSocket.OPEN && ws.send(JSON.stringify({ type: "tempo", bpm: tempo }));
   }
@@ -423,6 +437,7 @@ let transposes = Array.from({ length: 9 }, () => 0);
 
 function applyOctaveOverlaysSnapshot(snapshot) {
   if (!Array.isArray(snapshot)) return;
+  const prevOverlays = overlays;
   overlays = Array.from({ length: 9 }, (_, idx) => {
     const list = Array.isArray(snapshot[idx]) ? snapshot[idx] : [];
     return list
@@ -441,6 +456,11 @@ function applyOctaveOverlaysSnapshot(snapshot) {
         };
       })
       .filter(Boolean);
+  }).map((octs, idx) => {
+    const micros = Array.isArray(prevOverlays?.[idx])
+      ? prevOverlays[idx].filter((o) => o?.kind === "micro")
+      : [];
+    return octs.concat(micros);
   });
 }
 
@@ -454,6 +474,7 @@ function resetOctaveOverlayUI() {
   lastOctaveTarget = null;
   octaveOverlayLock = false;
   octaveControls.style.display = "none";
+  microControls.style.display = "none";
 }
 let scale = { root: 0, mode: "major" };
 let deviceNames = Array.from({ length: 9 }, (_, i) => (i === 0 ? null : `${i}`));
@@ -508,7 +529,7 @@ let externalStartSent = false;
 let autoStartPending = false;
 let autoStartFirstMs = 0;
 let autoStartTicks = 0;
-let transportTick = 0;
+let transportTickExt = 0;
 let deviceTabProgressRaf = null;
 let deviceTabProgressCssWidth = 0;
 let deviceTabProgressCssHeight = 0;
@@ -866,8 +887,8 @@ function connectWS() {
       if (msg.ledLevels) ledLevels = { ...ledLevels, ...msg.ledLevels };
       if (msg.clockInput) clockInputId = msg.clockInput;
       if (clockSource === "internal" && running) {
-        internalTickPeriodSec = 60 / (tempo * PPQN);
-        internalStartTimeSec = getNowSec() - transportTick * internalTickPeriodSec;
+        internalTickPeriodSec = 60 / (tempo * PPQN_EXT);
+        internalStartTimeSec = getNowSec() - transportTickExt * internalTickPeriodSec;
       }
       if (msg.mdTracks) {
         mdTracks = msg.mdTracks.map((t, idx) => {
@@ -913,6 +934,8 @@ function connectWS() {
       updateSwing(swing, { broadcast: false });
     } else if (msg.type === "octave_overlay") {
       handleOctaveOverlayMessage(msg);
+    } else if (msg.type === "micro_overlay") {
+      handleMicroOverlayMessage(msg);
     } else if (msg.type === "accent_overlay") {
       handleAccentOverlayMessage(msg);
     } else if (msg.type === "slide_overlay") {
@@ -984,7 +1007,7 @@ function connectWS() {
       if (typeof status.running === "boolean") setRunningState(status.running);
       if (status.clockSource) clockSource = status.clockSource;
       if (status.clockInput) clockInputId = status.clockInput;
-      if (Number.isFinite(status.tick)) transportTick = status.tick;
+      if (Number.isFinite(status.tick)) setTransportTickExt(status.tick);
       applyClockSourceUI();
     } else if (msg.type === "pattern_status") {
       if (typeof msg.page === "number") {
@@ -1001,6 +1024,7 @@ function connectWS() {
             lastOctaveTarget = null;
             octaveOverlayLock = false;
             octaveControls.style.display = "none";
+            microControls.style.display = "none";
           }
           applyPatternSelectUI();
           renderPatternRow();
@@ -1268,10 +1292,10 @@ function stop() {
 
 function startInternalTransport() {
   ensureScheduler();
-  internalTickPeriodSec = 60 / (tempo * PPQN);
+  internalTickPeriodSec = 60 / (tempo * PPQN_EXT);
   internalStartTimeSec = getNowSec();
   internalNextTick = 0;
-  transportTick = 0;
+  setTransportTickExt(0);
   scheduler?.clear();
   setRunningState(true);
   ws?.readyState === WebSocket.OPEN &&
@@ -1283,7 +1307,7 @@ function startInternalTransport() {
 function stopInternalTransport() {
   stopInternalClockLoop();
   setRunningState(false);
-  transportTick = 0;
+  setTransportTickExt(0);
   scheduler?.clear();
   ws?.readyState === WebSocket.OPEN &&
     ws.send(JSON.stringify({ type: "transport", action: "stop" }));
@@ -1322,11 +1346,36 @@ function audioTimeToPerfMs(timeSec) {
   return audioTimeOriginMs + timeSec * 1000;
 }
 
-function resolveTickTime(tick) {
+function extToIntTick(tExt) {
+  return tExt * INT_MULT;
+}
+
+function intToExtTick(tInt) {
+  return tInt / INT_MULT;
+}
+
+function setTransportTickExt(tickExt) {
+  transportTickExt = tickExt;
+}
+
+function resolveTickTime(tickInt) {
   if (clockSource === "internal" && internalTickPeriodSec > 0) {
-    return internalStartTimeSec + tick * internalTickPeriodSec;
+    return internalStartTimeSec + (tickInt / INT_MULT) * internalTickPeriodSec;
   }
-  return externalTickTimes.get(tick);
+  const tickExt = intToExtTick(tickInt);
+  const baseTickExt = Math.floor(tickExt);
+  const baseTime = externalTickTimes.get(baseTickExt);
+  const extTickPeriodSec = tempo > 0 ? 60 / (tempo * PPQN_EXT) : null;
+  if (Number.isFinite(baseTime) && Number.isFinite(extTickPeriodSec)) {
+    return baseTime + (tickExt - baseTickExt) * extTickPeriodSec;
+  }
+  if (clockSource === "external" && Number.isFinite(extTickPeriodSec)) {
+    if (Number.isFinite(lastExternalTickMs) && audioTimeOriginMs) {
+      const lastTickSec = (lastExternalTickMs - audioTimeOriginMs) / 1000;
+      return lastTickSec + (tickExt - transportTickExt) * extTickPeriodSec;
+    }
+  }
+  return baseTime;
 }
 
 function getNowSec() {
@@ -1361,8 +1410,8 @@ function stopInternalClockLoop() {
 }
 
 function handleInternalTick(tick, tickTimeSec) {
-  transportTick = tick;
-  if (tick % TICKS_PER_STEP === 0) {
+  setTransportTickExt(tick);
+  if (tick % TICKS_PER_STEP_EXT === 0) {
     ws?.readyState === WebSocket.OPEN &&
       ws.send(JSON.stringify({ type: "clockTicks", ticks: [{ tick, intervalMs: internalTickPeriodSec * 1000 }] }));
   }
@@ -1581,12 +1630,14 @@ function renderFrame(frame) {
   // overlays
   const now = Date.now();
   const currentOverlays = overlays[currentPage] || [];
-  // keep numeric octave overlays persistent; only age out non-numeric markers
+  // keep numeric octave overlays persistent; micro overlays expire
   const filtered = currentOverlays.filter((o) => {
     const isNumeric = /^[-+]?\d/.test(o.text);
     const drawY = getOverlayDrawY(o);
     if (drawY < 0 || drawY >= HEIGHT) return false;
+    if (Number.isFinite(o.expiresAt) && now > o.expiresAt) return false;
     const level = displayFrame[drawY * WIDTH + o.x] || 0;
+    if (o.kind === "micro") return true;
     if (!isNumeric && level <= 0) return false;
     if (isNumeric) return true;
     return (now - (o.ts || now)) < 1500;
@@ -1738,7 +1789,7 @@ function handleClockSourceChange(prev, next) {
     setRunningState(false);
     if (clockOutEnabled) sendMidiClockTransport("stop");
   }
-  transportTick = 0;
+  setTransportTickExt(0);
   externalTick = 0;
   externalTickTimes = new Map();
   lastExternalTickMs = null;
@@ -1909,7 +1960,7 @@ function handleClockMessage(evt) {
     autoStartPending = false;
     autoStartFirstMs = 0;
     autoStartTicks = 0;
-    transportTick = 0;
+    setTransportTickExt(0);
     scheduler?.clear();
     setRunningState(true);
     ws?.readyState === WebSocket.OPEN &&
@@ -1941,15 +1992,15 @@ function handleClockMessage(evt) {
   if (status === 0xfb) {
     setRunningState(true);
     ws?.readyState === WebSocket.OPEN &&
-      ws.send(JSON.stringify({ type: "transport", action: "continue", tick: transportTick }));
+      ws.send(JSON.stringify({ type: "transport", action: "continue", tick: transportTickExt }));
     if (clockOutEnabled) sendMidiClockTransport("start");
     log(`MIDI Continue from ${midiClockIn?.name || "clock in"}`);
     return;
   }
   if (status === 0xf2) {
     const spp = ((data2 || 0) << 7) | (data1 || 0);
-    const tick = spp * TICKS_PER_STEP;
-    transportTick = tick;
+    const tick = spp * TICKS_PER_STEP_EXT;
+    setTransportTickExt(tick);
     externalTick = tick;
     lastSentExternalTick = tick - 1;
     autoStartPending = false;
@@ -1970,7 +2021,7 @@ function handleClockMessage(evt) {
   const intervalMs = lastExternalTickMs ? (nowMs - lastExternalTickMs) : null;
   lastExternalTickMs = nowMs;
 
-  transportTick = externalTick;
+  setTransportTickExt(externalTick);
   if (externalTick <= lastSentExternalTick) {
     externalTick += 1;
     return;
@@ -1992,7 +2043,7 @@ function handleClockMessage(evt) {
     if (autoStartPending && !externalStartSent) {
       autoStartTicks += 1;
       const elapsed = nowMs - autoStartFirstMs;
-      const ready = elapsed >= 120 || autoStartTicks >= TICKS_PER_STEP;
+      const ready = elapsed >= 120 || autoStartTicks >= TICKS_PER_STEP_EXT;
       if (ready) {
         autoStartPending = false;
         externalStartSent = true;
@@ -2016,7 +2067,7 @@ function handleClockMessage(evt) {
   externalTick += 1;
 
   if (Number.isFinite(intervalMs)) {
-    const bpmEstimate = 60000 / (intervalMs * PPQN);
+    const bpmEstimate = 60000 / (intervalMs * PPQN_EXT);
     if (Number.isFinite(bpmEstimate)) {
       const smoothed = lastTempoMs ? (0.7 * lastTempoVal + 0.3 * bpmEstimate) : bpmEstimate;
       lastTempoMs = nowMs;
@@ -2897,19 +2948,23 @@ function renderTabs() {
   renderDeviceTabProgressFrame();
 }
 
-function getInterpolatedTransportTick() {
-  if (!running) return transportTick;
+function getInterpolatedTransportTickExt() {
+  if (!running) return transportTickExt;
   const nowSec = getNowSec();
   if (clockSource === "internal" && internalTickPeriodSec > 0) {
     return (nowSec - internalStartTimeSec) / internalTickPeriodSec;
   }
   if (clockSource === "external" && tempo > 0) {
-    if (!lastExternalTickMs || !audioTimeOriginMs) return transportTick;
+    if (!lastExternalTickMs || !audioTimeOriginMs) return transportTickExt;
     const lastTickSec = (lastExternalTickMs - audioTimeOriginMs) / 1000;
-    const tickPeriodSec = 60 / (tempo * PPQN);
-    return transportTick + Math.max(0, (nowSec - lastTickSec) / tickPeriodSec);
+    const tickPeriodSec = 60 / (tempo * PPQN_EXT);
+    return transportTickExt + Math.max(0, (nowSec - lastTickSec) / tickPeriodSec);
   }
-  return transportTick;
+  return transportTickExt;
+}
+
+function getInterpolatedTransportTickInt() {
+  return extToIntTick(getInterpolatedTransportTickExt());
 }
 
 function syncDeviceTabProgressCanvas() {
@@ -2954,9 +3009,9 @@ function renderDeviceTabProgressFrame(timeNow = performance.now()) {
   const dpr = window.devicePixelRatio || 1;
   deviceTabProgressCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
   deviceTabProgressCtx.clearRect(0, 0, canvasRect.width, TAB_PROGRESS_BAR_HEIGHT);
-  const transportTickNow = getInterpolatedTransportTick();
+  const transportTickNow = getInterpolatedTransportTickInt();
   const syncZeroTick = 0;
-  const beatTicks = PPQN;
+  const beatTicks = PPQN_INT;
   const beatIndex = Math.floor((transportTickNow - syncZeroTick) / beatTicks);
   const blinkOn = (beatIndex % 2) === 0;
   const baseBg = getCssVar("--panel-strong", "#424242");
@@ -3066,7 +3121,7 @@ function drawDeviceTabProgress(ctx, tabRect, deviceState, transportTickNow, time
     return;
   }
   if (!deviceState.isPlaying || !deviceState.hasPattern) return;
-  const patternTicks = Math.max(1, lengthSteps * TICKS_PER_STEP * (deviceState.timeScale || 1));
+  const patternTicks = Math.max(1, lengthSteps * TICKS_PER_STEP_INT * (deviceState.timeScale || 1));
   const baseTick = transportTickNow - deviceState.syncZeroTick;
   const mod = ((baseTick % patternTicks) + patternTicks) % patternTicks;
   const phase = mod / patternTicks;
@@ -3494,6 +3549,7 @@ canvas.addEventListener("mousemove", (e) => {
   if (x < 0 || x >= WIDTH || y < 0 || y >= HEIGHT) {
     hoveredStep = null;
     if (!isOverOctaveControls) octaveControls.style.display = "none";
+    if (!isOverMicroControls) microControls.style.display = "none";
     return;
   }
   const seqType = sequencerTypes[currentPage] || "mono";
@@ -3502,6 +3558,7 @@ canvas.addEventListener("mousemove", (e) => {
   if (!inStepRows || !allowedSeq) {
     hoveredStep = null;
     if (!isOverOctaveControls) octaveControls.style.display = "none";
+    if (!isOverMicroControls) microControls.style.display = "none";
     return;
   }
 
@@ -3511,11 +3568,13 @@ canvas.addEventListener("mousemove", (e) => {
   if (!running && playVal > 0 && val === playVal) {
     hoveredStep = null;
     if (!isOverOctaveControls) octaveControls.style.display = "none";
+    if (!isOverMicroControls) microControls.style.display = "none";
     return;
   }
   if (val <= 0) {
     hoveredStep = null;
     if (!isOverOctaveControls) octaveControls.style.display = "none";
+    if (!isOverMicroControls) microControls.style.display = "none";
     return;
   }
 
@@ -3525,6 +3584,7 @@ canvas.addEventListener("mousemove", (e) => {
 
   if (octaveControls.style.display === "flex" && movedCell && !isOverOctaveControls) {
     octaveControls.style.display = "none";
+    if (!isOverMicroControls) microControls.style.display = "none";
   }
 
   octaveHoverTimer = setTimeout(() => {
@@ -3547,8 +3607,9 @@ canvas.addEventListener("mouseleave", () => {
   }
   if (octaveHideTimer) clearTimeout(octaveHideTimer);
   octaveHideTimer = setTimeout(() => {
-    if (!isOverOctaveControls) {
+    if (!isOverOctaveControls && !isOverMicroControls) {
       octaveControls.style.display = "none";
+      microControls.style.display = "none";
       hoveredStep = null;
     }
   }, 300);
@@ -3567,6 +3628,15 @@ function nudgeStepOctave(delta) {
   ws?.readyState === WebSocket.OPEN && ws.send(JSON.stringify({ type: "set_step_octave", x, y, delta }));
 }
 
+function nudgeStepMicro(delta) {
+  const target = hoveredStep || lastOctaveTarget;
+  if (!target) return;
+  const { x, y } = target;
+  const msg = { page: currentPage, x, y, microOffset: delta, delta };
+  handleMicroOverlayMessage(msg);
+  ws?.readyState === WebSocket.OPEN && ws.send(JSON.stringify({ type: "set_step_micro", x, y, delta }));
+}
+
 function showOctaveControls(hover) {
   if (!hover) return;
   const { x, y, rectLeft, rectTop, scaleX, scaleY } = hover;
@@ -3576,6 +3646,7 @@ function showOctaveControls(hover) {
   const hasDown = y < getStepRows() - 1;
   if (!hasUp && !hasDown) {
     if (!isOverOctaveControls) octaveControls.style.display = "none";
+    if (!isOverMicroControls) microControls.style.display = "none";
     return;
   }
   const btnSize = 24 * scaleX;
@@ -3607,6 +3678,39 @@ function showOctaveControls(hover) {
   octaveControls.style.left = `${centerX - btnSize / 2}px`;
   octaveControls.style.top = `${top}px`;
   octaveControls.style.display = "flex";
+  showMicroControls(hover);
+}
+
+function showMicroControls(hover) {
+  if (!hover) return;
+  const { x, y, rectLeft, rectTop, scaleX, scaleY } = hover;
+  hoveredStep = { x, y };
+  lastOctaveTarget = { x, y };
+  const hasLeft = x > 0;
+  const hasRight = x < WIDTH - 1;
+  if (!hasLeft && !hasRight) {
+    if (!isOverMicroControls) microControls.style.display = "none";
+    return;
+  }
+  const btnSize = 24 * scaleX;
+  const distX = (CELL_SIZE + CELL_GAP) * scaleX;
+  const count = (hasLeft ? 1 : 0) + (hasRight ? 1 : 0);
+  const gapPx = count > 1 ? Math.max(0, 2 * distX - btnSize) : 0;
+  microControls.style.columnGap = `${gapPx}px`;
+  [microLeftBtn, microRightBtn].forEach((btn) => {
+    if (btn) {
+      btn.style.width = `${btnSize}px`;
+      btn.style.height = `${btnSize}px`;
+    }
+  });
+  if (microLeftBtn) microLeftBtn.style.display = hasLeft ? "flex" : "none";
+  if (microRightBtn) microRightBtn.style.display = hasRight ? "flex" : "none";
+  const rowWidth = btnSize * count + gapPx * Math.max(0, count - 1);
+  const centerX = rectLeft + (x * (CELL_SIZE + CELL_GAP) + CELL_SIZE / 2) * scaleX;
+  const centerY = rectTop + (y * (CELL_SIZE + CELL_GAP) + CELL_SIZE / 2) * scaleY;
+  microControls.style.left = `${centerX - rowWidth / 2}px`;
+  microControls.style.top = `${centerY - btnSize / 2}px`;
+  microControls.style.display = "flex";
 }
 
 function showOctaveControlsFromOverlay(msg) {
@@ -3638,6 +3742,8 @@ function showOctaveControlsFromOverlay(msg) {
 
 if (octaveUpBtn) octaveUpBtn.onclick = () => nudgeStepOctave(1);
 if (octaveDownBtn) octaveDownBtn.onclick = () => nudgeStepOctave(-1);
+if (microLeftBtn) microLeftBtn.onclick = () => nudgeStepMicro(-1);
+if (microRightBtn) microRightBtn.onclick = () => nudgeStepMicro(1);
 octaveControls.addEventListener("mouseenter", () => {
   isOverOctaveControls = true;
   if (octaveHideTimer) {
@@ -3650,6 +3756,7 @@ octaveControls.addEventListener("mouseleave", () => {
   if (octaveHideTimer) clearTimeout(octaveHideTimer);
   octaveHideTimer = setTimeout(() => {
     if (!hoveredStep) octaveControls.style.display = "none";
+    if (!hoveredStep) microControls.style.display = "none";
   }, 150);
 });
 octaveControls.addEventListener("click", (e) => {
@@ -3660,6 +3767,20 @@ octaveControls.addEventListener("contextmenu", (e) => {
   if (e.target !== octaveControls) return;
   e.preventDefault();
   handleCanvasContextMenu(e.clientX, e.clientY);
+});
+microControls.addEventListener("mouseenter", () => {
+  isOverMicroControls = true;
+  if (microHideTimer) {
+    clearTimeout(microHideTimer);
+    microHideTimer = null;
+  }
+});
+microControls.addEventListener("mouseleave", () => {
+  isOverMicroControls = false;
+  if (microHideTimer) clearTimeout(microHideTimer);
+  microHideTimer = setTimeout(() => {
+    if (!hoveredStep) microControls.style.display = "none";
+  }, 150);
 });
 
 connectWS();
@@ -3768,13 +3889,39 @@ function addOverlay(page, x, y, octave, delta) {
     if (!/^[-+]?\d/.test(o.text)) return true;
     return !(o.x === x && getOverlayRawY(o) === y);
   });
-  overlays[pageIdx].push({ x, y, rawY: y, octave: val, text, ts });
+  overlays[pageIdx].push({ x, y, rawY: y, octave: val, text, ts, kind: "octave" });
+  if (pageIdx === currentPage) renderFrame(frames[currentPage]);
+}
+
+function addMicroOverlay(page, x, y, microOffset, delta, octave) {
+  const pageIdx = Number.isFinite(page) ? page : currentPage;
+  if (!overlays[pageIdx]) overlays[pageIdx] = [];
+  const rawVal = Number.isFinite(microOffset) ? microOffset : (Number.isFinite(delta) ? delta : 0);
+  if (!rawVal) {
+    overlays[pageIdx] = overlays[pageIdx].filter((o) => !(o.kind === "micro" && o.x === x && getOverlayRawY(o) === y));
+    if (pageIdx === currentPage) renderFrame(frames[currentPage]);
+    return;
+  }
+  const text = rawVal > 0 ? `+${rawVal}` : `${rawVal}`;
+  const ts = Date.now();
+  overlays[pageIdx] = overlays[pageIdx].filter((o) => !(o.kind === "micro" && o.x === x && getOverlayRawY(o) === y));
+  overlays[pageIdx].push({
+    x,
+    y,
+    rawY: y,
+    text,
+    ts,
+    kind: "micro",
+    octave: Number.isFinite(octave) ? octave : undefined,
+    expiresAt: ts + 2000
+  });
   if (pageIdx === currentPage) renderFrame(frames[currentPage]);
 }
 
 function clearOverlayAt(pageIdx, x, y) {
   if (!overlays[pageIdx]) overlays[pageIdx] = [];
   overlays[pageIdx] = overlays[pageIdx].filter((o) => {
+    if (o.kind === "micro") return true;
     if (!/^[-+]?\d/.test(o.text)) return true;
     return !(o.x === x && getOverlayRawY(o) === y);
   });
@@ -3789,6 +3936,7 @@ function handleOctaveOverlayMessage(msg) {
     lastOctaveTarget = null;
     octaveOverlayLock = false;
     octaveControls.style.display = "none";
+    microControls.style.display = "none";
     return;
   }
   if (msg.clear) {
@@ -3802,6 +3950,7 @@ function handleOctaveOverlayMessage(msg) {
     lastOctaveTarget = null;
     octaveOverlayLock = false;
     octaveControls.style.display = "none";
+    microControls.style.display = "none";
     return;
   }
   const val = Number.isFinite(msg.octave) ? msg.octave : (Number.isFinite(msg.delta) ? msg.delta : 0);
@@ -3819,6 +3968,12 @@ function handleOctaveOverlayMessage(msg) {
       showOctaveControlsFromOverlay(msg);
     }
   }
+}
+
+function handleMicroOverlayMessage(msg) {
+  const pageIdx = Number.isFinite(msg.page) ? msg.page : currentPage;
+  const rawY = Number.isFinite(msg.rawY) ? msg.rawY : unmapOverlayY(msg.y, 0, fullScaleMode);
+  addMicroOverlay(pageIdx, msg.x, rawY, msg.microOffset, msg.delta, msg.octave);
 }
 
 function handleAccentOverlayMessage(msg) {
@@ -3875,6 +4030,7 @@ function handleStepStateMessage(msg) {
     if (!msg.on) {
       hoveredStep = null;
       if (!isOverOctaveControls) octaveControls.style.display = "none";
+      if (!isOverMicroControls) microControls.style.display = "none";
       return;
     }
     hoveredStep = { x: msg.x, y: msg.y };
@@ -4235,6 +4391,9 @@ function getOverlayDrawY(overlay) {
   if (!Number.isFinite(rawY)) return overlay?.y ?? 0;
   if (Number.isFinite(overlay?.octave)) {
     return mapOverlayY(rawY, overlay.octave, fullScaleMode);
+  }
+  if (overlay?.kind === "micro" && fullScaleMode) {
+    return mapOverlayY(rawY, 0, fullScaleMode);
   }
   return rawY;
 }

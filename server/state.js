@@ -1,6 +1,11 @@
 // Base pitch for degree 0, octave 0 (C3). Raised one octave.
 const BASE_PITCH = 48;
 const DEFAULT_CC = 1;
+const PPQN_EXT = 24;
+const PPQN_INT = 96;
+const INT_MULT = PPQN_INT / PPQN_EXT;
+const TICKS_PER_STEP_EXT = PPQN_EXT / 4;
+const TICKS_PER_STEP_INT = TICKS_PER_STEP_EXT * INT_MULT;
 const PATTERN_CONTROL_BUTTON = 15; // bottom-row button to enter pattern control view (x index)
 const BASE_DEFAULT_DEVICE_COLOR = "#ffe070";
 const DEFAULT_DEVICE_COLORS = Array(8).fill(BASE_DEFAULT_DEVICE_COLOR);
@@ -26,6 +31,14 @@ const MDTONAL_TRACKS = [
 
 function clamp(val, min, max) {
   return Math.max(min, Math.min(max, val));
+}
+
+function extToIntTick(tExt) {
+  return tExt * INT_MULT;
+}
+
+function intToExtTick(tInt) {
+  return tInt / INT_MULT;
 }
 
 function safeColor(color, fallback = BASE_DEFAULT_DEVICE_COLOR) {
@@ -145,7 +158,7 @@ export class SGridState {
   makeEmptyPattern() {
     const steps = [];
     for (let i = 0; i < 128; i++) {
-      steps.push({ on: false, degree: 0, octave: 0, micro: 0, accent: false, slide: false, mdSlide: false, tie: false, notes: [], accented: [], noteOctaves: {}, cc: 0 });
+      steps.push({ on: false, degree: 0, octave: 0, micro: 0, accent: false, slide: false, mdSlide: false, tie: false, notes: [], accented: [], noteOctaves: {}, noteMicros: {}, cc: 0 });
     }
     return {
       length_steps: 16,
@@ -221,6 +234,26 @@ export class SGridState {
       const deg = clamp(Math.round(degNum), 0, 6);
       const oct = clamp(Math.round(Number(octRaw) || 0), -3, 4);
       res[deg] = oct;
+    });
+    return res;
+  }
+
+  normalizeMicroValue(microRaw, opts = {}) {
+    const legacy = !!opts.legacy;
+    const raw = Math.round(Number(microRaw) || 0);
+    const converted = legacy ? Math.round(raw / INT_MULT) : raw;
+    return this.clampMicro(converted);
+  }
+
+  sanitizeNoteMicros(noteMicros, opts = {}) {
+    const res = {};
+    if (!noteMicros || typeof noteMicros !== "object") return res;
+    Object.entries(noteMicros).forEach(([degRaw, microRaw]) => {
+      const degNum = Number(degRaw);
+      if (!Number.isFinite(degNum)) return;
+      const safeDeg = clamp(Math.round(degNum), 0, 6);
+      const safeMicro = this.normalizeMicroValue(microRaw, opts);
+      if (safeMicro) res[safeDeg] = safeMicro;
     });
     return res;
   }
@@ -579,13 +612,14 @@ export class SGridState {
             on: !!s.on,
             degree: s.degree || 0,
             octave: s.octave || 0,
-            micro: s.micro || 0,
+            micro: this.clampMicro(s.micro || 0),
             accent: !!s.accent,
             slide: !!s.slide,
             cc: clamp(Math.round(s.cc || 0), 0, 127),
             notes: Array.isArray(s.notes) ? s.notes.slice() : [],
             accented: Array.isArray(s.accented) ? s.accented.slice() : [],
-            noteOctaves: this.sanitizeNoteOctaves(s.noteOctaves)
+            noteOctaves: this.sanitizeNoteOctaves(s.noteOctaves),
+            noteMicros: this.sanitizeNoteMicros(s.noteMicros)
           }))
         };
       });
@@ -609,6 +643,7 @@ export class SGridState {
       tempo: this.tempo,
       swing: this.swing,
       baseDivision: this.baseDivision,
+      microFormat: "int96",
       scale: this.scale,
       currentPage: this.currentPage,
       sequencerTypes: this.pages.map((p, idx) => (idx === 0 ? null : p?.sequencerType || "mono")),
@@ -628,6 +663,7 @@ export class SGridState {
 
   loadSnapshot(snap) {
     if (!snap || typeof snap !== "object") return false;
+    const legacyMicro = snap.microFormat !== "int96";
     if (typeof snap.setName === "string") {
       this.setSetName(snap.setName);
     }
@@ -717,14 +753,15 @@ export class SGridState {
             on: !!ss.on,
             degree: clamp(ss.degree || 0, 0, 6),
             octave: clamp(ss.octave || 0, -3, 4),
-            micro: ss.micro || 0,
+            micro: this.normalizeMicroValue(ss.micro || 0, { legacy: legacyMicro }),
             accent: !!ss.accent,
             slide: !!ss.slide,
             tie: !!ss.tie,
             cc: clamp(Math.round(ss.cc || 0), 0, 127),
             notes: Array.isArray(ss.notes) ? ss.notes.map((n) => clamp(n, 0, 6)) : [],
             accented: Array.isArray(ss.accented) ? ss.accented.map((n) => clamp(n, 0, 6)) : [],
-            noteOctaves: this.sanitizeNoteOctaves(ss.noteOctaves)
+            noteOctaves: this.sanitizeNoteOctaves(ss.noteOctaves),
+            noteMicros: this.sanitizeNoteMicros(ss.noteMicros, { legacy: legacyMicro })
           };
         }
       }
@@ -908,6 +945,7 @@ export class SGridState {
         const currentAction = heldInfo?.action || null;
         const sameCell = this.heldStep && this.heldStep.x === x && this.heldStep.y === y;
         const upDownNeighbor = this.heldStep && this.heldStep.x === x && Math.abs(this.heldStep.y - y) === 1;
+        const leftNeighbor = this.heldStep && this.heldStep.x - 1 === x && this.heldStep.y === y;
         // slide can come from any press in the immediate right column, as long as that step is active
         const rightNeighbor = this.heldStep && this.heldStep.x + 1 === x;
         let inEdit = this.heldStep && (heldInfo?.editMode || heldDuration >= 150);
@@ -928,14 +966,57 @@ export class SGridState {
         if (inEdit && heldInfo?.actionDone) {
           return null;
         }
-        if (inEdit && !(sameCell || upDownNeighbor || rightNeighbor)) {
+        const microEditActive = !!heldInfo?.microEdit;
+        if (inEdit && !(sameCell || upDownNeighbor || leftNeighbor || rightNeighbor)) {
           return null;
         }
         const seqTypeSlide = page?.sequencerType || "mono";
         const slideAllowed = seqTypeSlide === "mono" &&
-          inEdit && rightNeighbor && heldStepObj?.on && (!currentAction || currentAction === "slide");
+          inEdit && rightNeighbor && heldStepObj?.on && !microEditActive && (!currentAction || currentAction === "slide");
         const mdSlideAllowed = seqTypeSlide === "mdtonal" &&
-          inEdit && rightNeighbor && heldStepObj?.on && (!currentAction || currentAction === "mdslide");
+          inEdit && rightNeighbor && heldStepObj?.on && !microEditActive && (!currentAction || currentAction === "mdslide");
+        const microActivateAllowed = inEdit && leftNeighbor && heldStepObj?.on && (!currentAction || currentAction === "micro");
+        if (microActivateAllowed && heldInfo && !microEditActive) {
+          heldInfo.action = "micro";
+          heldInfo.actionDone = false;
+          heldInfo.microEdit = true;
+          this.keyHolds.set(heldKey, heldInfo);
+          this.forceLedRefresh = true;
+          if (typeof this.requestRender === "function") this.requestRender();
+          return null;
+        }
+        const microNudgeAllowed = inEdit && microEditActive && heldStepObj?.on && (leftNeighbor || rightNeighbor);
+        if (microNudgeAllowed) {
+          const delta = leftNeighbor ? -1 : 1;
+          if (heldInfo) {
+            heldInfo.action = "micro";
+            heldInfo.actionDone = false;
+            heldInfo.microEdit = true;
+            this.keyHolds.set(heldKey, heldInfo);
+          }
+          const res = this.setStepMicroOffset(this.heldStep.x, this.heldStep.y, delta, { uiMode });
+          if (res) {
+            this.heldStepModified = true;
+            this.forceLedRefresh = true;
+            if (typeof this.requestRender === "function") this.requestRender();
+            const seqTypeHeld = page?.sequencerType || "mono";
+            const heldDeg = this.holdTargetDegree != null ? clamp(this.holdTargetDegree, 0, 6) : clamp(6 - this.heldStep.y, 0, 6);
+            const heldOct = (seqTypeHeld === "poly" || seqTypeHeld === "drum")
+              ? this.getNoteOctave(heldStepObj, heldDeg)
+              : (heldStepObj?.octave || 0);
+            const rawY = uiMode ? (this.heldStep.y === 0 ? 6 : this.heldStep.y - 1) : this.heldStep.y;
+            return {
+              type: "micro",
+              x: this.heldStep.x,
+              y: this.heldStep.y,
+              rawY,
+              octave: heldOct,
+              microOffset: res.microOffset,
+              delta: res.delta
+            };
+          }
+          return null;
+        }
         if (slideAllowed) {
           heldStepObj.slide = !heldStepObj.slide;
           if (heldInfo) {
@@ -958,7 +1039,7 @@ export class SGridState {
           this.heldStepModified = true;
           return { type: "slide", x: this.heldStep.x, y: this.heldStep.y, slide: heldStepObj.mdSlide };
         }
-        const allowNeighborGesture = inEdit && wasOn && upDownNeighbor && (!currentAction || currentAction === "octave") && (page?.sequencerType || "mono") !== "drum";
+        const allowNeighborGesture = inEdit && wasOn && upDownNeighbor && !microEditActive && (!currentAction || currentAction === "octave") && (page?.sequencerType || "mono") !== "drum";
         if (allowNeighborGesture) {
           if (heldInfo) {
             heldInfo.action = "octave";
@@ -976,7 +1057,15 @@ export class SGridState {
           const now = Date.now();
           const seqTypeCur = page?.sequencerType || "mono";
           const noteWasOn = this.noteMatchesRow(step, targetDegree, seqTypeCur, rowInfo);
-          this.keyHolds.set(key, { start: now, wasOn: noteWasOn, editMode: false, action: null, actionDone: false });
+          this.keyHolds.set(key, {
+            start: now,
+            wasOn: noteWasOn,
+            editMode: false,
+            action: null,
+            actionDone: false,
+            microEdit: false,
+            uiMode
+          });
           this.holdStart = now;
           // schedule entry into edit mode after hold threshold
           const timer = setTimeout(() => {
@@ -1039,6 +1128,14 @@ export class SGridState {
             if (!Object.prototype.hasOwnProperty.call(step.noteOctaves, targetDegree)) {
               step.noteOctaves[targetDegree] = uiMode ? targetOctave : (step.octave || 0);
             }
+            if (!step.noteMicros || typeof step.noteMicros !== "object") step.noteMicros = {};
+            if (!Object.prototype.hasOwnProperty.call(step.noteMicros, targetDegree)) {
+              step.noteMicros[targetDegree] = 0;
+            }
+            if (!step.noteMicros || typeof step.noteMicros !== "object") step.noteMicros = {};
+            if (!Object.prototype.hasOwnProperty.call(step.noteMicros, targetDegree)) {
+              step.noteMicros[targetDegree] = 0;
+            }
           } else {
             step.degree = targetDegree;
             step.notes = [targetDegree];
@@ -1078,6 +1175,10 @@ export class SGridState {
             if (!step.noteOctaves || typeof step.noteOctaves !== "object") step.noteOctaves = {};
             if (!Object.prototype.hasOwnProperty.call(step.noteOctaves, targetDegree)) {
               step.noteOctaves[targetDegree] = uiMode ? targetOctave : (step.octave || 0);
+            }
+            if (!step.noteMicros || typeof step.noteMicros !== "object") step.noteMicros = {};
+            if (!Object.prototype.hasOwnProperty.call(step.noteMicros, targetDegree)) {
+              step.noteMicros[targetDegree] = 0;
             }
           } else {
             step.degree = targetDegree;
@@ -1137,7 +1238,7 @@ export class SGridState {
         }
         const targetDeg = rowInfo.degree;
         // long press toggles accent
-        if (duration >= 150 && holdInfo?.wasOn && step2.on && !holdInfo?.octaveChanged && !holdInfo?.slideTriggered && (!holdInfo?.action || holdInfo.action === "accent")) {
+        if (!holdInfo?.editMode && duration >= 150 && holdInfo?.wasOn && step2.on && !holdInfo?.octaveChanged && !holdInfo?.slideTriggered && (!holdInfo?.action || holdInfo.action === "accent")) {
           if (seqType === "poly" || seqType === "drum") {
             if (!Array.isArray(step2.accented)) step2.accented = [];
             const idx = step2.accented.indexOf(targetDeg);
@@ -1153,8 +1254,23 @@ export class SGridState {
           return { type: "accent", x: hx, y: hy, accent: seqType === "poly" ? step2.accented.includes(targetDeg) : step2.accent };
         }
         if (this.heldStepModified) {
-          this.heldStepModified = false;
-          return null;
+          const noEditAction = holdInfo?.editMode
+            && !holdInfo?.action
+            && !holdInfo?.actionDone
+            && !holdInfo?.octaveChanged
+            && !holdInfo?.slideTriggered;
+          const actionBlocksClear = !noEditAction && (holdInfo?.action === "micro"
+            || holdInfo?.action === "slide"
+            || holdInfo?.action === "mdslide"
+            || holdInfo?.octaveChanged
+            || holdInfo?.slideTriggered);
+          if (actionBlocksClear) {
+            this.heldStepModified = false;
+            return null;
+          }
+          if (noEditAction) {
+            this.heldStepModified = false;
+          }
         }
         if (!holdInfo?.wasOn && step2.on) {
           // if we just turned it on this press, leave it on
@@ -1176,6 +1292,9 @@ export class SGridState {
               if (Array.isArray(step2.accented)) step2.accented = step2.accented.filter((n) => n !== targetDeg);
               if (step2.noteOctaves && typeof step2.noteOctaves === "object") {
                 delete step2.noteOctaves[targetDeg];
+              }
+              if (step2.noteMicros && typeof step2.noteMicros === "object") {
+                delete step2.noteMicros[targetDeg];
               }
               if (prevOct) {
                 const clearY = clamp(6 - targetDeg, 0, 6);
@@ -1284,6 +1403,7 @@ export class SGridState {
       exists: !!step,
       on: isNoteOn,
       octave: this.getNoteOctave(step, degree),
+      microOffset: this.getNoteMicroOffset(step, degree, seqType),
       accent,
       slide: !!step?.[slideProp],
       seqType,
@@ -1359,6 +1479,23 @@ export class SGridState {
     step.octave = nextOct;
     this.enqueueOctaveOverlay({ page: this.currentPage, x, y, octave: step.octave, delta: delta || 0 });
     return { octave: step.octave, delta: delta || 0 };
+  }
+
+  setStepMicroOffset(x, y, delta, opts = {}) {
+    const pat = this.getPattern();
+    const page = this.pages[this.currentPage];
+    const seqType = page?.sequencerType || "mono";
+    const rowInfo = this.getRowInfo(y, opts);
+    if (!pat || !rowInfo.stepRow) return null;
+    const abs = x + (pat.barView || 0) * 16;
+    if (abs < 0 || abs >= pat.steps.length) return null;
+    const step = pat.steps[abs];
+    if (!this.noteMatchesRow(step, rowInfo.degree, seqType, rowInfo)) return null;
+    const degree = rowInfo.degree;
+    const current = this.getNoteMicroOffset(step, degree, seqType);
+    const next = this.setNoteMicroOffset(step, degree, seqType, current + (delta || 0));
+    if (next === current) return null;
+    return { microOffset: next, delta: delta || 0 };
   }
 
   toggleOrSetPattern(n) {
@@ -1550,6 +1687,7 @@ export class SGridState {
         step.octave = 0;
         step.micro = 0;
         step.noteOctaves = {};
+        step.noteMicros = {};
       }
       this.heldStep = null;
       this.heldStepModified = false;
@@ -1630,6 +1768,9 @@ export class SGridState {
         step.notes = step.notes.filter((n) => n !== tgt);
         if (Array.isArray(step.accented)) step.accented = step.accented.filter((n) => n !== tgt);
         delete step.noteOctaves[tgt];
+        if (step.noteMicros && typeof step.noteMicros === "object") {
+          delete step.noteMicros[tgt];
+        }
         if (!step.notes.length) {
           this.clearStep(pat, abs);
         } else {
@@ -1646,6 +1787,8 @@ export class SGridState {
       step.accent = false;
       step.slide = false; // slides disabled in poly
       if (!Object.prototype.hasOwnProperty.call(step.noteOctaves, tgt)) step.noteOctaves[tgt] = 0;
+      if (!step.noteMicros || typeof step.noteMicros !== "object") step.noteMicros = {};
+      if (!Object.prototype.hasOwnProperty.call(step.noteMicros, tgt)) step.noteMicros[tgt] = 0;
       if (!Array.isArray(step.accented)) step.accented = [];
       return null;
     } else {
@@ -1682,6 +1825,7 @@ export class SGridState {
     step.notes = [];
     step.accented = [];
     step.noteOctaves = {};
+    step.noteMicros = {};
     // clear overlays for the notes that existed on this step
     const clears = [];
     if (prevNotes.length) {
@@ -1717,7 +1861,7 @@ export class SGridState {
         on: !!s.on,
         degree: s.degree || 0,
         octave: s.octave || 0,
-        micro: s.micro || 0,
+        micro: this.clampMicro(s.micro || 0),
         accent: !!s.accent,
         slide: !!s.slide,
         tie: !!s.tie,
@@ -1725,7 +1869,8 @@ export class SGridState {
         mdSlide: !!s.mdSlide,
         notes: Array.isArray(s.notes) ? s.notes.slice() : [],
         accented: Array.isArray(s.accented) ? s.accented.slice() : [],
-        noteOctaves: this.sanitizeNoteOctaves(s.noteOctaves)
+        noteOctaves: this.sanitizeNoteOctaves(s.noteOctaves),
+        noteMicros: this.sanitizeNoteMicros(s.noteMicros)
       }))
     };
   }
@@ -1749,7 +1894,7 @@ export class SGridState {
         on: !!s.on,
         degree: clamp(s.degree || 0, 0, 6),
         octave: clamp(s.octave || 0, -3, 4),
-        micro: s.micro || 0,
+        micro: this.clampMicro(s.micro || 0),
         accent: !!s.accent,
         slide: !!s.slide,
         tie: !!s.tie,
@@ -1757,7 +1902,8 @@ export class SGridState {
         cc: clamp(Math.round(s.cc || 0), 0, 127),
         notes: Array.isArray(s.notes) ? s.notes.map((n) => clamp(n, 0, 6)) : [],
         accented: Array.isArray(s.accented) ? s.accented.map((n) => clamp(n, 0, 6)) : [],
-        noteOctaves: this.sanitizeNoteOctaves(s.noteOctaves)
+        noteOctaves: this.sanitizeNoteOctaves(s.noteOctaves),
+        noteMicros: this.sanitizeNoteMicros(s.noteMicros)
       };
     }
     if (pattern === pg.active_pattern) {
@@ -1799,7 +1945,7 @@ export class SGridState {
         on: !!s.on,
         degree: clamp(s.degree || 0, 0, 6),
         octave: clamp(s.octave || 0, -3, 4),
-        micro: s.micro || 0,
+        micro: this.clampMicro(s.micro || 0),
         accent: !!s.accent,
         slide: !!s.slide,
         tie: !!s.tie,
@@ -1807,7 +1953,8 @@ export class SGridState {
         cc: clamp(Math.round(s.cc || 0), 0, 127),
         notes: Array.isArray(s.notes) ? s.notes.map((n) => clamp(n, 0, 6)) : [],
         accented: Array.isArray(s.accented) ? s.accented.map((n) => clamp(n, 0, 6)) : [],
-        noteOctaves: this.sanitizeNoteOctaves(s.noteOctaves)
+        noteOctaves: this.sanitizeNoteOctaves(s.noteOctaves),
+        noteMicros: this.sanitizeNoteMicros(s.noteMicros)
       };
     }
   }
@@ -1910,11 +2057,20 @@ export class SGridState {
           const notes = Array.isArray(step.notes) ? step.notes : [];
           const newNotes = notes.map((n) => wrapDegree(n));
           const newOctaves = {};
+          const newMicros = {};
           if (step.noteOctaves && typeof step.noteOctaves === "object") {
             Object.entries(step.noteOctaves).forEach(([degRaw, oct]) => {
               const baseDeg = clamp(Math.round(Number(degRaw) || 0), 0, 6);
               const mapped = wrapDegree(baseDeg);
               newOctaves[mapped] = oct;
+            });
+          }
+          if (step.noteMicros && typeof step.noteMicros === "object") {
+            Object.entries(step.noteMicros).forEach(([degRaw, micro]) => {
+              const baseDeg = clamp(Math.round(Number(degRaw) || 0), 0, 6);
+              const mapped = wrapDegree(baseDeg);
+              const nextMicro = this.clampMicro(micro);
+              if (nextMicro) newMicros[mapped] = nextMicro;
             });
           }
           step.notes = newNotes;
@@ -1923,6 +2079,7 @@ export class SGridState {
             step.accented = step.accented.map((n) => wrapDegree(n));
           }
           step.noteOctaves = newOctaves;
+          step.noteMicros = newMicros;
         } else {
           const nextDeg = wrapDegree(step.degree || 0);
           step.degree = nextDeg;
@@ -1950,12 +2107,14 @@ export class SGridState {
     return changed;
   }
 
-  tick(follow = false, externalStepMs = null) {
+  tick(follow = false, externalStepMs = null, transportTick = null) {
     const barChanges = [];
     const barPlayheadChanges = [];
     const midiEvents = [];
     this.lastTickTime = Date.now();
     const currentTick = this.tickCount; // use pre-increment tick for alignment
+    const baseTickExt = Number.isFinite(transportTick) ? transportTick : (this.tickCount * TICKS_PER_STEP_EXT);
+    const baseTick = extToIntTick(baseTickExt);
     this.pulse = (currentTick % 4) === 0; // pulse on quarter notes (assuming 1/16 ticks)
     const isGlobalBarBoundary = (currentTick % 16) === 0;
     const patternSwitches = [];
@@ -2022,11 +2181,11 @@ export class SGridState {
         barPlayheadChanges.push({ page: p, pattern: page.active_pattern, bar: currentBar });
       }
       // skip a step if it was merged by a previous slide-to-same-note (mono only)
-      if (this.skipNextNote && this.skipNextNote[p] === stepPos) {
+      const skipCurrentStep = this.skipNextNote && this.skipNextNote[p] === stepPos;
+      if (skipCurrentStep) {
         delete this.skipNextNote[p];
         this.pageTickPos[p] = stepPos;
         this.playheads[p] = stepPos;
-        continue;
       }
       this.pageTickPos[p] = stepPos;
       this.playheads[p] = stepPos;
@@ -2039,205 +2198,451 @@ export class SGridState {
       if (skipMdNote) {
         delete this.skipNextMDNote[p];
       }
+      const baseDur = externalStepMs || this.stepDurationMs(1);
+      const swingAmt = Math.max(0, Math.min(0.5, (this.swing || 50) > 50 ? (this.swing - 50) / 60 : 0));
+      const swingOffsetTicks = (pos % 2 === 1) ? Math.round(TICKS_PER_STEP_INT * swingAmt) : 0;
+      const chan = clamp(this.midi[p]?.channel || 1, 1, 16);
       // Legacy mute path kept for reference:
       // if (page.muted) {
       //   // advance playhead but skip emitting notes
       // } else if (seqTypePlay === "mdtonal") { ... }
-      if (seqTypePlay === "mdtonal") {
-        if (step?.on) {
-          const baseDur = externalStepMs || this.stepDurationMs(1);
-          const swingAmt = Math.max(0, Math.min(0.5, (this.swing || 50) > 50 ? (this.swing - 50) / 60 : 0));
-          const delayMs = (pos % 2 === 1) ? Math.round(baseDur * swingAmt) : 0;
-          const trackCfg = this.mdTrackConfig(p);
-          const pageTranspose = this.pages[p]?.transpose || 0;
-          const value = this.mdCCFromDegree(step.degree || 0, pageTranspose, step.octave || 0);
-          if (value != null) {
-            const slideActive = step.mdSlide && nextStep?.on;
-            if (slideActive) {
-              const nextValue = this.mdCCFromDegree(nextStep.degree || 0, pageTranspose, nextStep.octave || 0);
-              const fromVal = value;
-              const targetVal = nextValue != null ? nextValue : value;
-              // ensure the first slide step sets its own pitch immediately
-              midiEvents.push({
-                type: "midi_cc",
-                page: p,
-                cc: trackCfg.ccNumber,
-                value: fromVal,
-                delayMs,
-                chan: trackCfg.ccChannel
-              });
-              this.mdGlideValue[p] = fromVal;
-              const glideEvents = this.mdGlide(p, fromVal, targetVal, delayMs + baseDur, this.mdBaseSweep);
-              glideEvents.forEach((ev) => {
+      if (!skipCurrentStep) {
+        if (seqTypePlay === "mdtonal") {
+          if (step?.on) {
+            const trackCfg = this.mdTrackConfig(p);
+            const pageTranspose = this.pages[p]?.transpose || 0;
+            const value = this.mdCCFromDegree(step.degree || 0, pageTranspose, step.octave || 0);
+            const microOffset = this.getNoteMicroOffset(step, step.degree || 0, seqTypePlay);
+            const eventTick = baseTick + swingOffsetTicks + microOffset;
+            const emit = microOffset >= 0;
+            const delayMs = 0;
+            if (value != null) {
+              const slideActive = step.mdSlide && nextStep?.on;
+              if (slideActive) {
+                const nextValue = this.mdCCFromDegree(nextStep.degree || 0, pageTranspose, nextStep.octave || 0);
+                const fromVal = value;
+                const targetVal = nextValue != null ? nextValue : value;
+                // ensure the first slide step sets its own pitch immediately
+                if (emit) {
+                  midiEvents.push({
+                    type: "midi_cc",
+                    page: p,
+                    tick: eventTick,
+                    cc: trackCfg.ccNumber,
+                    value: fromVal,
+                    delayMs,
+                    chan: trackCfg.ccChannel
+                  });
+                }
+                this.mdGlideValue[p] = fromVal;
+                const glideEvents = this.mdGlide(p, fromVal, targetVal, baseDur, this.mdBaseSweep);
+                if (emit) {
+                  glideEvents.forEach((ev) => {
+                    midiEvents.push({
+                      type: "midi_cc",
+                      page: p,
+                      tick: eventTick,
+                      cc: trackCfg.ccNumber,
+                      value: ev.value,
+                      delayMs: ev.delay,
+                      chan: trackCfg.ccChannel
+                    });
+                  });
+                }
+                this.skipNextMDNote = this.skipNextMDNote || {};
+                this.skipNextMDNote[p] = (pos + 1) % len;
+              } else {
+                if (emit) {
+                  midiEvents.push({
+                    type: "midi_cc",
+                    page: p,
+                    tick: eventTick,
+                    cc: trackCfg.ccNumber,
+                    value,
+                    delayMs,
+                    chan: trackCfg.ccChannel
+                  });
+                }
+                this.mdGlideValue[p] = value;
+              }
+              if (!skipMdNote) {
+                const noteDur = Math.max(1, Math.round(baseDur * 0.5 - this.noteOffEpsilonMs));
+                if (emit) {
+                  midiEvents.push({
+                    type: "midi_note",
+                    page: p,
+                    tick: eventTick,
+                    pitch: trackCfg.noteNumber,
+                    vel: step.accent ? 120 : 96,
+                    durMs: noteDur,
+                    delayMs,
+                    chan: trackCfg.noteChannel,
+                    accent: !!step.accent,
+                    td3Slide: false
+                  });
+                }
+              }
+            }
+          }
+        } else if (seqTypePlay === "cc") {
+          if (step?.on) {
+            const chan = clamp(this.midi[p]?.channel || 1, 1, 16);
+            const ccNum = clamp(Math.round(page.ccNumber ?? DEFAULT_CC), 0, 127);
+            const value = clamp(Math.round(step.cc ?? 0), 0, 127);
+            const microOffset = this.getNoteMicroOffset(step, step.degree || 0, seqTypePlay);
+            const eventTick = baseTick + swingOffsetTicks + microOffset;
+            const emit = microOffset >= 0;
+            if (emit) {
+              midiEvents.push({ type: "midi_cc", page: p, tick: eventTick, cc: ccNum, value, delayMs: 0, chan });
+            }
+          }
+        } else if (step?.on) {
+          // Note duration should stay at base 16th regardless of pattern time scale
+          {
+            const degrees = (seqTypePlay === "poly" || seqTypePlay === "drum") && Array.isArray(step.notes) && step.notes.length
+              ? step.notes
+              : [step.degree || 0];
+            const mode = (this.scale && this.scale.mode) || "major";
+            if (seqTypePlay === "mono") {
+              // DO NOT CHANGE LOGIC: TD-3 slide playback behavior depends on this exact block.
+              const pageTranspose = this.pages[p].transpose || 0;
+              const pitchCur = this.calcPitch(pat.root || 0, mode, step.degree || 0, step.octave || 0) + pageTranspose;
+              const prevSlidesHere = prevStep?.on && prevStep?.slide;
+              const isSlideStart = step.slide;
+              const chainLen = this.slideChainLength(pat, pos);
+              const noteVel = step.accent ? 120 : 96;
+              const microOffset = this.getNoteMicroOffset(step, step.degree || 0, seqTypePlay);
+              const eventTick = baseTick + swingOffsetTicks + microOffset;
+              const emit = microOffset >= 0;
+              if (prevSlidesHere) {
+                const pitchPrev = this.calcPitch(pat.root || 0, mode, prevStep.degree || 0, prevStep.octave || 0) + pageTranspose;
+                const samePitch = pitchPrev === pitchCur;
+                if (samePitch) {
+                  continue; // already held by previous slide gate
+                }
+                if (!step.slide) {
+                  const durMs = Math.max(1, Math.round(baseDur - this.noteOffEpsilonMs)); // slide ended; play target at normal length
+                  if (emit) {
+                    midiEvents.push({
+                      type: "midi_note",
+                      page: p,
+                      tick: eventTick,
+                      pitch: pitchCur,
+                      vel: noteVel,
+                      durMs,
+                      delayMs: 0,
+                      chan,
+                      accent: !!step.accent,
+                      td3Slide: false
+                    });
+                  }
+                  continue;
+                }
+                // Trim by swing/epsilon plus a small margin so the slide gate doesn't run past the following note.
+                const chainDurMs = baseDur * Math.max(1, chainLen);
+                const slidePad = this.monoSlidePad || 0;
+                const padMs = this.noteOffEpsilonMs + Math.round(chainDurMs * slidePad);
+                const durMs = Math.max(1, Math.round(chainDurMs - padMs));
+                if (emit) {
+                  midiEvents.push({
+                    type: "midi_note",
+                    page: p,
+                    tick: eventTick,
+                    pitch: pitchCur,
+                    vel: noteVel,
+                    durMs,
+                    delayMs: 0,
+                    chan,
+                    accent: !!step.accent,
+                    td3Slide: true
+                  });
+                }
+                continue;
+              }
+              if (isSlideStart) {
+                const chainDurMs = baseDur * Math.max(1, chainLen);
+                const slidePad = this.monoSlidePad || 0;
+                const padMs = this.noteOffEpsilonMs + Math.round(chainDurMs * slidePad);
+                const durMs = Math.max(1, Math.round(chainDurMs - padMs)); // hold through the chain without overshooting
+                if (emit) {
+                  midiEvents.push({
+                    type: "midi_note",
+                    page: p,
+                    tick: eventTick,
+                    pitch: pitchCur,
+                    vel: noteVel,
+                    durMs,
+                    delayMs: 0,
+                    chan,
+                    accent: !!step.accent,
+                    td3Slide: true
+                  });
+                }
+                continue;
+              }
+              if (step.tie) {
+                const durMs = baseDur * 2; // tie adds one step
+                if (emit) {
+                  midiEvents.push({
+                    type: "midi_note",
+                    page: p,
+                    tick: eventTick,
+                    pitch: pitchCur,
+                    vel: noteVel,
+                    durMs,
+                    delayMs: 0,
+                    chan,
+                    accent: !!step.accent,
+                    td3Slide: false
+                  });
+                }
+                this.skipNextNote = this.skipNextNote || {};
+                this.skipNextNote[p] = (pos + 1) % len;
+                continue;
+              }
+            }
+            degrees.forEach((deg) => {
+              let pitch;
+              if (seqTypePlay === "drum") {
+                const drumMap = Array.isArray(page.drumNotes) ? page.drumNotes : [];
+                pitch = drumMap[deg] ?? 36;
+              } else {
+                const pageTranspose = this.pages[p].transpose || 0;
+                const octave = seqTypePlay === "poly" ? this.getNoteOctave(step, deg) : this.getNoteOctave(step, deg || 0);
+                pitch = this.calcPitch(pat.root || 0, mode, deg || 0, octave) + pageTranspose;
+              }
+              const microOffset = this.getNoteMicroOffset(step, deg, seqTypePlay);
+              const eventTick = baseTick + swingOffsetTicks + microOffset;
+              const emit = microOffset >= 0;
+              const durMs = Math.max(1, Math.round(baseDur - this.noteOffEpsilonMs)); // default one step with slight shorten
+              const noteVel = (seqTypePlay === "poly" || seqTypePlay === "drum")
+                ? (Array.isArray(step.accented) && step.accented.includes(deg) ? 120 : 96)
+                : (step.accent ? 120 : 96);
+              const isAccent = noteVel >= 120;
+              if (emit) {
+                midiEvents.push({
+                  type: "midi_note",
+                  page: p,
+                  tick: eventTick,
+                  pitch,
+                  vel: noteVel,
+                  durMs,
+                  delayMs: 0,
+                  chan,
+                  accent: isAccent,
+                  td3Slide: false
+                });
+              }
+            });
+          }
+        }
+      }
+      const nextPos = (pos + 1) % len;
+      const nextStepObj = pat.steps[nextPos];
+      const nextSwingOffsetTicks = (nextPos % 2 === 1) ? Math.round(TICKS_PER_STEP_INT * swingAmt) : 0;
+      const nextBaseTick = baseTick + TICKS_PER_STEP_INT;
+      if (nextStepObj?.on) {
+        if (seqTypePlay === "mdtonal") {
+          if (!(this.skipNextMDNote && this.skipNextMDNote[p] === nextPos)) {
+            const trackCfg = this.mdTrackConfig(p);
+            const pageTranspose = this.pages[p]?.transpose || 0;
+            const value = this.mdCCFromDegree(nextStepObj.degree || 0, pageTranspose, nextStepObj.octave || 0);
+            const microOffset = this.getNoteMicroOffset(nextStepObj, nextStepObj.degree || 0, seqTypePlay);
+            if (microOffset < 0 && value != null) {
+              const eventTick = nextBaseTick + nextSwingOffsetTicks + microOffset;
+              const slideActive = nextStepObj.mdSlide && pat.steps[(nextPos + 1) % len]?.on;
+              if (slideActive) {
+                const nextValue = this.mdCCFromDegree(pat.steps[(nextPos + 1) % len]?.degree || 0, pageTranspose, pat.steps[(nextPos + 1) % len]?.octave || 0);
+                const fromVal = value;
+                const targetVal = nextValue != null ? nextValue : value;
                 midiEvents.push({
                   type: "midi_cc",
                   page: p,
+                  tick: eventTick,
                   cc: trackCfg.ccNumber,
-                  value: ev.value,
-                  delayMs: ev.delay,
+                  value: fromVal,
+                  delayMs: 0,
                   chan: trackCfg.ccChannel
                 });
-              });
-              this.skipNextMDNote = this.skipNextMDNote || {};
-              this.skipNextMDNote[p] = (pos + 1) % len;
-            } else {
-              midiEvents.push({
-                type: "midi_cc",
-                page: p,
-                cc: trackCfg.ccNumber,
-                value,
-                delayMs,
-                chan: trackCfg.ccChannel
-              });
-              this.mdGlideValue[p] = value;
-            }
-            if (!skipMdNote) {
+                const glideEvents = this.mdGlide(p, fromVal, targetVal, baseDur, this.mdBaseSweep);
+                glideEvents.forEach((ev) => {
+                  midiEvents.push({
+                    type: "midi_cc",
+                    page: p,
+                    tick: eventTick,
+                    cc: trackCfg.ccNumber,
+                    value: ev.value,
+                    delayMs: ev.delay,
+                    chan: trackCfg.ccChannel
+                  });
+                });
+              } else {
+                midiEvents.push({
+                  type: "midi_cc",
+                  page: p,
+                  tick: eventTick,
+                  cc: trackCfg.ccNumber,
+                  value,
+                  delayMs: 0,
+                  chan: trackCfg.ccChannel
+                });
+              }
               const noteDur = Math.max(1, Math.round(baseDur * 0.5 - this.noteOffEpsilonMs));
               midiEvents.push({
                 type: "midi_note",
                 page: p,
+                tick: eventTick,
                 pitch: trackCfg.noteNumber,
-                vel: step.accent ? 120 : 96,
+                vel: nextStepObj.accent ? 120 : 96,
                 durMs: noteDur,
-                delayMs,
+                delayMs: 0,
                 chan: trackCfg.noteChannel,
-                accent: !!step.accent,
+                accent: !!nextStepObj.accent,
                 td3Slide: false
               });
             }
           }
-        }
-      } else if (seqTypePlay === "cc") {
-        if (step?.on) {
-          const baseDur = externalStepMs || this.stepDurationMs(1);
-          const swingAmt = Math.max(0, Math.min(0.5, (this.swing || 50) > 50 ? (this.swing - 50) / 60 : 0));
-          const delayMs = (pos % 2 === 1) ? Math.round(baseDur * swingAmt) : 0;
-          const chan = clamp(this.midi[p]?.channel || 1, 1, 16);
-          const ccNum = clamp(Math.round(page.ccNumber ?? DEFAULT_CC), 0, 127);
-          const value = clamp(Math.round(step.cc ?? 0), 0, 127);
-          midiEvents.push({ type: "midi_cc", page: p, cc: ccNum, value, delayMs, chan });
-        }
-      } else if (step?.on) {
-        // Note duration should stay at base 16th regardless of pattern time scale
-        const baseDur = externalStepMs || this.stepDurationMs(1);
-        const swingAmt = Math.max(0, Math.min(0.5, (this.swing || 50) > 50 ? (this.swing - 50) / 60 : 0));
-        const delayMs = (pos % 2 === 1) ? Math.round(baseDur * swingAmt) : 0;
-        const chan = clamp(this.midi[p]?.channel || 1, 1, 16);
-        {
-          const degrees = (seqTypePlay === "poly" || seqTypePlay === "drum") && Array.isArray(step.notes) && step.notes.length
-            ? step.notes
-            : [step.degree || 0];
+        } else if (seqTypePlay === "cc") {
+          const microOffset = this.getNoteMicroOffset(nextStepObj, nextStepObj.degree || 0, seqTypePlay);
+          if (microOffset < 0) {
+            const eventTick = nextBaseTick + nextSwingOffsetTicks + microOffset;
+            const chan = clamp(this.midi[p]?.channel || 1, 1, 16);
+            const ccNum = clamp(Math.round(page.ccNumber ?? DEFAULT_CC), 0, 127);
+            const value = clamp(Math.round(nextStepObj.cc ?? 0), 0, 127);
+            midiEvents.push({ type: "midi_cc", page: p, tick: eventTick, cc: ccNum, value, delayMs: 0, chan });
+          }
+        } else {
+          const degrees = (seqTypePlay === "poly" || seqTypePlay === "drum") && Array.isArray(nextStepObj.notes) && nextStepObj.notes.length
+            ? nextStepObj.notes
+            : [nextStepObj.degree || 0];
           const mode = (this.scale && this.scale.mode) || "major";
           if (seqTypePlay === "mono") {
-            // DO NOT CHANGE LOGIC: TD-3 slide playback behavior depends on this exact block.
             const pageTranspose = this.pages[p].transpose || 0;
-            const pitchCur = this.calcPitch(pat.root || 0, mode, step.degree || 0, step.octave || 0) + pageTranspose;
-            const prevSlidesHere = prevStep?.on && prevStep?.slide;
-            const isSlideStart = step.slide;
-            const chainLen = this.slideChainLength(pat, pos);
-            const noteVel = step.accent ? 120 : 96;
-            if (prevSlidesHere) {
-              const pitchPrev = this.calcPitch(pat.root || 0, mode, prevStep.degree || 0, prevStep.octave || 0) + pageTranspose;
-              const samePitch = pitchPrev === pitchCur;
-              if (samePitch) {
-                continue; // already held by previous slide gate
-              }
-              if (!step.slide) {
-                const durMs = Math.max(1, Math.round(baseDur - this.noteOffEpsilonMs)); // slide ended; play target at normal length
+            const pitchCur = this.calcPitch(pat.root || 0, mode, nextStepObj.degree || 0, nextStepObj.octave || 0) + pageTranspose;
+            const prevSlidesHere = step?.on && step?.slide;
+            const isSlideStart = nextStepObj.slide;
+            const chainLen = this.slideChainLength(pat, nextPos);
+            const noteVel = nextStepObj.accent ? 120 : 96;
+            const microOffset = this.getNoteMicroOffset(nextStepObj, nextStepObj.degree || 0, seqTypePlay);
+            if (microOffset < 0 && !(this.skipNextNote && this.skipNextNote[p] === nextPos)) {
+              const eventTick = nextBaseTick + nextSwingOffsetTicks + microOffset;
+              if (prevSlidesHere) {
+                const pitchPrev = this.calcPitch(pat.root || 0, mode, step.degree || 0, step.octave || 0) + pageTranspose;
+                const samePitch = pitchPrev === pitchCur;
+                if (samePitch) {
+                  // held by previous slide gate
+                } else if (!nextStepObj.slide) {
+                  const durMs = Math.max(1, Math.round(baseDur - this.noteOffEpsilonMs));
+                  midiEvents.push({
+                    type: "midi_note",
+                    page: p,
+                    tick: eventTick,
+                    pitch: pitchCur,
+                    vel: noteVel,
+                    durMs,
+                    delayMs: 0,
+                    chan,
+                    accent: !!nextStepObj.accent,
+                    td3Slide: false
+                  });
+                } else {
+                  const chainDurMs = baseDur * Math.max(1, chainLen);
+                  const slidePad = this.monoSlidePad || 0;
+                  const padMs = this.noteOffEpsilonMs + Math.round(chainDurMs * slidePad);
+                  const durMs = Math.max(1, Math.round(chainDurMs - padMs));
+                  midiEvents.push({
+                    type: "midi_note",
+                    page: p,
+                    tick: eventTick,
+                    pitch: pitchCur,
+                    vel: noteVel,
+                    durMs,
+                    delayMs: 0,
+                    chan,
+                    accent: !!nextStepObj.accent,
+                    td3Slide: true
+                  });
+                }
+              } else if (isSlideStart) {
+                const chainDurMs = baseDur * Math.max(1, chainLen);
+                const slidePad = this.monoSlidePad || 0;
+                const padMs = this.noteOffEpsilonMs + Math.round(chainDurMs * slidePad);
+                const durMs = Math.max(1, Math.round(chainDurMs - padMs));
                 midiEvents.push({
                   type: "midi_note",
                   page: p,
+                  tick: eventTick,
                   pitch: pitchCur,
                   vel: noteVel,
                   durMs,
-                  delayMs,
+                  delayMs: 0,
                   chan,
-                  accent: !!step.accent,
+                  accent: !!nextStepObj.accent,
+                  td3Slide: true
+                });
+              } else if (nextStepObj.tie) {
+                const durMs = baseDur * 2;
+                midiEvents.push({
+                  type: "midi_note",
+                  page: p,
+                  tick: eventTick,
+                  pitch: pitchCur,
+                  vel: noteVel,
+                  durMs,
+                  delayMs: 0,
+                  chan,
+                  accent: !!nextStepObj.accent,
                   td3Slide: false
                 });
-                continue;
+              } else {
+                const durMs = Math.max(1, Math.round(baseDur - this.noteOffEpsilonMs));
+                midiEvents.push({
+                  type: "midi_note",
+                  page: p,
+                  tick: eventTick,
+                  pitch: pitchCur,
+                  vel: noteVel,
+                  durMs,
+                  delayMs: 0,
+                  chan,
+                  accent: !!nextStepObj.accent,
+                  td3Slide: false
+                });
               }
-              // Trim by swing/epsilon plus a small margin so the slide gate doesn't run past the following note.
-              const chainDurMs = baseDur * Math.max(1, chainLen);
-              const slidePad = this.monoSlidePad || 0;
-              const padMs = this.noteOffEpsilonMs + delayMs + Math.round(chainDurMs * slidePad);
-              const durMs = Math.max(1, Math.round(chainDurMs - padMs));
-              midiEvents.push({
-                type: "midi_note",
-                page: p,
-                pitch: pitchCur,
-                vel: noteVel,
-                durMs,
-                delayMs,
-                chan,
-                accent: !!step.accent,
-                td3Slide: true
-              });
-              continue;
             }
-            if (isSlideStart) {
-              const chainDurMs = baseDur * Math.max(1, chainLen);
-              const slidePad = this.monoSlidePad || 0;
-              const padMs = this.noteOffEpsilonMs + delayMs + Math.round(chainDurMs * slidePad);
-              const durMs = Math.max(1, Math.round(chainDurMs - padMs)); // hold through the chain without overshooting
+          } else {
+            degrees.forEach((deg) => {
+              const microOffset = this.getNoteMicroOffset(nextStepObj, deg, seqTypePlay);
+              if (microOffset >= 0) return;
+              const eventTick = nextBaseTick + nextSwingOffsetTicks + microOffset;
+              let pitch;
+              if (seqTypePlay === "drum") {
+                const drumMap = Array.isArray(page.drumNotes) ? page.drumNotes : [];
+                pitch = drumMap[deg] ?? 36;
+              } else {
+                const pageTranspose = this.pages[p].transpose || 0;
+                const octave = seqTypePlay === "poly" ? this.getNoteOctave(nextStepObj, deg) : this.getNoteOctave(nextStepObj, deg || 0);
+                pitch = this.calcPitch(pat.root || 0, mode, deg || 0, octave) + pageTranspose;
+              }
+              const durMs = Math.max(1, Math.round(baseDur - this.noteOffEpsilonMs));
+              const noteVel = (seqTypePlay === "poly" || seqTypePlay === "drum")
+                ? (Array.isArray(nextStepObj.accented) && nextStepObj.accented.includes(deg) ? 120 : 96)
+                : (nextStepObj.accent ? 120 : 96);
+              const isAccent = noteVel >= 120;
               midiEvents.push({
                 type: "midi_note",
                 page: p,
-                pitch: pitchCur,
+                tick: eventTick,
+                pitch,
                 vel: noteVel,
                 durMs,
-                delayMs,
+                delayMs: 0,
                 chan,
-                accent: !!step.accent,
-                td3Slide: true
-              });
-              continue;
-            }
-            if (step.tie) {
-              const durMs = baseDur * 2; // tie adds one step
-              midiEvents.push({
-                type: "midi_note",
-                page: p,
-                pitch: pitchCur,
-                vel: noteVel,
-                durMs,
-                delayMs,
-                chan,
-                accent: !!step.accent,
+                accent: isAccent,
                 td3Slide: false
               });
-              this.skipNextNote = this.skipNextNote || {};
-              this.skipNextNote[p] = (pos + 1) % len;
-              continue;
-            }
-          }
-          degrees.forEach((deg) => {
-            let pitch;
-            if (seqTypePlay === "drum") {
-              const drumMap = Array.isArray(page.drumNotes) ? page.drumNotes : [];
-              pitch = drumMap[deg] ?? 36;
-            } else {
-              const pageTranspose = this.pages[p].transpose || 0;
-              const octave = seqTypePlay === "poly" ? this.getNoteOctave(step, deg) : this.getNoteOctave(step, deg || 0);
-              pitch = this.calcPitch(pat.root || 0, mode, deg || 0, octave) + pageTranspose;
-            }
-            const durMs = Math.max(1, Math.round(baseDur - this.noteOffEpsilonMs)); // default one step with slight shorten
-            const noteVel = (seqTypePlay === "poly" || seqTypePlay === "drum")
-              ? (Array.isArray(step.accented) && step.accented.includes(deg) ? 120 : 96)
-              : (step.accent ? 120 : 96);
-            const isAccent = noteVel >= 120;
-            midiEvents.push({
-              type: "midi_note",
-              page: p,
-              pitch,
-              vel: noteVel,
-              durMs,
-              delayMs,
-              chan,
-              accent: isAccent,
-              td3Slide: false
             });
-          });
+          }
         }
       }
       // pattern/mute changes handled before step processing for tighter LED alignment
@@ -2319,7 +2724,35 @@ export class SGridState {
   }
 
   clampMicro(micro) {
-    return 0; // micro timing disabled
+    const stepsPerBeat = Math.max(1, Math.round((this.baseDivision || 16) / 4));
+    const ticksPerStepInt = Math.round(PPQN_INT / stepsPerBeat);
+    const max = Math.max(1, ticksPerStepInt - 1);
+    return clamp(Math.round(Number(micro) || 0), -max, max);
+  }
+
+  getNoteMicroOffset(step, degree, seqType = "mono") {
+    if (!step) return 0;
+    if (seqType === "poly" || seqType === "drum") {
+      const micros = step.noteMicros || {};
+      if (Object.prototype.hasOwnProperty.call(micros, degree)) {
+        return this.clampMicro(micros[degree]);
+      }
+      return 0;
+    }
+    return this.clampMicro(step.micro || 0);
+  }
+
+  setNoteMicroOffset(step, degree, seqType = "mono", microOffset = 0) {
+    if (!step) return 0;
+    const next = this.clampMicro(microOffset);
+    if (seqType === "poly" || seqType === "drum") {
+      if (!step.noteMicros || typeof step.noteMicros !== "object") step.noteMicros = {};
+      if (next) step.noteMicros[degree] = next;
+      else delete step.noteMicros[degree];
+      return next;
+    }
+    step.micro = next;
+    return next;
   }
 
   slideChainLength(pat, startIdx) {
@@ -2698,6 +3131,25 @@ export class SGridState {
             if (frame[idx] === OFF || frame[idx] < levelHint) frame[idx] = levelHint;
           }
         });
+      }
+      // microtiming hint in edit mode: light left/right neighbors by offset sign
+      if (inEditMode && this.heldStep && heldInfo?.microEdit) {
+        const hx = this.heldStep.x;
+        const hy = this.heldStep.y;
+        const seqTypeHint = page?.sequencerType || "mono";
+        const hintY = heldInfo?.uiMode ? (hy === 0 ? 6 : hy - 1) : hy;
+        const heldDeg = this.holdTargetDegree != null ? clamp(this.holdTargetDegree, 0, 6) : clamp(6 - hintY, 0, 6);
+        const absHeld = hx + bar * 16;
+        const heldStepObj = pat.steps[absHeld];
+        const microOffset = this.getNoteMicroOffset(heldStepObj, heldDeg, seqTypeHint);
+        const levelHint = Math.max(1, STEP_MICRO);
+        if (microOffset < 0 && hx > 0) {
+          const idx = hintY * WIDTH + (hx - 1);
+          frame[idx] = Math.max(frame[idx] || 0, levelHint);
+        } else if (microOffset > 0 && hx < (WIDTH - 1)) {
+          const idx = hintY * WIDTH + (hx + 1);
+          frame[idx] = Math.max(frame[idx] || 0, levelHint);
+        }
       }
       if (!page.sequencerStopped) {
         const len = Math.max(1, pat.length_steps);

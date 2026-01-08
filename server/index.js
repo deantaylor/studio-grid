@@ -63,8 +63,10 @@ const wss = new WebSocketServer({ server });
 const serial = new SerialOSCBridge({ prefix: "sgrid" });
 const state = new SGridState();
 state.requestRender = () => renderAndPush(true);
-const PPQN = 24;
-const TICKS_PER_STEP = 6;
+const PPQN_EXT = 24;
+const PPQN_INT = 96;
+const INT_MULT = PPQN_INT / PPQN_EXT;
+const TICKS_PER_STEP_EXT = PPQN_EXT / 4;
 const PATTERN_CONTROL_GRID_X = 15;
 const PATTERN_CONTROL_GRID_Y = 7;
 let clockSource = "external"; // default to external clock
@@ -98,6 +100,10 @@ let slideAnimTimer = null;
 let lastExternalTickIntervalMs = null;
 let lastReceivedTick = null;
 let externalArmed = false;
+
+function extToIntTick(tExt) {
+  return tExt * INT_MULT;
+}
 
 function patternControllerDevices() {
   const devices = typeof serial.deviceList === "function" ? serial.deviceList() : [];
@@ -204,6 +210,8 @@ serial.on("grid_key", (evt) => {
   events.forEach((ev) => {
     if (ev.type === "octave") {
       broadcast({ type: "octave_overlay", page: state.currentPage, ...ev });
+    } else if (ev.type === "micro") {
+      broadcast({ type: "micro_overlay", page: state.currentPage, ...ev });
     } else if (ev.type === "accent") {
       broadcast({ type: "accent_overlay", page: state.currentPage, ...ev });
     } else if (ev.type === "slide") {
@@ -434,6 +442,34 @@ function handleClientMessage(ws, data) {
         const res = state.setStepOctave(data.x, data.y, data.delta, { uiMode: fullScaleMode });
         if (res) {
           broadcast({ type: "octave_overlay", page: state.currentPage, x: data.x, y: data.y, octave: res.octave, delta: res.delta });
+          renderAndPush();
+        }
+      }
+      break;
+    case "set_step_micro":
+      {
+        const res = state.setStepMicroOffset(data.x, data.y, data.delta, { uiMode: fullScaleMode });
+        if (res) {
+          const page = state.pages[state.currentPage];
+          const pat = page?.patterns?.[page?.active_pattern];
+          const abs = pat ? data.x + (pat.barView || 0) * 16 : -1;
+          const step = abs >= 0 && abs < (pat?.steps?.length || 0) ? pat.steps[abs] : null;
+          const seqType = page?.sequencerType || "mono";
+          const rowInfo = state.getRowInfo(data.y, { uiMode: fullScaleMode });
+          const degree = rowInfo?.degree ?? 0;
+          const octave = (seqType === "poly" || seqType === "drum")
+            ? state.getNoteOctave(step, degree)
+            : (step?.octave || 0);
+          broadcast({
+            type: "micro_overlay",
+            page: state.currentPage,
+            x: data.x,
+            y: data.y,
+            rawY: fullScaleMode ? (data.y === 0 ? 6 : data.y - 1) : data.y,
+            octave,
+            microOffset: res.microOffset,
+            delta: res.delta
+          });
           renderAndPush();
         }
       }
@@ -704,9 +740,9 @@ function handleClientMessage(ws, data) {
           if (transport.mode === "EXTERNAL_MIDI" && Number.isFinite(evt.intervalMs) && evt.intervalMs > 0) {
             lastExternalTickIntervalMs = evt.intervalMs;
           }
-          if (transport.tick % TICKS_PER_STEP === 0) {
+          if (transport.tick % TICKS_PER_STEP_EXT === 0) {
             const externalStepMs = transport.mode === "EXTERNAL_MIDI" && Number.isFinite(lastExternalTickIntervalMs)
-              ? lastExternalTickIntervalMs * TICKS_PER_STEP
+              ? lastExternalTickIntervalMs * TICKS_PER_STEP_EXT
               : null;
             processTick({ tick: transport.tick, externalStepMs });
             broadcastClockStatus();
@@ -886,11 +922,12 @@ function buildMusicalEvents({ tick, midiEvents }) {
   midiEvents.forEach((evt) => {
     if (!evt) return;
     if (evt.type === "midi_note") {
+      const baseTick = Number.isFinite(evt.tick) ? evt.tick : tick;
       const delayMs = Math.max(0, Number(evt.delayMs) || 0);
       const durMs = Math.max(0, Number(evt.durMs) || 0);
       out.push({
         type: "note_on",
-        tick,
+        tick: baseTick,
         offsetMs: delayMs,
         page: evt.page,
         channel: evt.chan,
@@ -901,7 +938,7 @@ function buildMusicalEvents({ tick, midiEvents }) {
       });
       out.push({
         type: "note_off",
-        tick,
+        tick: baseTick,
         offsetMs: delayMs + durMs,
         page: evt.page,
         channel: evt.chan,
@@ -909,9 +946,10 @@ function buildMusicalEvents({ tick, midiEvents }) {
         velocity: 0
       });
     } else if (evt.type === "midi_cc") {
+      const baseTick = Number.isFinite(evt.tick) ? evt.tick : tick;
       out.push({
         type: "cc",
-        tick,
+        tick: baseTick,
         offsetMs: Math.max(0, Number(evt.delayMs) || 0),
         page: evt.page,
         channel: evt.chan,
@@ -933,7 +971,7 @@ function broadcastEvents(events) {
 }
 
 function processTick({ tick, externalStepMs = null }) {
-  const { midiEvents, patternSwitches, barChanges, barPlayheadChanges } = state.tick(followEnabled, externalStepMs);
+  const { midiEvents, patternSwitches, barChanges, barPlayheadChanges } = state.tick(followEnabled, externalStepMs, tick);
   const ignorePatternControl = !showMonomeControls && !state.patternControlMode;
   const frame = fullScaleMode
     ? state.renderUIFrame(Date.now(), { ignorePatternControl })
@@ -948,7 +986,8 @@ function processTick({ tick, externalStepMs = null }) {
   if (barPlayheadChanges?.length) {
     barPlayheadChanges.forEach((bc) => broadcastBarPlayhead(bc.page, bc.pattern, bc.bar));
   }
-  broadcastEvents(buildMusicalEvents({ tick, midiEvents }));
+  const tickInt = extToIntTick(tick);
+  broadcastEvents(buildMusicalEvents({ tick: tickInt, midiEvents }));
 }
 
 function startTick({ tick = 0 } = {}) {
@@ -956,7 +995,7 @@ function startTick({ tick = 0 } = {}) {
   transport.tick = Math.max(0, Math.floor(tick || 0));
   lastExternalTickIntervalMs = null;
   lastReceivedTick = null;
-  const stepIndex = Math.max(0, Math.floor(transport.tick / TICKS_PER_STEP));
+  const stepIndex = Math.max(0, Math.floor(transport.tick / TICKS_PER_STEP_EXT));
   state.resetTickCounters();
   state.tickCount = stepIndex % 1024;
   for (let p = 1; p <= 8; p++) {
@@ -970,7 +1009,7 @@ function startTick({ tick = 0 } = {}) {
 }
 
 function syncStateToTransport() {
-  const baseStepIndex = Math.max(0, Math.floor((transport.tick || 0) / TICKS_PER_STEP));
+  const baseStepIndex = Math.max(0, Math.floor((transport.tick || 0) / TICKS_PER_STEP_EXT));
   const nextStepIndex = baseStepIndex + 1;
   state.resetTickCounters();
   state.tickCount = nextStepIndex % 1024;
@@ -1004,7 +1043,7 @@ function continueTick({ tick = null } = {}) {
   transport.running = true;
   if (Number.isFinite(tick)) {
     transport.tick = Math.max(0, Math.floor(tick));
-    state.syncPlayheads(Math.floor(transport.tick / TICKS_PER_STEP));
+    state.syncPlayheads(Math.floor(transport.tick / TICKS_PER_STEP_EXT));
   }
   broadcastClockStatus();
 }
