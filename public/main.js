@@ -135,6 +135,7 @@ let swing = 50;
 let running = false;
 let tickTimer = null;
 let currentPage = 1;
+let serverCurrentPage = currentPage;
 let currentPattern = 1;
 let selectedDevicePage = currentPage;
 let activeUiPage = currentPage; // 1-8 device pages, 0 = pattern launcher
@@ -771,6 +772,8 @@ logMissingDom([
 
 let frames = Array.from({ length: 9 }, () => new Array(WIDTH * HEIGHT).fill(0));
 let frameReady = Array(9).fill(false);
+const BLANK_FRAME = new Array(WIDTH * HEIGHT).fill(0);
+let suppressFrameUntilNext = Array(9).fill(false);
 let overlays = Array.from({ length: 9 }, () => []);
 let transposes = Array.from({ length: 9 }, () => 0);
 
@@ -908,6 +911,7 @@ let autoLoadSet = false;
 let patternControlLatch = true;
 let patternControlActive = false;
 let resetNamesOnNextState = false;
+let barFlashTimer = null;
 const lastSentState = {
   clockSource: null,
   clockInputId: null,
@@ -1153,17 +1157,23 @@ function connectWS() {
       log(msg.message);
     } else if (msg.type === "led_frame") {
       const incoming = msg.frame;
+      let targetPage = serverCurrentPage;
+      if (!Number.isFinite(targetPage) || targetPage < 1 || targetPage > 8) {
+        targetPage = currentPage;
+      }
       if (Array.isArray(incoming)) {
-        const page = currentPage;
-        frames[page] = incoming.slice();
-        frameReady[page] = true;
+        frames[targetPage] = incoming.slice();
+        frameReady[targetPage] = true;
+        suppressFrameUntilNext[targetPage] = false;
       }
       if (msg.deviceHasData) deviceHasData = msg.deviceHasData;
       if (msg.deviceStopped) deviceStopped = msg.deviceStopped;
       if (Array.isArray(msg.octaveOverlays)) {
         applyOctaveOverlaysSnapshot(msg.octaveOverlays);
       }
-      renderFrame(frames[currentPage]);
+      if (targetPage === currentPage) {
+        renderFrame(frames[currentPage]);
+      }
       renderDeviceTabProgressFrame();
     } else if (msg.type === "scale") {
       if (msg.scale) scale = msg.scale;
@@ -1241,6 +1251,9 @@ function connectWS() {
       if (Array.isArray(msg.octaveOverlays)) {
         applyOctaveOverlaysSnapshot(msg.octaveOverlays);
       }
+      if (typeof msg.currentPage === "number") {
+        serverCurrentPage = msg.currentPage;
+      }
       updatePage(msg.currentPage || currentPage, { fromServer: true });
       updateTempo(tempo, { broadcast: false });
       updateSwing(swing, { broadcast: false });
@@ -1262,6 +1275,9 @@ function connectWS() {
     } else if (msg.type === "page_change") {
       if (Array.isArray(msg.octaveOverlays)) {
         applyOctaveOverlaysSnapshot(msg.octaveOverlays);
+      }
+      if (typeof msg.page === "number") {
+        serverCurrentPage = msg.page;
       }
       updatePage(msg.page || currentPage, { fromServer: true });
     } else if (msg.type === "grid_status") {
@@ -1697,6 +1713,22 @@ function intToExtTick(tInt) {
 
 function setTransportTickExt(tickExt) {
   transportTickExt = tickExt;
+  if (tickExt % PPQN_EXT === 0) {
+    flashPlayingBar();
+  }
+}
+
+function flashPlayingBar() {
+  const btn = document.querySelector(".bar-row .bar-btn.playing");
+  if (!btn) return;
+  btn.classList.remove("flash");
+  // restart animation by forcing reflow
+  void btn.offsetWidth;
+  btn.classList.add("flash");
+  if (barFlashTimer) clearTimeout(barFlashTimer);
+  barFlashTimer = setTimeout(() => {
+    btn.classList.remove("flash");
+  }, 120);
 }
 
 function resolveTickTime(tickInt) {
@@ -1993,7 +2025,7 @@ function renderFrame(frame) {
 }
 
 function renderFrameIfReady() {
-  if (!frameReady[currentPage]) return;
+  if (!frameReady[currentPage] || suppressFrameUntilNext[currentPage]) return;
   renderFrame(frames[currentPage]);
 }
 
@@ -3565,11 +3597,17 @@ function applyPatternScaleUI() {
 
 function updatePage(page, { fromServer = false, deferFrame = false } = {}) {
   if (!page || page < 1 || page > 8) return;
+  const prevPage = currentPage;
   currentPage = page;
   if (!patternControlActive) lastFocusedDevice = page;
   if (!patternControlActive) activeUiPage = page;
   selectedDevicePage = activeUiPage;
-  const deferFrameRender = deferFrame || !frameReady[page];
+  if (prevPage !== page) {
+    suppressFrameUntilNext[page] = true;
+    frameReady[page] = false;
+    renderFrame(BLANK_FRAME);
+  }
+  const deferFrameRender = deferFrame || !frameReady[page] || suppressFrameUntilNext[page];
   renderTabs();
   applyPageMidi();
   applyPageTranspose();

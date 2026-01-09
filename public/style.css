@@ -1216,14 +1216,22 @@ canvas#grid {
 }
 .bar-row .bar-btn.active {
   background: var(--fg);
-  color: var(--bg);
+  color: var(--surface);
 }
 .bar-row .bar-btn.playing {
   color: var(--accent-secondary);
 }
 .bar-row .bar-btn.active.playing {
-  background: transparent;
-  color: var(--accent);
+  background: var(--fg);
+  color: var(--surface);
+}
+.bar-row .bar-btn.playing.flash {
+  color: var(--bg);
+}
+.bar-row .bar-btn.playing.flash,
+.bar-row .bar-btn.active.playing.flash {
+  color: var(--fg);
+  transition: color 0.12s ease;
 }
 .bar-row .bar-btn.disabled {
   opacity: 0.4;
