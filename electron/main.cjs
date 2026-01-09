@@ -4,7 +4,7 @@
 // - opens the BrowserWindow pointed at the local server
 // - on quit, closes the server and clears the monome LEDs
 
-const { app, BrowserWindow, dialog, screen } = require("electron");
+const { app, BrowserWindow, dialog, screen, ipcMain } = require("electron");
 const net = require("node:net");
 const path = require("node:path");
 const { pathToFileURL } = require("node:url");
@@ -17,6 +17,18 @@ let isQuitting = false;
 let cleaningUp = false;
 let pauseLedOutput = () => {};
 const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const BASE_WIDTH = 1080;
+const BASE_HEIGHT = 690;
+
+function clampWindowSize(scale = 1, widthOverride = null, heightOverride = null) {
+  const { width: maxW, height: maxH } = screen.getPrimaryDisplay().workAreaSize;
+  const targetW = widthOverride ? Math.round(widthOverride) : Math.round(BASE_WIDTH * scale);
+  const targetH = heightOverride ? Math.round(heightOverride) : Math.round(BASE_HEIGHT * scale);
+  return {
+    width: Math.min(targetW, maxW),
+    height: Math.min(targetH, maxH)
+  };
+}
 
 function findFreePort(start = 3000, maxAttempts = 30) {
   return new Promise((resolve) => {
@@ -51,8 +63,8 @@ async function ensureServer() {
 
 function createWindow() {
   const win = new BrowserWindow({
-    //width: 860,
-    //height: 640,
+    width: BASE_WIDTH,
+    height: BASE_HEIGHT,
     show: false,
     useContentSize: true,
     resizable: false,
@@ -61,7 +73,8 @@ function createWindow() {
     webPreferences: {
       backgroundThrottling: false,
       nodeIntegration: false,
-      contextIsolation: true
+      contextIsolation: true,
+      preload: path.join(__dirname, "preload.cjs")
     }
   });
 
@@ -69,17 +82,12 @@ function createWindow() {
     try {
       const { width, height } = await win.webContents.executeJavaScript(
         `(() => {
-          const html = document.documentElement;
-          const body = document.body;
-          const width = Math.max(html?.scrollWidth || 0, body?.scrollWidth || 0);
-          const height = Math.max(html?.scrollHeight || 0, body?.scrollHeight || 0);
-          return { width: Math.ceil(width), height: Math.ceil(height) };
+          const uiScale = Number(getComputedStyle(document.documentElement).getPropertyValue("--ui-scale")) || 1;
+          return { width: Math.ceil(1080 * uiScale), height: Math.ceil(690 * uiScale) };
         })();`
       );
 
-      const { width: maxW, height: maxH } = screen.getPrimaryDisplay().workAreaSize;
-      const boundedWidth = Math.min(width, maxW);
-      const boundedHeight = Math.min(height, maxH);
+      const { width: boundedWidth, height: boundedHeight } = clampWindowSize(1, width, height);
 
       win.setContentSize(boundedWidth, boundedHeight);
       win.center();
@@ -120,6 +128,24 @@ app.whenReady().then(async () => {
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });
+});
+
+ipcMain.on("ui-scale-changed", (event, payload) => {
+  const win = BrowserWindow.fromWebContents(event.sender);
+  if (!win) return;
+  let scale = 1;
+  let width = null;
+  let height = null;
+  if (payload && typeof payload === "object") {
+    scale = Number(payload.scale) || 1;
+    width = Number(payload.width) || null;
+    height = Number(payload.height) || null;
+  } else {
+    scale = Number(payload) || 1;
+  }
+  const { width: targetW, height: targetH } = clampWindowSize(scale, width, height);
+  win.setContentSize(targetW, targetH);
+  win.center();
 });
 
 async function cleanupAndQuit() {

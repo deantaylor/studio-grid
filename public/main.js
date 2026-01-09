@@ -3,12 +3,12 @@ import { AudioEventScheduler } from "./scheduler.js";
 const WS_URL = `ws://${location.host}`;
 const WIDTH = 16;
 const HEIGHT = 8;
-const CELL_SIZE = 32; //32
-const CELL_GAP = 12; //12
+const CELL_SIZE = 40; //32
+const CELL_GAP = 16; //12
 const CANVAS_WIDTH = WIDTH * CELL_SIZE + (WIDTH - 1) * CELL_GAP;
 const CANVAS_HEIGHT = HEIGHT * CELL_SIZE + (HEIGHT - 1) * CELL_GAP;
-const BASE_WINDOW_WIDTH = 860;
-const BASE_WINDOW_HEIGHT = window.innerHeight || document.documentElement.clientHeight || 640;
+const BASE_WINDOW_WIDTH = 1080;
+const BASE_WINDOW_HEIGHT = 690;
 const LABEL_FONT = "400 8px 'Inter', sans-serif";
 const DEVICE_COLOR_TOKENS = ["--dev-1", "--dev-2", "--dev-3", "--dev-4", "--dev-5", "--dev-6", "--dev-7", "--dev-8"];
 let deviceColorPalette = [];
@@ -198,7 +198,6 @@ const settingsConfirm = document.getElementById("settings-confirm");
 const showLogToggle = document.getElementById("show-log");
 const autoFillToggle = document.getElementById("auto-fill");
 const autoLoadToggle = document.getElementById("auto-load-set");
-const allowMDExternalToggle = document.getElementById("allow-md-external");
 const patternControlLatchToggle = document.getElementById("pattern-control-latch");
 const showMonomeControlsToggle = document.getElementById("show-monome-controls");
 const monomeControlsWrap = document.getElementById("monome-controls-wrap");
@@ -220,6 +219,183 @@ const patternRow = document.getElementById("pattern-row");
 const patternSelect = document.getElementById("pattern-select");
 const patternLengthBtns = document.querySelectorAll("[data-pattern-length]");
 const patternScaleToggle = document.getElementById("pattern-scale-toggle");
+
+let customSelectsInitialized = false;
+const customSelects = new Set();
+const selectValueDescriptor = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, "value");
+
+if (selectValueDescriptor && !HTMLSelectElement.prototype.__customSelectPatched) {
+  Object.defineProperty(HTMLSelectElement.prototype, "__customSelectPatched", {
+    value: true,
+    writable: false
+  });
+  Object.defineProperty(HTMLSelectElement.prototype, "value", {
+    get() {
+      return selectValueDescriptor.get.call(this);
+    },
+    set(val) {
+      selectValueDescriptor.set.call(this, val);
+      if (this.__customSelect) updateCustomSelect(this);
+    }
+  });
+}
+
+function getSelectLabel(select) {
+  const opt = select.selectedOptions && select.selectedOptions[0];
+  return opt ? opt.textContent.trim() : "";
+}
+
+function updateCustomSelect(select) {
+  const custom = select.__customSelect;
+  if (!custom) return;
+  const { trigger, menu } = custom;
+  trigger.textContent = getSelectLabel(select);
+  const options = Array.from(menu.querySelectorAll(".custom-select-option"));
+  options.forEach((btn) => {
+    const isSelected = btn.dataset.value === select.value;
+    btn.classList.toggle("is-selected", isSelected);
+    btn.setAttribute("aria-selected", isSelected ? "true" : "false");
+  });
+  trigger.disabled = select.disabled;
+}
+
+function rebuildCustomSelect(select) {
+  const custom = select.__customSelect;
+  if (!custom) return;
+  const { menu } = custom;
+  menu.innerHTML = "";
+  Array.from(select.options).forEach((opt) => {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "custom-select-option";
+    btn.textContent = opt.textContent;
+    btn.dataset.value = opt.value;
+    btn.setAttribute("role", "option");
+    if (opt.disabled) {
+      btn.disabled = true;
+      btn.setAttribute("aria-disabled", "true");
+    }
+    btn.onclick = () => {
+      if (select.disabled || opt.disabled) return;
+      select.value = opt.value;
+      select.dispatchEvent(new Event("change", { bubbles: true }));
+      closeCustomSelect(select);
+    };
+    menu.appendChild(btn);
+  });
+  updateCustomSelect(select);
+}
+
+function closeCustomSelect(select) {
+  const wrap = select.closest(".select-wrap");
+  if (!wrap) return;
+  wrap.classList.remove("is-open");
+  const custom = select.__customSelect;
+  if (custom) custom.trigger.setAttribute("aria-expanded", "false");
+}
+
+function closeAllCustomSelects() {
+  customSelects.forEach((sel) => closeCustomSelect(sel));
+}
+
+function openCustomSelect(select) {
+  const wrap = select.closest(".select-wrap");
+  const custom = select.__customSelect;
+  if (!wrap || !custom) return;
+  closeAllCustomSelects();
+  wrap.classList.remove("opens-up");
+  wrap.classList.add("is-open");
+  custom.trigger.setAttribute("aria-expanded", "true");
+  custom.menu.style.minWidth = `${custom.trigger.offsetWidth}px`;
+  const menuHeight = custom.menu.scrollHeight;
+  const rect = custom.trigger.getBoundingClientRect();
+  if (rect.bottom + menuHeight > window.innerHeight && rect.top - menuHeight > 0) {
+    wrap.classList.add("opens-up");
+  }
+  const selected = custom.menu.querySelector(".custom-select-option.is-selected");
+  if (selected) selected.focus();
+}
+
+function toggleCustomSelect(select) {
+  const wrap = select.closest(".select-wrap");
+  if (!wrap || select.disabled) return;
+  if (wrap.classList.contains("is-open")) {
+    closeCustomSelect(select);
+  } else {
+    openCustomSelect(select);
+  }
+}
+
+function handleCustomSelectKeydown(e, select) {
+  if (select.disabled) return;
+  if (e.key === "Enter" || e.key === " ") {
+    e.preventDefault();
+    toggleCustomSelect(select);
+  } else if (e.key === "ArrowDown") {
+    e.preventDefault();
+    openCustomSelect(select);
+  } else if (e.key === "Escape") {
+    closeCustomSelect(select);
+  }
+}
+
+function handleCustomSelectMenuKeydown(e, select) {
+  const options = Array.from(e.currentTarget.querySelectorAll(".custom-select-option"));
+  const currentIndex = options.findIndex((el) => el === document.activeElement);
+  if (e.key === "ArrowDown") {
+    e.preventDefault();
+    const next = options[Math.min(options.length - 1, currentIndex + 1)] || options[0];
+    if (next) next.focus();
+  } else if (e.key === "ArrowUp") {
+    e.preventDefault();
+    const prev = options[Math.max(0, currentIndex - 1)] || options[options.length - 1];
+    if (prev) prev.focus();
+  } else if (e.key === "Escape") {
+    e.preventDefault();
+    closeCustomSelect(select);
+    select.__customSelect?.trigger.focus();
+  }
+}
+
+function buildCustomSelect(select) {
+  const wrap = select.closest(".select-wrap");
+  if (!wrap || wrap.classList.contains("custom-select")) return;
+  wrap.classList.add("custom-select");
+  const sizeClass = Array.from(select.classList).find((name) => name.startsWith("input-"));
+  if (sizeClass) wrap.classList.add(sizeClass);
+  const trigger = document.createElement("button");
+  trigger.type = "button";
+  trigger.className = "custom-select-trigger";
+  trigger.setAttribute("aria-haspopup", "listbox");
+  trigger.setAttribute("aria-expanded", "false");
+  const menu = document.createElement("div");
+  menu.className = "custom-select-menu";
+  menu.setAttribute("role", "listbox");
+  wrap.appendChild(trigger);
+  wrap.appendChild(menu);
+  select.__customSelect = { trigger, menu };
+  customSelects.add(select);
+  rebuildCustomSelect(select);
+  trigger.addEventListener("click", (e) => {
+    e.preventDefault();
+    toggleCustomSelect(select);
+  });
+  trigger.addEventListener("keydown", (e) => handleCustomSelectKeydown(e, select));
+  menu.addEventListener("keydown", (e) => handleCustomSelectMenuKeydown(e, select));
+  select.addEventListener("change", () => updateCustomSelect(select));
+  const observer = new MutationObserver(() => rebuildCustomSelect(select));
+  observer.observe(select, { childList: true, subtree: true });
+  select.__customSelect.observer = observer;
+}
+
+function initCustomSelects() {
+  if (customSelectsInitialized) return;
+  customSelectsInitialized = true;
+  document.querySelectorAll(".select-wrap select").forEach(buildCustomSelect);
+  document.addEventListener("click", (e) => {
+    if (!e.target.closest(".select-wrap.custom-select")) closeAllCustomSelects();
+  });
+}
 const barRow = document.getElementById("bar-row");
 const drumInputs = Array.from(document.querySelectorAll(".drum-note-input"));
 const scaleNotesWrap = document.getElementById("scale-notes");
@@ -359,6 +535,7 @@ const initNumberSteppers = () => {
 
     stepper.addEventListener("pointerdown", (event) => {
       if (event.button !== 0) return;
+      if (input.disabled) return;
       event.preventDefault();
       event.stopPropagation();
       const rect = stepper.getBoundingClientRect();
@@ -697,7 +874,7 @@ let deviceTabProgressCssWidth = 0;
 let deviceTabProgressCssHeight = 0;
 let externalArmed = false;
 const activeNotes = new Map();
-let uiScale = 1.5;
+let uiScale = 1; //default Scale UI
 let uiScaleInitialized = false;
 // pattern lengths not tracked client-side
 let barViews = Array.from({ length: 9 }, () => Array(9).fill(0));
@@ -707,7 +884,6 @@ let patternClipboard = null;
 let barClipboard = null;
 let lastCopyType = null; // "pattern" | "bar"
 let autoFillBars = true;
-let allowMDExternal = false;
 let mdSlideSpeed = 0.6;
 let mdSlideCurve = 1.0;
 let mdBaseSweep = 80;
@@ -732,14 +908,12 @@ let autoLoadSet = false;
 let patternControlLatch = true;
 let patternControlActive = false;
 let resetNamesOnNextState = false;
-const TM1_NAME = "Elektron TM-1";
 const lastSentState = {
   clockSource: null,
   clockInputId: null,
   clockOutEnabled: null,
   clockOutPortId: null,
   autoFillBars: null,
-  allowMDExternal: null,
   patternControlLatch: null,
   showMonomeControls: null,
   baseDivision: null,
@@ -755,7 +929,6 @@ function resetLastSentState() {
   lastSentState.clockOutEnabled = null;
   lastSentState.clockOutPortId = null;
   lastSentState.autoFillBars = null;
-  lastSentState.allowMDExternal = null;
   lastSentState.patternControlLatch = null;
   lastSentState.showMonomeControls = null;
   lastSentState.baseDivision = null;
@@ -1373,7 +1546,6 @@ function refreshMIDIDevices() {
   const preferredOutName = "None"; // default midi outport name preference
   const outs = [];
   const ins = [];
-  let tm1Out = null;
   midiAccess?.outputs.forEach((out) => {
     const opt = new Option(out.name, out.id);
     midiSel.append(opt);
@@ -1382,7 +1554,6 @@ function refreshMIDIDevices() {
     }
     if (!firstOut) firstOut = out;
     if (!preferredOut && out.name.includes(preferredOutName)) preferredOut = out;
-    if (!tm1Out && out.name.includes("Elektron TM-1")) tm1Out = out;
     outs.push(out.name);
   });
   midiAccess?.inputs.forEach((input) => {
@@ -1429,8 +1600,6 @@ function refreshMIDIDevices() {
     midiSel.value = "";
     midiOut = null;
   }
-  // Force TM-1 when MDTonal and external override is disabled
-  enforceMDMidiOut(tm1Out);
   updateTd3ExportVisibility();
   if (midiStatus) midiStatus.textContent = `MIDI: ${midiAccess ? midiAccess.outputs.size : 0} outputs`;
   if (outs.length) log(`Available MIDI outs: ${outs.join(", ")}`);
@@ -2491,7 +2660,6 @@ function syncSettingsInputs() {
   if (autoLoadToggle) autoLoadToggle.checked = !!autoLoadSet;
   if (patternControlLatchToggle) patternControlLatchToggle.checked = !!patternControlLatch;
   if (showMonomeControlsToggle) showMonomeControlsToggle.checked = !!showMonomeControls;
-  if (allowMDExternalToggle) allowMDExternalToggle.checked = !!allowMDExternal;
   if (mdBaseSweepInput) mdBaseSweepInput.value = mdBaseSweep;
   if (monoSlidePadInput) monoSlidePadInput.value = Math.round((monoSlidePad || 0) * 100);
   if (baseNoteLenSel) applyBaseNoteLenUI();
@@ -2571,13 +2739,6 @@ function applySettingsFromInputs() {
     if (showMonomeControls !== next) {
       showMonomeControls = next;
       sendMonomeControlsIfChanged(showMonomeControls);
-    }
-  }
-  if (allowMDExternalToggle) {
-    const next = !!allowMDExternalToggle.checked;
-    if (allowMDExternal !== next) {
-      allowMDExternal = next;
-      enforceMDMidiOut();
     }
   }
   if (baseNoteLenSel) {
@@ -2670,12 +2831,6 @@ function applySettingsFromInputs() {
       document.getElementById("log").classList.toggle("hidden", !show);
     };
   }
-  if (allowMDExternalToggle) {
-    allowMDExternalToggle.onchange = () => {
-      allowMDExternal = !!allowMDExternalToggle.checked;
-      enforceMDMidiOut();
-    };
-  }
   if (patternControlLatchToggle) {
     patternControlLatchToggle.onchange = () => {
       patternControlLatch = !!patternControlLatchToggle.checked;
@@ -2734,7 +2889,6 @@ if (settingsSaveCfg) {
         showLog: !!(showLogToggle && showLogToggle.checked),
         autoFill: !!autoFillBars,
         autoLoadSet: !!autoLoadSet,
-        allowMDExternal: !!allowMDExternal,
         baseDivision,
         midiSettings,
         patternControlLatch,
@@ -2743,7 +2897,8 @@ if (settingsSaveCfg) {
         multiColorDefault,
         defaultUsesMainWhite,
         whiteMode,
-        colorMode
+        colorMode,
+        uiScale
       };
       localStorage.setItem(LOCAL_CONFIG_KEY, JSON.stringify(cfg));
       // keep old key for backward compat
@@ -2759,9 +2914,6 @@ if (settingsSaveCfg) {
 }
 if (settingsRestoreCfg) {
   settingsRestoreCfg.onclick = () => {
-    allowMDExternal = false;
-    enforceMDMidiOut();
-    if (allowMDExternalToggle) allowMDExternalToggle.checked = false;
     clockOutEnabled = false;
     applyClockOutUI();
     sendClockOutIfChanged(clockOutEnabled);
@@ -2798,8 +2950,8 @@ if (settingsRestoreCfg) {
     }
     if (uiScaleSel) {
       uiScaleSel.value = "1";
-      applyUiScale("1");
     }
+    applyUiScale("1");
     try {
       localStorage.removeItem("mgrid_led_config");
       localStorage.removeItem(LOCAL_CONFIG_KEY);
@@ -3359,10 +3511,7 @@ function renderBarRow() {
     const btn = document.createElement("button");
     btn.className = "bar-btn";
     const isPlaying = playingBarClamped === i;
-    const icon = document.createElement("i");
-    icon.className = `iconoir-number-${i + 1}-square${isPlaying ? "-solid" : ""}`;
-    icon.setAttribute("aria-hidden", "true");
-    btn.append(icon);
+    btn.textContent = String(i + 1);
     if (isPlaying) btn.classList.add("playing");
     const enabled = i < bars;
     if (i === currentBar) btn.classList.add("active");
@@ -3449,7 +3598,6 @@ function applyPageMidi() {
     midiSel.value = "";
     midiOut = null;
   }
-  enforceMDMidiOut();
   updateTd3ExportVisibility();
 }
 
@@ -3508,13 +3656,28 @@ function applySeqTypeUI({ deferFrame = false } = {}) {
   seqTypeSel.value = type;
   const transposeWrap = document.querySelector(".transpose-switch");
   if (transposeWrap) transposeWrap.classList.toggle("hidden", false);
-  if (midiChan) midiChan.disabled = type === "mdtonal";
+  if (midiChan) {
+    const disableChan = type === "mdtonal";
+    midiChan.disabled = disableChan;
+    if (disableChan) {
+      midiChan.value = "";
+      midiChan.placeholder = "Auto";
+      midiChan.readOnly = true;
+      midiChan.style.cursor = "not-allowed";
+    } else {
+      midiChan.placeholder = "";
+      midiChan.readOnly = false;
+      midiChan.value = String(midiSettings[currentPage]?.channel || 1);
+      midiChan.style.cursor = "";
+    }
+    const stepper = midiChan.closest(".number-wrap")?.querySelector(".number-stepper");
+    if (stepper) stepper.disabled = disableChan;
+  }
   applyPageTranspose();
   applyDrumNotesUI();
   applyScaleNotesUI();
   applyCCUI();
   applyMDTonalUI();
-  enforceMDMidiOut();
   updateTd3ExportVisibility();
   applyDeviceBadge();
   applyPatternLauncherTypeUI();
@@ -3644,30 +3807,6 @@ function applyMDTonalUI() {
     const current = Math.max(1, Math.min(16, Math.round(mdTracks[currentPage] || 1)));
     mdTrackSel.value = `${current}`;
     mdTrackSel.disabled = type !== "mdtonal";
-  }
-  enforceMDMidiOut();
-}
-
-function enforceMDMidiOut(explicitTM1 = null) {
-  if (!midiSel || !midiAccess) return;
-  const type = sequencerTypes[currentPage] || "mono";
-  const tm1 = explicitTM1 || Array.from(midiAccess.outputs.values()).find((o) => o.name.includes(TM1_NAME));
-  if (type !== "mdtonal") {
-    midiSel.disabled = false;
-    return;
-  }
-  if (!allowMDExternal && tm1) {
-    midiSel.value = tm1.id;
-    midiOut = tm1;
-    midiSettings[currentPage].outId = tm1.id;
-    sendMidiConfig();
-    midiSel.disabled = true;
-    log("MDTonal: locked MIDI out to Elektron TM-1");
-  } else if (!allowMDExternal && !tm1) {
-    midiSel.disabled = true;
-    log("MDTonal: Elektron TM-1 not found; select another output from settings override");
-  } else {
-    midiSel.disabled = false;
   }
 }
 
@@ -3982,14 +4121,15 @@ renderBarRow();
 applyAutoFillUI();
 renderFrame(frames[currentPage]);
 applyLedSettingsUI();
+initCustomSelects();
 loadSavedConfig();
 if (uiScaleSel) {
-  uiScaleSel.value = "1.5";
+  uiScaleSel.value = "1";
   uiScaleSel.onchange = () => {
     applyUiScale(uiScaleSel.value);
   };
 }
-applyUiScale(uiScaleSel?.value || uiScale || 1.5);
+applyUiScale(uiScaleSel?.value || uiScale || 1);
 applyPatternControlLatchUI();
 window.addEventListener("resize", () => {
   syncDeviceTabProgressCanvas();
@@ -4263,11 +4403,12 @@ function applyScaleUI() {
 }
 
 function applyUiScale(val) {
-  const num = Math.max(1, Math.min(1.5, Number(val) || 1));
+  const num = Math.max(0.75, Math.min(1.25, Number(val) || 1));
   const prev = uiScale;
   uiScale = num;
   document.documentElement.style.setProperty("--ui-scale", uiScale);
   if (uiScaleSel) uiScaleSel.value = String(uiScale);
+  window.electronAPI?.resizeForScale?.(uiScale);
   // Resize the Electron window to match scale (no-op in browser)
   if (!uiScaleInitialized || num !== prev) {
     uiScaleInitialized = true;
@@ -4664,9 +4805,6 @@ function applyLedSettingsUI() {
     const show = showLogToggle.checked;
     document.getElementById("log").classList.toggle("hidden", !show);
   }
-  if (allowMDExternalToggle) {
-    allowMDExternalToggle.checked = !!allowMDExternal;
-  }
   applyPatternControlLatchUI();
 }
 
@@ -4863,10 +5001,6 @@ function loadSavedConfig() {
     defaultDeviceColor = parsed.defaultDeviceColor;
       applyDefaultDeviceColor();
     }
-    if (typeof parsed.allowMDExternal === "boolean" && allowMDExternalToggle) {
-      allowMDExternal = parsed.allowMDExternal;
-      allowMDExternalToggle.checked = allowMDExternal;
-    }
     if (typeof parsed.patternControlLatch === "boolean" && patternControlLatchToggle) {
       patternControlLatch = parsed.patternControlLatch;
       applyPatternControlLatchUI();
@@ -4907,6 +5041,9 @@ function loadSavedConfig() {
     if (ws?.readyState === WebSocket.OPEN) {
       sendClockOutDeviceIfChanged(clockOutPortId);
     }
+  }
+  if (Number.isFinite(parsed.uiScale)) {
+    applyUiScale(parsed.uiScale);
   }
     if (parsed.defaultDeviceColor && /^#([0-9a-f]{6}|[0-9a-f]{3})$/i.test(parsed.defaultDeviceColor)) {
       defaultDeviceColor = parsed.defaultDeviceColor;
@@ -4958,10 +5095,6 @@ function pushSavedConfigToServer(opts = {}) {
   if (typeof cachedConfig.autoFill === "boolean") {
     autoFillBars = !!cachedConfig.autoFill;
     sendAutoFillIfChanged(autoFillBars);
-  }
-  if (typeof cachedConfig.allowMDExternal === "boolean") {
-    allowMDExternal = !!cachedConfig.allowMDExternal;
-    enforceMDMidiOut();
   }
   if (cachedConfig.defaultDeviceColor && /^#([0-9a-f]{6}|[0-9a-f]{3})$/i.test(cachedConfig.defaultDeviceColor)) {
     defaultDeviceColor = cachedConfig.defaultDeviceColor;
