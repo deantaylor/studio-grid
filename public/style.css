@@ -57,6 +57,7 @@
   --ui-scale: 1;
   --iconoir-stroke-width: 3;
   --scale-rows: 7;
+  
   /* tokens */
   --radius-sm: 1px;
   --radius-md: 2px;
@@ -65,6 +66,7 @@
   --spacing-8: 8px;
   --spacing-16: 16px;
   --spacing-24: 24px;
+  --spacing-32: 32px;
   --spacing-40: 40px;
 
   /* State mixing */
@@ -1028,7 +1030,7 @@ canvas#grid {
 }
 .drum-notes {
   position: absolute;
-  top: 0;
+  top: -8px;
   left: calc(50% - (var(--grid-width) / 2) - var(--spacing-16));
   transform: translateX(-100%);
   display: grid;
@@ -1059,7 +1061,7 @@ canvas#grid {
 }
 .scale-notes {
   position: absolute;
-  top: 0;
+  top: -8px;
   left: calc(50% - (var(--grid-width) / 2) - var(--spacing-16));
   transform: translateX(-100%);
   display: grid;

@@ -326,6 +326,7 @@ function broadcastState(ws = null) {
     tempo: state.tempo,
     swing: state.swing,
     baseDivision: state.baseDivision,
+    gateLength: state.gateLength,
     midi: state.midi,
     currentPage: state.currentPage,
     scale: state.scale,
@@ -453,6 +454,12 @@ function handleClientMessage(ws, data) {
       {
         state.setBaseDivision(data.division);
         broadcast({ type: "base_division", division: state.baseDivision });
+      }
+      break;
+    case "set_gate_length":
+      {
+        state.setGateLength(data.length);
+        broadcast({ type: "gate_length", length: state.gateLength });
       }
       break;
     case "set_pattern_control_latch":
@@ -1121,6 +1128,10 @@ function queueLedFrame(frame, force = false) {
   const octaveEvents = state.consumeOctaveOverlays ? state.consumeOctaveOverlays() : [];
   if (octaveEvents.length) {
     octaveEvents.forEach((ev) => broadcast({ type: "octave_overlay", ...ev }));
+  }
+  const microEvents = state.consumeMicroOverlays ? state.consumeMicroOverlays() : [];
+  if (microEvents.length) {
+    microEvents.forEach((ev) => broadcast({ type: "micro_overlay", ...ev }));
   }
   const patternControllersPresent = hasPatternControllers();
   if (!force && !patternControllersPresent && lastRenderedFrame && frame && lastRenderedFrame.length === frame.length) {

@@ -142,7 +142,8 @@ let activeUiPage = currentPage; // 1-8 device pages, 0 = pattern launcher
 let lastFocusedDevice = currentPage;
 let pendingLauncherExitPage = null;
 let deviceToolbarBaseHeight = null;
-let baseDivision = 16; // denominator of base note (1/16)
+let baseDivision = 16; // base step division (1/16)
+let gateLength = 1; // fraction of step length (0.25..1)
 let playheads = Array(9).fill(0);
 let deviceHeld = false;
 let draggedDevicePage = null;
@@ -177,6 +178,7 @@ const clockToggleBtn = document.getElementById("clock-toggle-btn");
 const clockOutToggle = document.getElementById("clock-out-enable");
 const clockOutPortSel = document.getElementById("clock-out-port");
 const baseNoteLenSel = document.getElementById("base-note-length");
+const gateLengthSel = document.getElementById("gate-length");
 const scaleRootSel = document.getElementById("scale-root");
 const scaleModeSel = document.getElementById("scale-mode");
 const settingsTempoInput = document.getElementById("settings-tempo");
@@ -921,6 +923,7 @@ const lastSentState = {
   patternControlLatch: null,
   showMonomeControls: null,
   baseDivision: null,
+  gateLength: null,
   mdSlideParams: { factor: null, curve: null, baseMs: null },
   monoSlidePad: null,
   ledLevels: {},
@@ -936,6 +939,7 @@ function resetLastSentState() {
   lastSentState.patternControlLatch = null;
   lastSentState.showMonomeControls = null;
   lastSentState.baseDivision = null;
+  lastSentState.gateLength = null;
   lastSentState.mdSlideParams = { factor: null, curve: null, baseMs: null };
   lastSentState.monoSlidePad = null;
   lastSentState.ledLevels = {};
@@ -1045,6 +1049,13 @@ function sendBaseDivisionIfChanged(division) {
   if (lastSentState.baseDivision === division) return;
   lastSentState.baseDivision = division;
   ws.send(JSON.stringify({ type: "set_base_division", division }));
+}
+
+function sendGateLengthIfChanged(length) {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  if (lastSentState.gateLength === length) return;
+  lastSentState.gateLength = length;
+  ws.send(JSON.stringify({ type: "set_gate_length", length }));
 }
 
 function sendMdSlideParamsIfChanged(factor, curve, baseMs) {
@@ -1182,6 +1193,10 @@ function connectWS() {
       tempo = msg.tempo || tempo;
       swing = msg.swing || swing;
       baseDivision = msg.baseDivision || baseDivision;
+      if (typeof msg.gateLength === "number") {
+        gateLength = normalizeGateLength(msg.gateLength);
+        applyGateLengthUI();
+      }
       midiSettings = msg.midi || midiSettings;
       if (typeof msg.monoSlidePad === "number") {
         monoSlidePad = Math.max(0, Math.min(0.5, Number(msg.monoSlidePad)));
@@ -1528,6 +1543,11 @@ function connectWS() {
     } else if (msg.type === "base_division") {
       baseDivision = msg.division || baseDivision;
       applyBaseNoteLenUI();
+    } else if (msg.type === "gate_length") {
+      if (typeof msg.length === "number") {
+        gateLength = normalizeGateLength(msg.length);
+        applyGateLengthUI();
+      }
     }
   };
 }
@@ -2009,13 +2029,56 @@ function renderFrame(frame) {
     return (now - (o.ts || now)) < 1500;
   });
   overlays[currentPage] = filtered;
+  const combinedOverlays = new Map();
+  const singleOverlays = [];
   overlays[currentPage].forEach((o) => {
-    ctx.save();
+    const rawY = getOverlayRawY(o);
     const drawY = getOverlayDrawY(o);
+    const isNumeric = /^[-+]?\d/.test(o.text);
+    const isMicro = o.kind === "micro";
+    if (isMicro || isNumeric) {
+      const key = `${o.x}:${rawY}`;
+      const entry = combinedOverlays.get(key) || {
+        x: o.x,
+        rawY,
+        microText: null,
+        octaveText: null,
+        microDrawY: null,
+        octaveDrawY: null
+      };
+      if (isMicro) {
+        entry.microText = o.text;
+        entry.microDrawY = drawY;
+      } else {
+        entry.octaveText = o.text;
+        entry.octaveDrawY = drawY;
+      }
+      combinedOverlays.set(key, entry);
+      return;
+    }
+    singleOverlays.push({ x: o.x, drawY, text: o.text, useSurface: false });
+  });
+  const overlayRenderList = [];
+  combinedOverlays.forEach((entry) => {
+    const microVal = Number(entry.microText ?? 0);
+    const octaveVal = Number(entry.octaveText ?? 0);
+    if (microVal === 0 && octaveVal === 0) return;
+    const microText = entry.microText ?? "0";
+    const octaveText = entry.octaveText ?? "0";
+    const text = `${microText} | ${octaveText}`;
+    const drawY = Number.isFinite(entry.octaveDrawY) ? entry.octaveDrawY : entry.microDrawY;
+    if (!Number.isFinite(drawY)) return;
+    overlayRenderList.push({ x: entry.x, drawY, text, useSurface: true });
+  });
+  overlayRenderList.push(...singleOverlays);
+  overlayRenderList.forEach((o) => {
+    ctx.save();
     const px = o.x * (CELL_SIZE + CELL_GAP);
-    const py = drawY * (CELL_SIZE + CELL_GAP);
+    const py = o.drawY * (CELL_SIZE + CELL_GAP);
     ctx.translate(px, py);
-    ctx.fillStyle = getCssVar("--label") || getCssVar("--muted");
+    ctx.fillStyle = o.useSurface
+      ? (getCssVar("--surface") || getCssVar("--label"))
+      : (getCssVar("--label") || getCssVar("--muted"));
     ctx.font = LABEL_FONT;
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
@@ -2677,6 +2740,25 @@ document.getElementById("import").onclick = () => {
   };
   picker.click();
 };
+function normalizeBaseDivision(value) {
+  const allowed = [12, 16, 24, 32];
+  const fallback = 16;
+  let val = Math.round(Number(value) || fallback);
+  if (val <= 4) val = val * 4; // migrate old per-beat values (2->8, 4->16)
+  if (val === 6) val = 24; // migrate old 6-per-beat
+  if (!allowed.includes(val)) val = fallback;
+  return val;
+}
+
+function normalizeGateLength(value) {
+  const allowed = [0.25, 0.5, 0.75, 1];
+  let val = Number(value);
+  if (!Number.isFinite(val)) return 1;
+  if (val > 1.01) val = val / 100;
+  val = Math.round(val * 100) / 100;
+  return allowed.includes(val) ? val : 1;
+}
+
 function syncSettingsInputs() {
   if (settingsTempoInput) settingsTempoInput.value = formatTempoDisplay(tempo);
   if (uiScaleSel) uiScaleSel.value = String(uiScale || 1);
@@ -2695,6 +2777,7 @@ function syncSettingsInputs() {
   if (mdBaseSweepInput) mdBaseSweepInput.value = mdBaseSweep;
   if (monoSlidePadInput) monoSlidePadInput.value = Math.round((monoSlidePad || 0) * 100);
   if (baseNoteLenSel) applyBaseNoteLenUI();
+  if (gateLengthSel) applyGateLengthUI();
   Object.entries(ledInputs).forEach(([k, el]) => {
     if (el) el.value = ledLevels[k] ?? 0;
   });
@@ -2774,13 +2857,19 @@ function applySettingsFromInputs() {
     }
   }
   if (baseNoteLenSel) {
-    let val = Math.max(1, Math.min(32, Math.round(Number(baseNoteLenSel.value) || baseDivision || 16)));
-    if (val <= 4) val = val * 4;
-    if (val === 6) val = 24;
+    const val = normalizeBaseDivision(baseNoteLenSel.value || baseDivision || 16);
     if (baseDivision !== val) {
       baseDivision = val;
       baseNoteLenSel.value = String(val);
       sendBaseDivisionIfChanged(baseDivision);
+    }
+  }
+  if (gateLengthSel) {
+    const val = normalizeGateLength(gateLengthSel.value || gateLength || 1);
+    if (gateLength !== val) {
+      gateLength = val;
+      gateLengthSel.value = String(Math.round(val * 100));
+      sendGateLengthIfChanged(gateLength);
     }
   }
 
@@ -2897,14 +2986,21 @@ function applySettingsFromInputs() {
   }
   if (baseNoteLenSel) {
     const commitBaseDivision = () => {
-      let val = Math.max(1, Math.min(32, Math.round(Number(baseNoteLenSel.value) || baseDivision || 16)));
-      if (val <= 4) val = val * 4; // migrate old per-beat values (2->8, 4->16)
-      if (val === 6) val = 24; // migrate old 6-per-beat
+      const val = normalizeBaseDivision(baseNoteLenSel.value || baseDivision || 16);
       baseDivision = val;
       baseNoteLenSel.value = String(val);
       sendBaseDivisionIfChanged(baseDivision);
     };
     baseNoteLenSel.addEventListener("change", commitBaseDivision);
+  }
+  if (gateLengthSel) {
+    const commitGateLength = () => {
+      const val = normalizeGateLength(gateLengthSel.value || gateLength || 1);
+      gateLength = val;
+      gateLengthSel.value = String(Math.round(val * 100));
+      sendGateLengthIfChanged(gateLength);
+    };
+    gateLengthSel.addEventListener("change", commitGateLength);
   }
 }
 
@@ -2922,6 +3018,7 @@ if (settingsSaveCfg) {
         autoFill: !!autoFillBars,
         autoLoadSet: !!autoLoadSet,
         baseDivision,
+        gateLength,
         midiSettings,
         patternControlLatch,
         showMonomeControls,
@@ -2969,6 +3066,9 @@ if (settingsRestoreCfg) {
     baseDivision = 16;
     applyBaseNoteLenUI();
     sendBaseDivisionIfChanged(baseDivision);
+    gateLength = 1;
+    applyGateLengthUI();
+    sendGateLengthIfChanged(gateLength);
     monoSlidePad = 0.1;
     applyMdSlideSpeedUI();
     sendMonoSlidePadIfChanged(monoSlidePad);
@@ -3853,6 +3953,9 @@ function sendGridTapFromClient(clientX, clientY) {
   const x = Math.floor((clientX - rect.left) / (rect.width / WIDTH));
   const y = Math.floor((clientY - rect.top) / (rect.height / HEIGHT));
   if (x < 0 || x >= WIDTH || y < 0 || y >= HEIGHT) return;
+  if (noteMenu && !noteMenu.classList.contains("hidden") && noteMenuTarget && noteMenuTarget.x === x && noteMenuTarget.y === y) {
+    closeNoteMenu();
+  }
   // send a full press+release tap so mouse input only toggles notes on/off
   if (ws?.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify({ type: "grid_key", x, y, s: 1 }));
@@ -4126,7 +4229,14 @@ octaveControls.addEventListener("click", (e) => {
   sendGridTapFromClient(e.clientX, e.clientY);
 });
 octaveControls.addEventListener("contextmenu", (e) => {
-  if (e.target !== octaveControls) return;
+  e.preventDefault();
+  handleCanvasContextMenu(e.clientX, e.clientY);
+});
+microControls.addEventListener("click", (e) => {
+  if (e.target !== microControls) return;
+  sendGridTapFromClient(e.clientX, e.clientY);
+});
+microControls.addEventListener("contextmenu", (e) => {
   e.preventDefault();
   handleCanvasContextMenu(e.clientX, e.clientY);
 });
@@ -4239,6 +4349,7 @@ function addOverlay(page, x, y, octave, delta) {
   if (!val) {
     // remove any existing numeric overlay when returning to zero
     overlays[pageIdx] = overlays[pageIdx].filter((o) => {
+      if (o.kind && o.kind !== "octave") return true;
       if (!/^[-+]?\d/.test(o.text)) return true;
       return !(o.x === x && getOverlayRawY(o) === y);
     });
@@ -4248,6 +4359,7 @@ function addOverlay(page, x, y, octave, delta) {
   const text = val > 0 ? `+${val}` : `${val}`;
   const ts = Date.now();
   overlays[pageIdx] = overlays[pageIdx].filter((o) => {
+    if (o.kind && o.kind !== "octave") return true;
     if (!/^[-+]?\d/.test(o.text)) return true;
     return !(o.x === x && getOverlayRawY(o) === y);
   });
@@ -4255,11 +4367,12 @@ function addOverlay(page, x, y, octave, delta) {
   if (pageIdx === currentPage) renderFrame(frames[currentPage]);
 }
 
-function addMicroOverlay(page, x, y, microOffset, delta, octave) {
+function addMicroOverlay(page, x, y, microOffset, delta, octave, opts = {}) {
   const pageIdx = Number.isFinite(page) ? page : currentPage;
   if (!overlays[pageIdx]) overlays[pageIdx] = [];
   const rawVal = Number.isFinite(microOffset) ? microOffset : (Number.isFinite(delta) ? delta : 0);
-  if (!rawVal) {
+  const showZero = !!opts.showZero;
+  if (!rawVal && !showZero) {
     overlays[pageIdx] = overlays[pageIdx].filter((o) => !(o.kind === "micro" && o.x === x && getOverlayRawY(o) === y));
     if (pageIdx === currentPage) renderFrame(frames[currentPage]);
     return;
@@ -4274,8 +4387,7 @@ function addMicroOverlay(page, x, y, microOffset, delta, octave) {
     text,
     ts,
     kind: "micro",
-    octave: Number.isFinite(octave) ? octave : undefined,
-    expiresAt: ts + 2000
+    octave: Number.isFinite(octave) ? octave : undefined
   });
   if (pageIdx === currentPage) renderFrame(frames[currentPage]);
 }
@@ -4335,7 +4447,7 @@ function handleOctaveOverlayMessage(msg) {
 function handleMicroOverlayMessage(msg) {
   const pageIdx = Number.isFinite(msg.page) ? msg.page : currentPage;
   const rawY = Number.isFinite(msg.rawY) ? msg.rawY : unmapOverlayY(msg.y, 0, fullScaleMode);
-  addMicroOverlay(pageIdx, msg.x, rawY, msg.microOffset, msg.delta, msg.octave);
+  addMicroOverlay(pageIdx, msg.x, rawY, msg.microOffset, msg.delta, msg.octave, { showZero: !!msg.showZero });
 }
 
 function handleAccentOverlayMessage(msg) {
@@ -4397,6 +4509,15 @@ function handleStepStateMessage(msg) {
     }
     hoveredStep = { x: msg.x, y: msg.y };
     showOctaveControls(hover);
+    handleMicroOverlayMessage({
+      page: msg.page,
+      x: msg.x,
+      y: msg.y,
+      microOffset: msg.microOffset,
+      delta: 0,
+      octave: msg.octave,
+      showZero: true
+    });
   }
 }
 
@@ -4857,9 +4978,17 @@ function applyMdSlideSpeedUI() {
 
 function applyBaseNoteLenUI() {
   if (baseNoteLenSel) {
-    const allowed = ["8", "16", "32"];
+    const allowed = ["12", "16", "24", "32"];
     const val = String(baseDivision || 16);
     baseNoteLenSel.value = allowed.includes(val) ? val : "16";
+  }
+}
+
+function applyGateLengthUI() {
+  if (gateLengthSel) {
+    const allowed = ["25", "50", "75", "100"];
+    const val = String(Math.round((gateLength || 1) * 100));
+    gateLengthSel.value = allowed.includes(val) ? val : "100";
   }
 }
 
@@ -5025,11 +5154,12 @@ function loadSavedConfig() {
       applyPageMidi();
     }
     if (Number.isFinite(parsed.baseDivision)) {
-      let div = Math.round(parsed.baseDivision);
-      if (div <= 4) div = div * 4; // migrate old per-beat values (2->8, 4->16)
-      if (div === 6) div = 24;
-      baseDivision = Math.max(1, Math.min(32, div));
+      baseDivision = normalizeBaseDivision(parsed.baseDivision);
       applyBaseNoteLenUI();
+    }
+    if (Number.isFinite(parsed.gateLength)) {
+      gateLength = normalizeGateLength(parsed.gateLength);
+      applyGateLengthUI();
     }
   if (typeof parsed.autoFill === "boolean") {
     autoFillBars = parsed.autoFill;
@@ -5152,11 +5282,12 @@ function pushSavedConfigToServer(opts = {}) {
     applyDefaultDeviceColor();
   }
   if (typeof cachedConfig.baseDivision === "number") {
-    let div = Math.round(cachedConfig.baseDivision);
-    if (div <= 4) div = div * 4; // migrate old per-beat values
-    if (div === 6) div = 24;
-    baseDivision = Math.max(1, Math.min(32, div));
+    baseDivision = normalizeBaseDivision(cachedConfig.baseDivision);
     sendBaseDivisionIfChanged(baseDivision);
+  }
+  if (typeof cachedConfig.gateLength === "number") {
+    gateLength = normalizeGateLength(cachedConfig.gateLength);
+    sendGateLengthIfChanged(gateLength);
   }
   if (typeof cachedConfig.patternControlLatch === "boolean") {
     patternControlLatch = !!cachedConfig.patternControlLatch;

@@ -49,7 +49,8 @@ export class SGridState {
   constructor() {
     this.tempo = 120;
     this.swing = 50; // 50 = straight, 80 max swing
-    this.baseDivision = 16; // denominator of base note (1/16)
+    this.baseDivision = 16; // base step division (1/16)
+    this.gateLength = 1; // fraction of step length (0.25..1)
     this.scale = { root: 0, mode: "major" };
     this.pages = this.buildDefaultPages();
     this.sequencerTypes = this.pages.map((p, i) => (i === 0 ? null : p.sequencerType));
@@ -181,9 +182,25 @@ export class SGridState {
     }
   }
 
+  enqueueMicroOverlay(payload) {
+    if (!payload || typeof payload !== "object") return;
+    if (!this.pendingMicroOverlays) this.pendingMicroOverlays = [];
+    this.pendingMicroOverlays.push(payload);
+    this.forceLedRefresh = true;
+    if (typeof this.requestRender === "function") {
+      this.requestRender();
+    }
+  }
+
   consumeOctaveOverlays() {
     const out = this.pendingOctaveOverlays ? this.pendingOctaveOverlays.slice() : [];
     this.pendingOctaveOverlays = [];
+    return out;
+  }
+
+  consumeMicroOverlays() {
+    const out = this.pendingMicroOverlays ? this.pendingMicroOverlays.slice() : [];
+    this.pendingMicroOverlays = [];
     return out;
   }
 
@@ -494,7 +511,7 @@ export class SGridState {
   }
 
   setBaseDivision(div) {
-    const options = [8, 12, 16, 24, 32]; // note denominators (1/8..1/32)
+    const options = [12, 16, 24, 32]; // note denominators (1/12..1/32)
     const fallback = 16;
     let val = Number(div) || fallback;
     // backward compat: old values were "per beat" (4=1/16, 2=1/8, 1=1/4, 3=triplet-ish)
@@ -508,6 +525,15 @@ export class SGridState {
       val = fallback;
     }
     this.baseDivision = options.includes(val) ? val : fallback;
+  }
+
+  setGateLength(length) {
+    const options = [0.25, 0.5, 0.75, 1];
+    let val = Number(length);
+    if (!Number.isFinite(val)) val = 1;
+    if (val > 1.01) val = val / 100;
+    val = Math.round(val * 100) / 100;
+    this.gateLength = options.includes(val) ? val : 1;
   }
 
   setSwing(val) {
@@ -652,6 +678,7 @@ export class SGridState {
       tempo: this.tempo,
       swing: this.swing,
       baseDivision: this.baseDivision,
+      gateLength: this.gateLength,
       microFormat: "int96",
       scale: this.scale,
       currentPage: this.currentPage,
@@ -679,6 +706,7 @@ export class SGridState {
     if (snap.tempo) this.tempo = clamp(Number(snap.tempo) || 120, 20, 300);
     if (snap.swing) this.swing = clamp(Number(snap.swing) || 50, 50, 80);
     if (snap.baseDivision) this.setBaseDivision(snap.baseDivision);
+    if (snap.gateLength !== undefined) this.setGateLength(snap.gateLength);
     if (snap.scale && typeof snap.scale === "object") {
       this.scale = {
         root: clamp(Number(snap.scale.root) || 0, -24, 24),
@@ -962,8 +990,9 @@ export class SGridState {
         const sameCell = this.heldStep && this.heldStep.x === x && this.heldStep.y === y;
         const upDownNeighbor = this.heldStep && this.heldStep.x === x && Math.abs(this.heldStep.y - y) === 1;
         const leftNeighbor = this.heldStep && this.heldStep.x - 1 === x && this.heldStep.y === y;
-        // slide can come from any press in the immediate right column, as long as that step is active
-        const rightNeighbor = this.heldStep && this.heldStep.x + 1 === x;
+        const rightNeighbor = this.heldStep && this.heldStep.x + 1 === x && this.heldStep.y === y;
+        // slide must come from a diagonal press in the next column
+        const rightDiagonal = this.heldStep && this.heldStep.x + 1 === x && Math.abs(this.heldStep.y - y) === 1;
         let inEdit = this.heldStep && (heldInfo?.editMode || heldDuration >= 150);
         if (this.heldStep && heldInfo && !heldInfo.editMode && heldDuration >= 150) {
           heldInfo.editMode = true;
@@ -976,6 +1005,18 @@ export class SGridState {
               ? this.getNoteOctave(step, targetDegree)
               : (step.octave || 0);
             this.enqueueOctaveOverlay({ page: this.currentPage, x: this.heldStep.x, y: this.heldStep.y, octave: curOct, delta: 0, fromHold: true });
+            const curMicro = this.getNoteMicroOffset(step, targetDegree, seqTypeCur);
+            const rawY = uiMode ? (this.heldStep.y === 0 ? 6 : this.heldStep.y - 1) : this.heldStep.y;
+            this.enqueueMicroOverlay({
+              page: this.currentPage,
+              x: this.heldStep.x,
+              y: this.heldStep.y,
+              rawY,
+              microOffset: curMicro,
+              delta: 0,
+              octave: curOct,
+              showZero: true
+            });
           }
         }
         // once an edit action is taken, block further presses until the held note is released
@@ -983,25 +1024,15 @@ export class SGridState {
           return null;
         }
         const microEditActive = !!heldInfo?.microEdit;
-        if (inEdit && !(sameCell || upDownNeighbor || leftNeighbor || rightNeighbor)) {
+        if (inEdit && !(sameCell || upDownNeighbor || leftNeighbor || rightNeighbor || rightDiagonal)) {
           return null;
         }
         const seqTypeSlide = page?.sequencerType || "mono";
         const slideAllowed = seqTypeSlide === "mono" &&
-          inEdit && rightNeighbor && heldStepObj?.on && !microEditActive && (!currentAction || currentAction === "slide");
+          inEdit && rightDiagonal && heldStepObj?.on;
         const mdSlideAllowed = seqTypeSlide === "mdtonal" &&
-          inEdit && rightNeighbor && heldStepObj?.on && !microEditActive && (!currentAction || currentAction === "mdslide");
-        const microActivateAllowed = inEdit && leftNeighbor && heldStepObj?.on && (!currentAction || currentAction === "micro");
-        if (microActivateAllowed && heldInfo && !microEditActive) {
-          heldInfo.action = "micro";
-          heldInfo.actionDone = false;
-          heldInfo.microEdit = true;
-          this.keyHolds.set(heldKey, heldInfo);
-          this.forceLedRefresh = true;
-          if (typeof this.requestRender === "function") this.requestRender();
-          return null;
-        }
-        const microNudgeAllowed = inEdit && microEditActive && heldStepObj?.on && (leftNeighbor || rightNeighbor);
+          inEdit && rightDiagonal && heldStepObj?.on;
+        const microNudgeAllowed = inEdit && heldStepObj?.on && (leftNeighbor || rightNeighbor);
         if (microNudgeAllowed) {
           const delta = leftNeighbor ? -1 : 1;
           if (heldInfo) {
@@ -1038,7 +1069,7 @@ export class SGridState {
           if (heldInfo) {
             heldInfo.slideTriggered = true;
             heldInfo.action = "slide";
-            heldInfo.actionDone = true;
+            heldInfo.actionDone = false;
             this.keyHolds.set(heldKey, heldInfo);
           }
           this.heldStepModified = true;
@@ -1049,13 +1080,13 @@ export class SGridState {
           if (heldInfo) {
             heldInfo.slideTriggered = true;
             heldInfo.action = "mdslide";
-            heldInfo.actionDone = true;
+            heldInfo.actionDone = false;
             this.keyHolds.set(heldKey, heldInfo);
           }
           this.heldStepModified = true;
           return { type: "slide", x: this.heldStep.x, y: this.heldStep.y, slide: heldStepObj.mdSlide };
         }
-        const allowNeighborGesture = inEdit && wasOn && upDownNeighbor && !microEditActive && (!currentAction || currentAction === "octave") && (page?.sequencerType || "mono") !== "drum";
+        const allowNeighborGesture = inEdit && wasOn && upDownNeighbor && (page?.sequencerType || "mono") !== "drum";
         if (allowNeighborGesture) {
           if (heldInfo) {
             heldInfo.action = "octave";
@@ -1098,6 +1129,18 @@ export class SGridState {
             if (stepNow?.on) {
               const curOct = seqTypeNow === "poly" ? this.getNoteOctave(stepNow, targetDegree) : (stepNow.octave || 0);
               this.enqueueOctaveOverlay({ page: this.currentPage, x, y, octave: curOct, delta: 0, fromHold: true });
+              const curMicro = this.getNoteMicroOffset(stepNow, targetDegree, seqTypeNow);
+              const rawY = uiMode ? (y === 0 ? 6 : y - 1) : y;
+              this.enqueueMicroOverlay({
+                page: this.currentPage,
+                x,
+                y,
+                rawY,
+                microOffset: curMicro,
+                delta: 0,
+                octave: curOct,
+                showZero: true
+              });
             }
           }, 150);
           this.holdTimers.set(key, timer);
@@ -1230,7 +1273,8 @@ export class SGridState {
           return null;
         }
         const seqType = page?.sequencerType || "mono";
-        const keepEdit = holdInfo?.editMode && !holdInfo?.actionDone && holdInfo?.slideTriggered && !holdInfo?.octaveChanged;
+        const hasEditAction = !!(holdInfo?.octaveChanged || holdInfo?.slideTriggered || holdInfo?.microEdit || (holdInfo?.action && holdInfo.action !== "accent"));
+        const keepEdit = holdInfo?.editMode && !holdInfo?.actionDone && !hasEditAction && key !== activeKey;
         if (!keepEdit) this.keyHolds.delete(key);
         const duration = Date.now() - ((holdInfo && holdInfo.start) || this.holdStart || 0);
         this.holdStart = 0;
@@ -1254,7 +1298,6 @@ export class SGridState {
         }
         const targetDeg = rowInfo.degree;
         // long press toggles accent (as long as no other edit action was taken)
-        const hasEditAction = !!(holdInfo?.octaveChanged || holdInfo?.slideTriggered || holdInfo?.microEdit || (holdInfo?.action && holdInfo.action !== "accent"));
         if (duration >= 150 && holdInfo?.wasOn && step2.on && !hasEditAction) {
           if (seqType === "poly" || seqType === "drum") {
             if (!Array.isArray(step2.accented)) step2.accented = [];
@@ -1514,6 +1557,20 @@ export class SGridState {
     const current = this.getNoteMicroOffset(step, degree, seqType);
     const next = this.setNoteMicroOffset(step, degree, seqType, current + (delta || 0));
     if (next === current) return null;
+    const rawY = opts.uiMode ? (y === 0 ? 6 : y - 1) : y;
+    const octave = (seqType === "poly" || seqType === "drum")
+      ? this.getNoteOctave(step, degree)
+      : (step?.octave || 0);
+    this.enqueueMicroOverlay({
+      page: this.currentPage,
+      x,
+      y,
+      rawY,
+      microOffset: next,
+      delta: delta || 0,
+      octave,
+      showZero: true
+    });
     return { microOffset: next, delta: delta || 0 };
   }
 
@@ -2285,7 +2342,7 @@ export class SGridState {
                 this.mdGlideValue[p] = value;
               }
               if (!skipMdNote) {
-                const noteDur = Math.max(1, Math.round(baseDur * 0.5 - this.noteOffEpsilonMs));
+                const noteDur = this.gateDurationMs(baseDur * 0.5);
                 if (emit) {
                   midiEvents.push({
                     type: "midi_note",
@@ -2340,7 +2397,7 @@ export class SGridState {
                   continue; // already held by previous slide gate
                 }
                 if (!step.slide) {
-                  const durMs = Math.max(1, Math.round(baseDur - this.noteOffEpsilonMs)); // slide ended; play target at normal length
+                  const durMs = this.gateDurationMs(baseDur); // slide ended; play target at normal length
                   if (emit) {
                     midiEvents.push({
                       type: "midi_note",
@@ -2360,8 +2417,9 @@ export class SGridState {
                 // Trim by swing/epsilon plus a small margin so the slide gate doesn't run past the following note.
                 const chainDurMs = baseDur * Math.max(1, chainLen);
                 const slidePad = this.monoSlidePad || 0;
-                const padMs = this.noteOffEpsilonMs + Math.round(chainDurMs * slidePad);
-                const durMs = Math.max(1, Math.round(chainDurMs - padMs));
+                const gatedChainMs = this.applyGateLength(chainDurMs);
+                const padMs = this.noteOffEpsilonMs + Math.round(gatedChainMs * slidePad);
+                const durMs = Math.max(1, Math.round(gatedChainMs - padMs));
                 if (emit) {
                   midiEvents.push({
                     type: "midi_note",
@@ -2381,8 +2439,9 @@ export class SGridState {
               if (isSlideStart) {
                 const chainDurMs = baseDur * Math.max(1, chainLen);
                 const slidePad = this.monoSlidePad || 0;
-                const padMs = this.noteOffEpsilonMs + Math.round(chainDurMs * slidePad);
-                const durMs = Math.max(1, Math.round(chainDurMs - padMs)); // hold through the chain without overshooting
+                const gatedChainMs = this.applyGateLength(chainDurMs);
+                const padMs = this.noteOffEpsilonMs + Math.round(gatedChainMs * slidePad);
+                const durMs = Math.max(1, Math.round(gatedChainMs - padMs)); // hold through the chain without overshooting
                 if (emit) {
                   midiEvents.push({
                     type: "midi_note",
@@ -2400,7 +2459,7 @@ export class SGridState {
                 continue;
               }
               if (step.tie) {
-                const durMs = baseDur * 2; // tie adds one step
+                const durMs = this.gateDurationMs(baseDur * 2); // tie adds one step
                 if (emit) {
                   midiEvents.push({
                     type: "midi_note",
@@ -2433,7 +2492,7 @@ export class SGridState {
               const microOffset = this.getNoteMicroOffset(step, deg, seqTypePlay);
               const eventTick = baseTick + swingOffsetTicks + microOffset;
               const emit = microOffset >= 0;
-              const durMs = Math.max(1, Math.round(baseDur - this.noteOffEpsilonMs)); // default one step with slight shorten
+              const durMs = this.gateDurationMs(baseDur); // default one step with slight shorten
               const noteVel = (seqTypePlay === "poly" || seqTypePlay === "drum")
                 ? (Array.isArray(step.accented) && step.accented.includes(deg) ? 120 : 96)
                 : (step.accent ? 120 : 96);
@@ -2506,7 +2565,7 @@ export class SGridState {
                   chan: trackCfg.ccChannel
                 });
               }
-              const noteDur = Math.max(1, Math.round(baseDur * 0.5 - this.noteOffEpsilonMs));
+              const noteDur = this.gateDurationMs(baseDur * 0.5);
               midiEvents.push({
                 type: "midi_note",
                 page: p,
@@ -2551,7 +2610,7 @@ export class SGridState {
                 if (samePitch) {
                   // held by previous slide gate
                 } else if (!nextStepObj.slide) {
-                  const durMs = Math.max(1, Math.round(baseDur - this.noteOffEpsilonMs));
+                  const durMs = this.gateDurationMs(baseDur);
                   midiEvents.push({
                     type: "midi_note",
                     page: p,
@@ -2567,8 +2626,9 @@ export class SGridState {
                 } else {
                   const chainDurMs = baseDur * Math.max(1, chainLen);
                   const slidePad = this.monoSlidePad || 0;
-                  const padMs = this.noteOffEpsilonMs + Math.round(chainDurMs * slidePad);
-                  const durMs = Math.max(1, Math.round(chainDurMs - padMs));
+                  const gatedChainMs = this.applyGateLength(chainDurMs);
+                  const padMs = this.noteOffEpsilonMs + Math.round(gatedChainMs * slidePad);
+                  const durMs = Math.max(1, Math.round(gatedChainMs - padMs));
                   midiEvents.push({
                     type: "midi_note",
                     page: p,
@@ -2585,8 +2645,9 @@ export class SGridState {
               } else if (isSlideStart) {
                 const chainDurMs = baseDur * Math.max(1, chainLen);
                 const slidePad = this.monoSlidePad || 0;
-                const padMs = this.noteOffEpsilonMs + Math.round(chainDurMs * slidePad);
-                const durMs = Math.max(1, Math.round(chainDurMs - padMs));
+                const gatedChainMs = this.applyGateLength(chainDurMs);
+                const padMs = this.noteOffEpsilonMs + Math.round(gatedChainMs * slidePad);
+                const durMs = Math.max(1, Math.round(gatedChainMs - padMs));
                 midiEvents.push({
                   type: "midi_note",
                   page: p,
@@ -2600,7 +2661,7 @@ export class SGridState {
                   td3Slide: true
                 });
               } else if (nextStepObj.tie) {
-                const durMs = baseDur * 2;
+                const durMs = this.gateDurationMs(baseDur * 2);
                 midiEvents.push({
                   type: "midi_note",
                   page: p,
@@ -2614,7 +2675,7 @@ export class SGridState {
                   td3Slide: false
                 });
               } else {
-                const durMs = Math.max(1, Math.round(baseDur - this.noteOffEpsilonMs));
+                const durMs = this.gateDurationMs(baseDur);
                 midiEvents.push({
                   type: "midi_note",
                   page: p,
@@ -2643,7 +2704,7 @@ export class SGridState {
                 const octave = seqTypePlay === "poly" ? this.getNoteOctave(nextStepObj, deg) : this.getNoteOctave(nextStepObj, deg || 0);
                 pitch = this.calcPitch(pat.root || 0, mode, deg || 0, octave) + pageTranspose;
               }
-              const durMs = Math.max(1, Math.round(baseDur - this.noteOffEpsilonMs));
+              const durMs = this.gateDurationMs(baseDur);
               const noteVel = (seqTypePlay === "poly" || seqTypePlay === "drum")
                 ? (Array.isArray(nextStepObj.accented) && nextStepObj.accented.includes(deg) ? 120 : 96)
                 : (nextStepObj.accent ? 120 : 96);
@@ -2735,6 +2796,19 @@ export class SGridState {
     const scale = scales[scale_mode] || scales[globalScale.mode] || scales.major;
     const deg = clamp(degree, 0, scale.length - 1);
     return BASE_PITCH + (globalScale.root || 0) + root + scale[deg] + (octave || 0) * 12;
+  }
+
+  gateLengthFactor() {
+    return clamp(Number(this.gateLength) || 1, 0.25, 1);
+  }
+
+  applyGateLength(rawMs) {
+    return Math.max(1, Math.round(rawMs * this.gateLengthFactor()));
+  }
+
+  gateDurationMs(rawMs) {
+    const gated = this.applyGateLength(rawMs);
+    return Math.max(1, Math.round(gated - this.noteOffEpsilonMs));
   }
 
   stepDurationMs(time_scale) {
@@ -3152,7 +3226,7 @@ export class SGridState {
         });
       }
       // microtiming hint in edit mode: light left/right neighbors by offset sign
-      if (inEditMode && this.heldStep && heldInfo?.microEdit) {
+      if (inEditMode && this.heldStep) {
         const hx = this.heldStep.x;
         const hy = this.heldStep.y;
         const seqTypeHint = page?.sequencerType || "mono";
@@ -3161,14 +3235,22 @@ export class SGridState {
         const absHeld = hx + bar * 16;
         const heldStepObj = pat.steps[absHeld];
         const microOffset = this.getNoteMicroOffset(heldStepObj, heldDeg, seqTypeHint);
-        const levelHint = Math.max(1, STEP_MICRO);
-        if (microOffset < 0 && hx > 0) {
-          const idx = hintY * WIDTH + (hx - 1);
-          frame[idx] = Math.max(frame[idx] || 0, levelHint);
-        } else if (microOffset > 0 && hx < (WIDTH - 1)) {
-          const idx = hintY * WIDTH + (hx + 1);
-          frame[idx] = Math.max(frame[idx] || 0, levelHint);
-        }
+        const previewLevel = Math.max(1, Math.round(STEP_MICRO * 0.35));
+        const accentLevel = Math.max(previewLevel, Math.round(STEP_MICRO * 0.8));
+        const candidates = [
+          { x: hx - 1, isLeft: true },
+          { x: hx + 1, isLeft: false }
+        ];
+        candidates.forEach((c) => {
+          if (c.x < 0 || c.x >= WIDTH) return;
+          const idx = hintY * WIDTH + c.x;
+          const levelHint = microOffset > 0
+            ? (c.isLeft ? previewLevel : accentLevel)
+            : microOffset < 0
+              ? (c.isLeft ? accentLevel : previewLevel)
+              : previewLevel;
+          if (frame[idx] === OFF || frame[idx] < levelHint) frame[idx] = levelHint;
+        });
       }
       if (!page.sequencerStopped) {
         const len = Math.max(1, pat.length_steps);
