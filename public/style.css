@@ -40,8 +40,6 @@
   --surface-hover: color-mix(in oklch, var(--bg), var(--surface) 75%);
   --border: color-mix(in oklch, var(--fg), var(--bg) 88%);
   --border-strong: color-mix(in oklch, var(--fg), var(--bg) 70%);
-  --shadow-soft: color-mix(in oklch, var(--bg), var(--fg) 12%);
-  --shadow-strong: color-mix(in oklch, var(--bg), var(--fg) 20%);
   --overlay: color-mix(in oklch, var(--bg), var(--fg) 12%);
   --overlay-strong: color-mix(in oklch, var(--bg), var(--fg) 24%);
   --toast-bg: color-mix(in oklch, var(--bg), var(--fg) 18%);
@@ -53,11 +51,14 @@
   --accent-secondary: color-mix(in oklch, var(--fg), var(--bg) 28%);
   --danger: var(--dev-strong-1);
 
+  --shadow-soft: rgba(0,0,0,0.25);
+  --shadow-strong: rgba(0,0,0,0.125);
+
   --grid-width: 880px;
   --ui-scale: 1;
   --iconoir-stroke-width: 3;
   --scale-rows: 7;
-  
+
   /* tokens */
   --radius-sm: 1px;
   --radius-md: 2px;
@@ -252,7 +253,7 @@ body {
   z-index: 10;
   max-width: var(--grid-width);
   width: 100%;
-  margin: var(--spacing-24) auto var(--spacing-8) auto;
+  margin: var(--spacing-32) auto var(--spacing-8) auto;
 }
 
 .badge {
@@ -853,7 +854,7 @@ textarea {
   padding: 0 var(--spacing-8) 0 var(--spacing-8);
   border: none;
   border-radius: var(--radius-sm);
-  background: var(--base);
+ /* background: var(--base); */ /*removed background from drum note input */
   color: var(--fg);
   font-size: 12px;
   font-weight: 400;
@@ -966,7 +967,7 @@ textarea { resize: vertical; }
 }
 .transpose-step {
   --base: var(--panel);
-  height: 32px;
+  height: 24px;
   padding: var(--spacing-8);
   background: transparent;
   border: none;
@@ -1010,6 +1011,7 @@ canvas#grid {
   height: auto;
   margin: 0;
   grid-column: 2;
+  touch-action: none;
 }
 .grid-wrap {
   display: grid;
@@ -1311,7 +1313,7 @@ canvas#grid {
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   padding: var(--spacing-16) calc(var(--spacing-16) + var(--spacing-8));
-  box-shadow: 0 4 4px black;
+  box-shadow: var(--shadow-strong);
   z-index: 20;
   max-width: min(760px, calc(100vw - 48px));
   width: max-content;
@@ -1448,6 +1450,16 @@ canvas#grid {
   background: var(--hover);
 }
 .context-menu.hidden { display: none; }
+
+.selection-rect {
+  position: absolute;
+  border: 2px solid color-mix(in oklch, var(--fg), transparent 55%);
+  border-radius: var(--radius-md);
+  background: color-mix(in oklch, var(--surface), transparent 85%);
+  pointer-events: none;
+  z-index: 40;
+}
+.selection-rect.hidden { display: none; }
 
 .note-octave-controls {
   position: absolute;

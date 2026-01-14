@@ -395,6 +395,33 @@ function handleClientMessage(ws, data) {
         ws.send(JSON.stringify({ type: "step_state", page: state.currentPage, x: data.x, y: data.y, ...info }));
       }
       break;
+    case "get_steps_state":
+      {
+        const steps = Array.isArray(data.steps) ? data.steps : [];
+        const payload = steps.map((step) => {
+          const x = Number(step?.x);
+          const y = Number(step?.y);
+          if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
+          const info = state.getStepInfo(x, y, { uiMode: fullScaleMode });
+          return { x, y, ...info };
+        }).filter(Boolean);
+        ws.send(JSON.stringify({ type: "steps_state", requestId: data.requestId, page: state.currentPage, steps: payload }));
+      }
+      break;
+    case "move_steps":
+      {
+        const res = state.moveSteps(data.steps, Number(data.dx) || 0, Number(data.dy) || 0, { uiMode: fullScaleMode });
+        ws.send(JSON.stringify({ type: "move_steps_result", requestId: data.requestId, ...res }));
+        if (res?.ok) renderAndPush();
+      }
+      break;
+    case "copy_steps":
+      {
+        const res = state.copySteps(data.steps, Number(data.dx) || 0, Number(data.dy) || 0, { uiMode: fullScaleMode });
+        ws.send(JSON.stringify({ type: "move_steps_result", requestId: data.requestId, ...res }));
+        if (res?.ok) renderAndPush();
+      }
+      break;
     case "set_step_accent":
       {
         const res = state.setStepAccent(data.x, data.y, data.accent, { uiMode: fullScaleMode });

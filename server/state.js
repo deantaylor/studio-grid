@@ -103,6 +103,7 @@ export class SGridState {
     this.holdTimers = new Map(); // key -> timeout id for entering edit mode
     this.requestRender = null; // optional callback wired by server to force a render
     this.auditionHolds = new Map(); // key -> {page, note, channel, cc, ccValue, ccChannel}
+    this.lastMultiSelectTime = 0;
   }
 
   normalizeDeviceOrder(order) {
@@ -982,6 +983,26 @@ export class SGridState {
       const heldKey = this.heldStep ? `${this.heldStep.x},${this.heldStep.y}` : null;
       const heldInfo = heldKey ? this.keyHolds.get(heldKey) : null;
       if (s === 1) {
+        const now = Date.now();
+        const multiHoldAny = this.keyHolds.size > 1;
+        if (multiHoldAny) {
+          this.holdTimers.forEach((t) => clearTimeout(t));
+          this.holdTimers.clear();
+        }
+        const multiHoldActive = this.keyHolds.size > 0 && !this.keyHolds.has(key);
+        if (multiHoldActive) this.lastMultiSelectTime = now;
+        if (multiHoldAny && heldInfo?.editMode) {
+          heldInfo.editMode = false;
+          heldInfo.action = null;
+          heldInfo.actionDone = false;
+          this.keyHolds.set(heldKey, heldInfo);
+          this.enqueueOctaveOverlay({ page: this.currentPage, clear: true });
+        }
+        if (multiHoldActive && !heldInfo?.editMode) {
+          this.holdTimers.forEach((t) => clearTimeout(t));
+          this.holdTimers.clear();
+          this.enqueueOctaveOverlay({ page: this.currentPage, clear: true });
+        }
         const heldAbs = this.heldStep && pat ? this.heldStep.x + pat.barView * 16 : -1;
         const heldStepObj = heldAbs >= 0 ? pat?.steps[heldAbs] : null;
         const wasOn = heldInfo?.wasOn || !!heldStepObj?.on;
@@ -993,8 +1014,13 @@ export class SGridState {
         const rightNeighbor = this.heldStep && this.heldStep.x + 1 === x && this.heldStep.y === y;
         // slide must come from a diagonal press in the next column
         const rightDiagonal = this.heldStep && this.heldStep.x + 1 === x && Math.abs(this.heldStep.y - y) === 1;
-        let inEdit = this.heldStep && (heldInfo?.editMode || heldDuration >= 150);
-        if (this.heldStep && heldInfo && !heldInfo.editMode && heldDuration >= 150) {
+        const editGesture = sameCell || upDownNeighbor || leftNeighbor || rightNeighbor || rightDiagonal;
+        if (heldInfo?.editMode && this.heldStep && !editGesture) {
+          return null;
+        }
+        const multiRecent = now - (this.lastMultiSelectTime || 0) < 150;
+        let inEdit = this.heldStep && !multiHoldAny && (heldInfo?.editMode || (heldDuration >= 150 && !multiRecent));
+        if (this.heldStep && heldInfo && !heldInfo.editMode && heldDuration >= 150 && !multiHoldAny && !multiRecent) {
           heldInfo.editMode = true;
           this.keyHolds.set(heldKey, heldInfo);
           inEdit = true;
@@ -1100,6 +1126,9 @@ export class SGridState {
           }
           return res;
         }
+        if (inEdit) {
+          return null;
+        }
         if (!inEdit) {
           const now = Date.now();
           const seqTypeCur = page?.sequencerType || "mono";
@@ -1114,36 +1143,38 @@ export class SGridState {
             uiMode
           });
           this.holdStart = now;
-          // schedule entry into edit mode after hold threshold
-          const timer = setTimeout(() => {
-            const info = this.keyHolds.get(key);
-            if (!info || info.editMode) return;
-            info.editMode = true;
-            this.keyHolds.set(key, info);
-            // surface current octave immediately
-            const curPat = this.getPattern();
-            const curPage = this.pages[this.currentPage];
-            const seqTypeNow = curPage?.sequencerType || "mono";
-            const absNow = curPat ? x + (curPat.barView || 0) * 16 : -1;
-            const stepNow = curPat && absNow >= 0 ? curPat.steps[absNow] : null;
-            if (stepNow?.on) {
-              const curOct = seqTypeNow === "poly" ? this.getNoteOctave(stepNow, targetDegree) : (stepNow.octave || 0);
-              this.enqueueOctaveOverlay({ page: this.currentPage, x, y, octave: curOct, delta: 0, fromHold: true });
-              const curMicro = this.getNoteMicroOffset(stepNow, targetDegree, seqTypeNow);
-              const rawY = uiMode ? (y === 0 ? 6 : y - 1) : y;
-              this.enqueueMicroOverlay({
-                page: this.currentPage,
-                x,
-                y,
-                rawY,
-                microOffset: curMicro,
-                delta: 0,
-                octave: curOct,
-                showZero: true
-              });
-            }
-          }, 150);
-          this.holdTimers.set(key, timer);
+          if (!multiHoldActive) {
+            // schedule entry into edit mode after hold threshold
+            const timer = setTimeout(() => {
+              const info = this.keyHolds.get(key);
+              if (!info || info.editMode || this.keyHolds.size > 1) return;
+              info.editMode = true;
+              this.keyHolds.set(key, info);
+              // surface current octave immediately
+              const curPat = this.getPattern();
+              const curPage = this.pages[this.currentPage];
+              const seqTypeNow = curPage?.sequencerType || "mono";
+              const absNow = curPat ? x + (curPat.barView || 0) * 16 : -1;
+              const stepNow = curPat && absNow >= 0 ? curPat.steps[absNow] : null;
+              if (stepNow?.on) {
+                const curOct = seqTypeNow === "poly" ? this.getNoteOctave(stepNow, targetDegree) : (stepNow.octave || 0);
+                this.enqueueOctaveOverlay({ page: this.currentPage, x, y, octave: curOct, delta: 0, fromHold: true });
+                const curMicro = this.getNoteMicroOffset(stepNow, targetDegree, seqTypeNow);
+                const rawY = uiMode ? (y === 0 ? 6 : y - 1) : y;
+                this.enqueueMicroOverlay({
+                  page: this.currentPage,
+                  x,
+                  y,
+                  rawY,
+                  microOffset: curMicro,
+                  delta: 0,
+                  octave: curOct,
+                  showZero: true
+                });
+              }
+            }, 150);
+            this.holdTimers.set(key, timer);
+          }
         }
         this.holdTargetDegree = targetDegree;
         // change/add note on existing step without toggling if pressing a different row in same column
@@ -1574,6 +1605,177 @@ export class SGridState {
     return { microOffset: next, delta: delta || 0 };
   }
 
+  moveSteps(steps = [], dx = 0, dy = 0, opts = {}) {
+    if (!Array.isArray(steps) || !steps.length) return { ok: false, reason: "empty" };
+    const pat = this.getPattern();
+    if (!pat) return { ok: false, reason: "no_pattern" };
+    const uiMode = !!opts.uiMode;
+    const rows = uiMode ? 8 : 7;
+    const wrapIndex = (val, max) => {
+      if (!max) return 0;
+      const mod = val % max;
+      return mod < 0 ? mod + max : mod;
+    };
+    const moves = [];
+    for (const step of steps) {
+      const x = Number(step?.x);
+      const y = Number(step?.y);
+      if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+      const info = this.getStepInfo(x, y, { uiMode });
+      if (!info?.on) continue;
+      const nx = wrapIndex(x + dx, 16);
+      const ny = wrapIndex(y + dy, rows);
+      const srcRow = this.getRowInfo(y, { uiMode });
+      const dstRow = this.getRowInfo(ny, { uiMode });
+      moves.push({ x, y, nx, ny, info, srcRow, dstRow });
+    }
+    if (!moves.length) return { ok: false, reason: "empty" };
+
+    const absFor = (x) => x + (pat.barView || 0) * 16;
+    const clampOctave = (seqType, val) => {
+      if (seqType === "poly" || seqType === "drum") return clamp(val, -3, 4);
+      return clamp(val, -2, 2);
+    };
+
+    moves.forEach((move) => {
+      const abs = absFor(move.x);
+      const step = pat.steps[abs];
+      if (!step) return;
+      if (move.info.seqType === "poly" || move.info.seqType === "drum") {
+        if (!Array.isArray(step.notes)) step.notes = [];
+        step.notes = step.notes.filter((n) => n !== move.info.degree);
+        if (Array.isArray(step.accented)) step.accented = step.accented.filter((n) => n !== move.info.degree);
+        if (step.noteOctaves && typeof step.noteOctaves === "object") {
+          delete step.noteOctaves[move.info.degree];
+        }
+        if (step.noteMicros && typeof step.noteMicros === "object") {
+          delete step.noteMicros[move.info.degree];
+        }
+        const clearY = clamp(6 - move.info.degree, 0, 6);
+        this.enqueueOctaveOverlay({ page: this.currentPage, clears: [{ x: move.x, y: clearY }], clear: true });
+        this.enqueueMicroOverlay({ page: this.currentPage, x: move.x, y: clearY, rawY: clearY, microOffset: 0, delta: 0, showZero: false });
+        if (!step.notes.length) {
+          this.clearStep(pat, abs);
+        } else {
+          step.degree = step.notes[0];
+          step.on = true;
+          step.accent = false;
+        }
+      } else if (this.noteMatchesRow(step, move.info.degree, move.info.seqType, move.srcRow)) {
+        this.clearStep(pat, abs);
+      }
+    });
+
+    moves.forEach((move) => {
+      const abs = absFor(move.nx);
+      const step = pat.steps[abs];
+      if (!step) return;
+      const targetDeg = move.dstRow.degree;
+      const offsetDelta = (move.dstRow.octaveOffset || 0) - (move.srcRow.octaveOffset || 0);
+      const nextOct = clampOctave(move.info.seqType, (move.info.octave || 0) + offsetDelta);
+      if (move.info.seqType === "poly" || move.info.seqType === "drum") {
+        if (!Array.isArray(step.notes)) step.notes = [];
+        if (!step.noteOctaves || typeof step.noteOctaves !== "object") step.noteOctaves = {};
+        if (!step.noteMicros || typeof step.noteMicros !== "object") step.noteMicros = {};
+        if (!step.notes.includes(targetDeg)) step.notes.push(targetDeg);
+        step.on = true;
+        step.degree = step.notes[0];
+        step.accent = false;
+        step.slide = false;
+        step.mdSlide = false;
+        step.noteOctaves[targetDeg] = nextOct;
+        step.noteMicros[targetDeg] = this.clampMicro(move.info.microOffset || 0);
+        if (!Array.isArray(step.accented)) step.accented = [];
+        if (move.info.accent && !step.accented.includes(targetDeg)) step.accented.push(targetDeg);
+      } else {
+        step.on = true;
+        step.degree = targetDeg;
+        step.octave = nextOct;
+        step.micro = this.clampMicro(move.info.microOffset || 0);
+        step.accent = !!move.info.accent;
+        step.slide = false;
+        step.mdSlide = false;
+        const slideProp = move.info.seqType === "mdtonal" ? "mdSlide" : "slide";
+        step[slideProp] = !!move.info.slide;
+        step.tie = false;
+      }
+    });
+
+    this.forceLedRefresh = true;
+    return { ok: true, moved: moves.length };
+  }
+
+  copySteps(steps = [], dx = 0, dy = 0, opts = {}) {
+    if (!Array.isArray(steps) || !steps.length) return { ok: false, reason: "empty" };
+    const pat = this.getPattern();
+    if (!pat) return { ok: false, reason: "no_pattern" };
+    const uiMode = !!opts.uiMode;
+    const rows = uiMode ? 8 : 7;
+    const wrapIndex = (val, max) => {
+      if (!max) return 0;
+      const mod = val % max;
+      return mod < 0 ? mod + max : mod;
+    };
+    const moves = [];
+    for (const step of steps) {
+      const x = Number(step?.x);
+      const y = Number(step?.y);
+      if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+      const info = this.getStepInfo(x, y, { uiMode });
+      if (!info?.on) continue;
+      const nx = wrapIndex(x + dx, 16);
+      const ny = wrapIndex(y + dy, rows);
+      const srcRow = this.getRowInfo(y, { uiMode });
+      const dstRow = this.getRowInfo(ny, { uiMode });
+      moves.push({ x, y, nx, ny, info, srcRow, dstRow });
+    }
+    if (!moves.length) return { ok: false, reason: "empty" };
+
+    const absFor = (x) => x + (pat.barView || 0) * 16;
+    const clampOctave = (seqType, val) => {
+      if (seqType === "poly" || seqType === "drum") return clamp(val, -3, 4);
+      return clamp(val, -2, 2);
+    };
+
+    moves.forEach((move) => {
+      const abs = absFor(move.nx);
+      const step = pat.steps[abs];
+      if (!step) return;
+      const targetDeg = move.dstRow.degree;
+      const offsetDelta = (move.dstRow.octaveOffset || 0) - (move.srcRow.octaveOffset || 0);
+      const nextOct = clampOctave(move.info.seqType, (move.info.octave || 0) + offsetDelta);
+      if (move.info.seqType === "poly" || move.info.seqType === "drum") {
+        if (!Array.isArray(step.notes)) step.notes = [];
+        if (!step.noteOctaves || typeof step.noteOctaves !== "object") step.noteOctaves = {};
+        if (!step.noteMicros || typeof step.noteMicros !== "object") step.noteMicros = {};
+        if (!step.notes.includes(targetDeg)) step.notes.push(targetDeg);
+        step.on = true;
+        step.degree = step.notes[0];
+        step.accent = false;
+        step.slide = false;
+        step.mdSlide = false;
+        step.noteOctaves[targetDeg] = nextOct;
+        step.noteMicros[targetDeg] = this.clampMicro(move.info.microOffset || 0);
+        if (!Array.isArray(step.accented)) step.accented = [];
+        if (move.info.accent && !step.accented.includes(targetDeg)) step.accented.push(targetDeg);
+      } else {
+        step.on = true;
+        step.degree = targetDeg;
+        step.octave = nextOct;
+        step.micro = this.clampMicro(move.info.microOffset || 0);
+        step.accent = !!move.info.accent;
+        step.slide = false;
+        step.mdSlide = false;
+        const slideProp = move.info.seqType === "mdtonal" ? "mdSlide" : "slide";
+        step[slideProp] = !!move.info.slide;
+        step.tie = false;
+      }
+    });
+
+    this.forceLedRefresh = true;
+    return { ok: true, moved: moves.length };
+  }
+
   toggleOrSetPattern(n) {
     if (n < 1 || n > 8) return;
     const page = this.pages[this.currentPage];
@@ -1910,6 +2112,7 @@ export class SGridState {
       clears.push({ x: xPos, y: yPos });
     }
     this.enqueueOctaveOverlay({ page: pageIdx, clears, clear: true });
+    this.enqueueMicroOverlay({ page: pageIdx, x: xPos, y: yPos, rawY: yPos, microOffset: 0, delta: 0, showZero: false });
     if (skipAutoClear) return;
     const len = Math.max(1, pat.length_steps || 16);
     const hasDataInLength = pat.steps.slice(0, len).some((s) => s?.on);
@@ -3130,7 +3333,10 @@ export class SGridState {
     const pat = page?.patterns[page?.active_pattern];
     const heldKey = this.heldStep ? `${this.heldStep.x},${this.heldStep.y}` : null;
     const heldInfo = heldKey ? this.keyHolds.get(heldKey) : null;
-    const inEditMode = this.heldStep && heldInfo && (heldInfo.editMode || (heldInfo.start && (Date.now() - heldInfo.start) >= 150));
+    const multiHoldAny = this.keyHolds.size > 1;
+    const multiRecent = Date.now() - (this.lastMultiSelectTime || 0) < 150;
+    const inEditMode = this.heldStep && heldInfo && !multiHoldAny && !multiRecent
+      && (heldInfo.editMode || (heldInfo.start && (Date.now() - heldInfo.start) >= 150));
     if (pat) {
       const bar = pat.barView || 0;
       const slideStarts = [];

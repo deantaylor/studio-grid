@@ -401,6 +401,7 @@ function initCustomSelects() {
 }
 const barRow = document.getElementById("bar-row");
 const drumInputs = Array.from(document.querySelectorAll(".drum-note-input"));
+const editingDrumInputs = new Set();
 const scaleNotesWrap = document.getElementById("scale-notes");
 const deviceToolbar = document.querySelector(".device-toolbar");
 const patternToolbar = document.querySelector(".pattern-toolbar");
@@ -598,28 +599,41 @@ initNumberSteppers();
     const target = resolveImmediateTarget(e.target);
     if (!target) return;
     if (!isAllowedInput(target)) return;
+    if (target.tagName === "CANVAS" && target.id === "grid") return;
     lastPointerDownTarget = target;
     lastPointerDownAt = e.timeStamp;
-    if (target.tagName === "CANVAS" && target.id === "grid") {
-      sendGridTapFromClient(e.clientX, e.clientY);
-      return;
-    }
     if (typeof target.onpointerdown !== "function") {
       target.click();
     }
   }, true);
 
-  document.addEventListener("click", (e) => {
-    if (!e.isTrusted) return;
-    const target = resolveImmediateTarget(e.target);
-    if (!target) return;
-    if (target === lastPointerDownTarget && e.timeStamp - lastPointerDownAt < 1000) {
-      e.preventDefault();
-      e.stopImmediatePropagation();
-      lastPointerDownTarget = null;
-    }
-  }, true);
+document.addEventListener("click", (e) => {
+  if (!e.isTrusted) return;
+  const target = resolveImmediateTarget(e.target);
+  if (!target) return;
+  if (target === lastPointerDownTarget && e.timeStamp - lastPointerDownAt < 1000) {
+    e.preventDefault();
+    e.stopImmediatePropagation();
+    lastPointerDownTarget = null;
+  }
+}, true);
 })();
+
+document.addEventListener("pointerdown", (e) => {
+  if (e.button !== 0) return;
+  if (e.shiftKey || e.ctrlKey || e.metaKey) return;
+  if (gridPointerActive || selectionBoxActive || selectionDragActive || dragPaintActive) return;
+  const selection = selectionByPage[currentPage];
+  if (!selection || selection.size === 0) return;
+  if (e.target === canvas) {
+    const hit = getGridHit(e.clientX, e.clientY);
+    if (isPlayableCell(hit)) {
+      const key = cellKey(hit.x, hit.y);
+      if (selection.has(key)) return;
+    }
+  }
+  clearSelection();
+}, true);
 
 // splash screen handling
 
@@ -658,6 +672,10 @@ let menuTargetPage = null;
 const noteMenu = document.getElementById("note-menu");
 const noteMenuAccent = document.getElementById("note-menu-accent");
 const noteMenuSlide = document.getElementById("note-menu-slide");
+const selectionRect = document.getElementById("selection-rect");
+const gridWrap = document.querySelector(".grid-wrap");
+const gridPanel = document.querySelector(".grid-panel");
+const mainPanel = document.querySelector(".main-panel");
 let noteMenuTarget = null;
 let pendingNoteMenu = null;
 const octaveControls = document.createElement("div");
@@ -689,6 +707,24 @@ let lastOctaveTarget = null;
 let remoteOctaveTimer = null;
 let recentOctaveOverlay = null;
 let octaveOverlayLock = false;
+const selectionByPage = Array.from({ length: 9 }, () => new Set());
+const selectionInfoByPage = Array.from({ length: 9 }, () => new Map());
+let selectionRenderOffset = null;
+let selectionBoxActive = false;
+let selectionBoxMode = "replace";
+let selectionBoxStart = null;
+let selectionBoxPreviewCells = new Set();
+let selectionDragActive = false;
+let selectionDragStart = null;
+let selectionMovePending = false;
+let selectionCopyActive = false;
+let dragPaintActive = false;
+let dragPaintVisited = new Set();
+let gridPointerActive = false;
+let pendingStepsStateId = 1;
+const pendingStepsStateRequests = new Map();
+let pendingMoveStepsId = 1;
+const pendingMoveStepsRequests = new Map();
 let tempoDisplayMode = "input";
 
 const formatTempoDisplay = (val) => {
@@ -1305,6 +1341,10 @@ function connectWS() {
       swing = msg.swing || swing;
       updateSwing(swing, { broadcast: false });
     } else if (msg.type === "octave_overlay") {
+      if (msg.fromHold) {
+        cancelSelectionActions();
+        clearSelection();
+      }
       handleOctaveOverlayMessage(msg);
     } else if (msg.type === "micro_overlay") {
       handleMicroOverlayMessage(msg);
@@ -1314,6 +1354,10 @@ function connectWS() {
       handleSlideOverlayMessage(msg);
     } else if (msg.type === "step_state") {
       handleStepStateMessage(msg);
+    } else if (msg.type === "steps_state") {
+      handleStepsStateMessage(msg);
+    } else if (msg.type === "move_steps_result") {
+      handleMoveStepsResult(msg);
     } else if (msg.type === "transpose") {
       if (typeof msg.page === "number") transposes[msg.page] = msg.transpose;
       applyPageTranspose();
@@ -2013,6 +2057,58 @@ function renderFrame(frame) {
     }
   });
 
+  const selection = selectionByPage[currentPage];
+  const surfaceColor = resolveCssColorVar("--surface") || resolveCssColorVar("--panel-strong") || resolveCssColorVar("--bg");
+  const fgColor = resolveCssColorVar("--fg") || "#fff";
+  const strokeBase = mixColors(fgColor, surfaceColor, 0.7);
+  const selectionStroke = colorWithAlpha(strokeBase, 0.75);
+  const selectionFill = colorWithAlpha(strokeBase, 0.3);
+  if (selection && selection.size) {
+    ctx.save();
+    ctx.strokeStyle = selectionStroke;
+    ctx.lineWidth = 2;
+    ctx.fillStyle = selectionFill;
+    const offset = selectionRenderOffset || { dx: 0, dy: 0 };
+    selection.forEach((key) => {
+      const { x, y } = parseCellKey(key);
+      const useWrap = !!selectionRenderOffset;
+      const drawX = useWrap ? wrapIndex(x + (offset.dx || 0), WIDTH) : x;
+      const drawY = useWrap ? wrapIndex(y + (offset.dy || 0), getStepRows()) : y;
+      if (drawX < 0 || drawX >= WIDTH || drawY < 0 || drawY >= HEIGHT) return;
+      const px = drawX * (CELL_SIZE + CELL_GAP) + 1;
+      const py = drawY * (CELL_SIZE + CELL_GAP) + 1;
+      if (typeof ctx.roundRect === "function") {
+        ctx.beginPath();
+        ctx.roundRect(px, py, CELL_SIZE - 2, CELL_SIZE - 2, 2);
+        ctx.fill();
+        ctx.stroke();
+      } else {
+        ctx.fillRect(px, py, CELL_SIZE - 2, CELL_SIZE - 2);
+        ctx.strokeRect(px, py, CELL_SIZE - 2, CELL_SIZE - 2);
+      }
+    });
+    ctx.restore();
+  }
+
+  if (selectionBoxPreviewCells && selectionBoxPreviewCells.size) {
+    ctx.save();
+    ctx.fillStyle = selectionFill;
+    selectionBoxPreviewCells.forEach((key) => {
+      const { x, y } = parseCellKey(key);
+      if (x < 0 || x >= WIDTH || y < 0 || y >= HEIGHT) return;
+      const px = x * (CELL_SIZE + CELL_GAP) + 1;
+      const py = y * (CELL_SIZE + CELL_GAP) + 1;
+      if (typeof ctx.roundRect === "function") {
+        ctx.beginPath();
+        ctx.roundRect(px, py, CELL_SIZE - 2, CELL_SIZE - 2, 2);
+        ctx.fill();
+      } else {
+        ctx.fillRect(px, py, CELL_SIZE - 2, CELL_SIZE - 2);
+      }
+    });
+    ctx.restore();
+  }
+
   // overlays
   const now = Date.now();
   const currentOverlays = overlays[currentPage] || [];
@@ -2146,6 +2242,17 @@ function colorWithAlpha(color, alpha) {
   const rgb = parseColorToRgb(base);
   if (!rgb) return base || "transparent";
   return `rgba(${rgb.r}, ${rgb.g}, ${rgb.b}, ${alpha})`;
+}
+
+function mixColors(colorA, colorB, weightA = 0.5) {
+  const rgbA = parseColorToRgb(colorA);
+  const rgbB = parseColorToRgb(colorB);
+  if (!rgbA || !rgbB) return colorA || colorB || "transparent";
+  const w = Math.max(0, Math.min(1, weightA));
+  const r = Math.round(rgbA.r * w + rgbB.r * (1 - w));
+  const g = Math.round(rgbA.g * w + rgbB.g * (1 - w));
+  const b = Math.round(rgbA.b * w + rgbB.b * (1 - w));
+  return `rgb(${r}, ${g}, ${b})`;
 }
 
 function log(msg) {
@@ -3721,6 +3828,8 @@ function updatePage(page, { fromServer = false, deferFrame = false } = {}) {
   applyCCUI();
   renderBarRow();
   if (!deferFrameRender) renderFrameIfReady();
+  updateSelectionPopover();
+  updateSelectionRectFromCells(selectionByPage[currentPage]);
   if (!fromServer) {
     ws?.readyState === WebSocket.OPEN && ws.send(JSON.stringify({ type: "set_page", page }));
   }
@@ -3786,6 +3895,8 @@ function applyPageTranspose() {
   if (transposeDisplay) transposeDisplay.textContent = `${oct}`;
   if (transposeDec) transposeDec.disabled = disableTranspose || oct <= -2;
   if (transposeInc) transposeInc.disabled = disableTranspose || oct >= 2;
+  const transposeWrap = document.querySelector(".transpose-switch");
+  if (transposeWrap) transposeWrap.classList.toggle("hidden", type === "cc");
 }
 
 function applySeqTypeUI({ deferFrame = false } = {}) {
@@ -3836,7 +3947,10 @@ function applyPatternLauncherTypeUI() {
     scaleNotesWrap.classList.toggle("hidden", showLauncher || !showScaleNotes);
   }
   const transposeWrap = document.querySelector(".transpose-switch");
-  if (transposeWrap) transposeWrap.classList.toggle("hidden", showLauncher);
+  if (transposeWrap) {
+    const type = sequencerTypes[currentPage] || "mono";
+    transposeWrap.classList.toggle("hidden", showLauncher || type === "cc");
+  }
   if (midiSel) {
     const midiLabel = midiSel.closest("label");
     if (midiLabel) midiLabel.classList.toggle("hidden", showLauncher);
@@ -3893,10 +4007,14 @@ function applyDrumNotesUI() {
     const row = Number(input.dataset.row);
     if (Number.isFinite(row)) {
       const val = map[row] ?? DEFAULT_DRUMS[row] ?? 36;
-      input.value = val;
       const allowExtra = fullScaleMode && type === "drum";
       const isExtra = row === 7;
-      input.disabled = type !== "drum" || (isExtra && !allowExtra);
+      const disabled = type !== "drum" || (isExtra && !allowExtra);
+      input.disabled = disabled;
+      if (disabled) editingDrumInputs.delete(input);
+      if (disabled || !editingDrumInputs.has(input)) {
+        input.value = val;
+      }
     }
   });
 }
@@ -3967,6 +4085,11 @@ function handleCanvasContextMenu(clientX, clientY) {
   const rect = canvas.getBoundingClientRect();
   const x = Math.floor((clientX - rect.left) / (rect.width / WIDTH));
   const y = Math.floor((clientY - rect.top) / (rect.height / HEIGHT));
+  const seqType = sequencerTypes[currentPage] || "mono";
+  if (seqType === "cc") {
+    closeNoteMenu();
+    return;
+  }
   if (x < 0 || x >= WIDTH || y < 0 || y >= HEIGHT) {
     closeNoteMenu();
     return;
@@ -3982,10 +4105,426 @@ function handleCanvasContextMenu(clientX, clientY) {
   }
 }
 
-canvas.addEventListener("click", (e) => {
-  sendGridTapFromClient(e.clientX, e.clientY);
-});
+function cellKey(x, y) {
+  return `${x}:${y}`;
+}
+
+function parseCellKey(key) {
+  const [x, y] = key.split(":").map((v) => Number(v));
+  return { x, y };
+}
+
+function getGridHit(clientX, clientY) {
+  const rect = canvas.getBoundingClientRect();
+  const scaleX = rect.width / CANVAS_WIDTH;
+  const scaleY = rect.height / CANVAS_HEIGHT;
+  const relX = (clientX - rect.left) / scaleX;
+  const relY = (clientY - rect.top) / scaleY;
+  const inBounds = relX >= 0 && relX <= CANVAS_WIDTH && relY >= 0 && relY <= CANVAS_HEIGHT;
+  const step = CELL_SIZE + CELL_GAP;
+  const x = Math.floor(relX / step);
+  const y = Math.floor(relY / step);
+  if (!inBounds || x < 0 || x >= WIDTH || y < 0 || y >= HEIGHT) {
+    return { inBounds: false, rect, scaleX, scaleY, relX, relY };
+  }
+  const offsetX = relX - x * step;
+  const offsetY = relY - y * step;
+  const inCell = offsetX >= 0 && offsetX <= CELL_SIZE && offsetY >= 0 && offsetY <= CELL_SIZE;
+  return { inBounds: true, inCell, x, y, rect, scaleX, scaleY, relX, relY };
+}
+
+function clampRel(hit) {
+  return {
+    relX: Math.max(0, Math.min(CANVAS_WIDTH, hit.relX)),
+    relY: Math.max(0, Math.min(CANVAS_HEIGHT, hit.relY))
+  };
+}
+
+function clearSelection() {
+  const selection = selectionByPage[currentPage];
+  const infoMap = selectionInfoByPage[currentPage];
+  if (!selection || !infoMap || selection.size === 0) return;
+  selection.clear();
+  infoMap.clear();
+  selectionRenderOffset = null;
+  selectionBoxPreviewCells.clear();
+  hideSelectionRect();
+  updateSelectionPopover();
+  renderFrameIfReady();
+}
+
+function cancelSelectionActions() {
+  selectionBoxActive = false;
+  selectionDragActive = false;
+  selectionRenderOffset = null;
+  selectionBoxStart = null;
+  selectionBoxPreviewCells.clear();
+  gridPointerActive = false;
+  dragPaintActive = false;
+  dragPaintVisited.clear();
+  hideSelectionRect();
+  selectionCopyActive = false;
+}
+
+function clearSelectedNotes() {
+  const selection = selectionByPage[currentPage];
+  if (!selection || !selection.size) return;
+  if (ws?.readyState !== WebSocket.OPEN) return;
+  selection.forEach((key) => {
+    const { x, y } = parseCellKey(key);
+    ws.send(JSON.stringify({ type: "grid_key", x, y, s: 1 }));
+    ws.send(JSON.stringify({ type: "grid_key", x, y, s: 0 }));
+  });
+  clearSelection();
+}
+
+function getSelectionTargetsForEdit(target) {
+  if (!target) return [];
+  const selection = selectionByPage[currentPage];
+  if (selection && selection.size) {
+    const key = cellKey(target.x, target.y);
+    if (selection.has(key)) {
+      return Array.from(selection).map(parseCellKey);
+    }
+  }
+  return [target];
+}
+
+function applySelectionDelta(target, kind, delta) {
+  const targets = getSelectionTargetsForEdit(target);
+  if (!targets.length) return;
+  const infoMap = selectionInfoByPage[currentPage];
+  targets.forEach(({ x, y }) => {
+    if (kind === "octave") {
+      ws?.readyState === WebSocket.OPEN && ws.send(JSON.stringify({ type: "set_step_octave", x, y, delta }));
+      const key = cellKey(x, y);
+      const info = infoMap?.get(key);
+      if (info) info.octave = (Number(info.octave) || 0) + delta;
+    } else if (kind === "micro") {
+      ws?.readyState === WebSocket.OPEN && ws.send(JSON.stringify({ type: "set_step_micro", x, y, delta }));
+      const key = cellKey(x, y);
+      const info = infoMap?.get(key);
+      if (info) info.microOffset = (Number(info.microOffset) || 0) + delta;
+    }
+  });
+  renderFrameIfReady();
+}
+
+function applySelectionToggle(target, kind, nextVal) {
+  const targets = getSelectionTargetsForEdit(target);
+  if (!targets.length) return;
+  const infoMap = selectionInfoByPage[currentPage];
+  targets.forEach(({ x, y }) => {
+    const key = cellKey(x, y);
+    const info = infoMap?.get(key);
+    if (kind === "accent") {
+      if (info?.canAccent === false) return;
+      ws?.readyState === WebSocket.OPEN &&
+        ws.send(JSON.stringify({ type: "set_step_accent", x, y, accent: !!nextVal }));
+      if (info) info.accent = !!nextVal;
+    } else if (kind === "slide") {
+      if (info?.canSlide === false) return;
+      ws?.readyState === WebSocket.OPEN &&
+        ws.send(JSON.stringify({ type: "set_step_slide", x, y, slide: !!nextVal }));
+      if (info) info.slide = !!nextVal;
+    }
+  });
+  renderFrameIfReady();
+}
+
+function isPlayableCell(hit) {
+  return hit?.inBounds && hit.inCell && hit.y >= 0 && hit.y < getStepRows();
+}
+
+function toggleGridCell(x, y) {
+  if (ws?.readyState !== WebSocket.OPEN) return;
+  ws.send(JSON.stringify({ type: "grid_key", x, y, s: 1 }));
+  ws.send(JSON.stringify({ type: "grid_key", x, y, s: 0 }));
+}
+
+function requestStepsState(steps, callback) {
+  if (ws?.readyState !== WebSocket.OPEN) return;
+  const requestId = pendingStepsStateId++;
+  pendingStepsStateRequests.set(requestId, callback);
+  ws.send(JSON.stringify({ type: "get_steps_state", requestId, steps }));
+}
+
+function requestMoveSteps(steps, dx, dy, callback) {
+  if (ws?.readyState !== WebSocket.OPEN) return;
+  const requestId = pendingMoveStepsId++;
+  pendingMoveStepsRequests.set(requestId, callback);
+  ws.send(JSON.stringify({ type: "move_steps", requestId, steps, dx, dy }));
+}
+
+function requestCopySteps(steps, dx, dy, callback) {
+  if (ws?.readyState !== WebSocket.OPEN) return;
+  const requestId = pendingMoveStepsId++;
+  pendingMoveStepsRequests.set(requestId, callback);
+  ws.send(JSON.stringify({ type: "copy_steps", requestId, steps, dx, dy }));
+}
+
+function updateSelectionRectFromCanvasBox(box) {
+  if (!selectionRect || !gridWrap) return;
+  const gridRect = canvas.getBoundingClientRect();
+  const wrapRect = gridWrap.getBoundingClientRect();
+  const left = wrapRect.left;
+  const top = wrapRect.top;
+  const offsetX = gridRect.left - left;
+  const offsetY = gridRect.top - top;
+  selectionRect.style.left = `${offsetX + box.left}px`;
+  selectionRect.style.top = `${offsetY + box.top}px`;
+  selectionRect.style.width = `${box.width}px`;
+  selectionRect.style.height = `${box.height}px`;
+  selectionRect.classList.remove("hidden");
+}
+
+function hideSelectionRect() {
+  if (selectionRect) selectionRect.classList.add("hidden");
+}
+
+function getSelectionBounds(selection, offset = { dx: 0, dy: 0 }) {
+  const keys = Array.from(selection || []);
+  if (!keys.length) return null;
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  keys.forEach((key) => {
+    const { x, y } = parseCellKey(key);
+    const adjX = x + (offset.dx || 0);
+    const adjY = y + (offset.dy || 0);
+    minX = Math.min(minX, adjX);
+    minY = Math.min(minY, adjY);
+    maxX = Math.max(maxX, adjX);
+    maxY = Math.max(maxY, adjY);
+  });
+  if (!Number.isFinite(minX)) return null;
+  return { minX, minY, maxX, maxY };
+}
+
+function updateSelectionRectFromCells(selection, offset = { dx: 0, dy: 0 }) {
+  hideSelectionRect();
+}
+
+function wrapIndex(val, max) {
+  if (!max) return 0;
+  const mod = val % max;
+  return mod < 0 ? mod + max : mod;
+}
+
+function clampMicroInput(raw) {
+  const stepsPerBeat = Math.max(1, Math.round((baseDivision || 16) / 4));
+  const ticksPerStepInt = Math.round(PPQN_INT / stepsPerBeat);
+  const max = Math.max(1, ticksPerStepInt - 1);
+  const val = Math.round(Number(raw) || 0);
+  return Math.max(-max, Math.min(max, val));
+}
+
+function applySelectionState(infos, mode, page = currentPage) {
+  const selection = selectionByPage[page];
+  const infoMap = selectionInfoByPage[page];
+  if (!selection || !infoMap) return;
+  if (mode === "replace") {
+    selection.clear();
+    infoMap.clear();
+  }
+  infos.forEach((info) => {
+    if (!info?.on) return;
+    const key = cellKey(info.x, info.y);
+    if (mode === "remove") {
+      selection.delete(key);
+      infoMap.delete(key);
+    } else {
+      selection.add(key);
+      infoMap.set(key, info);
+    }
+  });
+  if (page === currentPage) {
+    selectionRenderOffset = null;
+    updateSelectionPopover();
+    updateSelectionRectFromCells(selection);
+    renderFrameIfReady();
+  }
+}
+
+function updateSelectionPopover() {}
+
+function positionSelectionPopover() {}
+
+function selectionMoveIsValid(selection, dx, dy) {
+  return !!(selection && selection.size);
+}
+
+function performSelectionMove(dx, dy, opts = {}) {
+  if (selectionMovePending) return;
+  const selection = selectionByPage[currentPage];
+  if (!selection || selection.size === 0) return;
+  if (!selectionMoveIsValid(selection, dx, dy)) return;
+  const steps = Array.from(selection).map(parseCellKey);
+  selectionMovePending = true;
+  const request = selectionCopyActive ? "copy_steps" : "move_steps";
+  const requestFn = selectionCopyActive ? requestCopySteps : requestMoveSteps;
+  requestFn(steps, dx, dy, (result) => {
+    selectionMovePending = false;
+    if (!result?.ok) {
+      showToast(result?.reason || "Selection move failed");
+      updateSelectionRectFromCells(selection);
+      renderFrameIfReady();
+      return;
+    }
+    const nextSelection = new Set();
+    const nextInfoMap = new Map();
+    const infoMap = selectionInfoByPage[currentPage];
+    selection.forEach((key) => {
+      const { x, y } = parseCellKey(key);
+      const nx = wrapIndex(x + dx, WIDTH);
+      const ny = wrapIndex(y + dy, getStepRows());
+      const nextKey = cellKey(nx, ny);
+      nextSelection.add(nextKey);
+      const info = infoMap.get(key);
+      if (info) nextInfoMap.set(nextKey, { ...info, x: nx, y: ny });
+    });
+    selectionByPage[currentPage] = nextSelection;
+    selectionInfoByPage[currentPage] = nextInfoMap;
+    updateSelectionRectFromCells(nextSelection);
+    updateSelectionPopover();
+    renderFrameIfReady();
+    const page = currentPage;
+    requestStepsState(Array.from(nextSelection).map(parseCellKey), (stepsState) => {
+      applySelectionState(stepsState, "replace", page);
+    });
+    selectionCopyActive = false;
+    if (typeof opts.onDone === "function") opts.onDone();
+  });
+}
+
+function collectCellsInBox(start, end) {
+  const step = CELL_SIZE + CELL_GAP;
+  const minX = Math.min(start.relX, end.relX);
+  const maxX = Math.max(start.relX, end.relX);
+  const minY = Math.min(start.relY, end.relY);
+  const maxY = Math.max(start.relY, end.relY);
+  const firstX = Math.max(0, Math.floor(minX / step));
+  const lastX = Math.min(WIDTH - 1, Math.floor(maxX / step));
+  const firstY = Math.max(0, Math.floor(minY / step));
+  const lastY = Math.min(HEIGHT - 1, Math.floor(maxY / step));
+  const rows = getStepRows();
+  const cells = [];
+  for (let y = firstY; y <= lastY; y += 1) {
+    if (y >= rows) continue;
+    for (let x = firstX; x <= lastX; x += 1) {
+      const centerX = x * step + CELL_SIZE / 2;
+      const centerY = y * step + CELL_SIZE / 2;
+      if (centerX >= minX && centerX <= maxX && centerY >= minY && centerY <= maxY) {
+        cells.push({ x, y });
+      }
+    }
+  }
+  return cells;
+}
+
+function updateSelectionFromCells(cells, mode) {
+  const page = currentPage;
+  if (!cells.length) {
+    if (mode === "replace") {
+      applySelectionState([], "replace", page);
+    }
+    return;
+  }
+  requestStepsState(cells, (steps) => {
+    applySelectionState(steps, mode, page);
+  });
+}
+
+function finishSelectionBox(hit) {
+  if (!selectionBoxActive || !selectionBoxStart) return;
+  const clamped = clampRel(hit);
+  const end = { ...hit, ...clamped };
+  const cells = collectCellsInBox(selectionBoxStart, end);
+  selectionBoxActive = false;
+  selectionBoxStart = null;
+  selectionBoxPreviewCells.clear();
+  hideSelectionRect();
+  updateSelectionFromCells(cells, selectionBoxMode);
+}
+
+function startSelectionBox(hit, mode) {
+  const clamped = clampRel(hit);
+  selectionBoxActive = true;
+  selectionBoxMode = mode;
+  selectionBoxStart = { relX: clamped.relX, relY: clamped.relY, scaleX: hit.scaleX, scaleY: hit.scaleY };
+  updateSelectionRectFromCanvasBox({ left: clamped.relX * hit.scaleX, top: clamped.relY * hit.scaleY, width: 1, height: 1 });
+}
+
+function applySelectionOctave(target) {
+  const selection = selectionByPage[currentPage];
+  const infoMap = selectionInfoByPage[currentPage];
+  if (!selection || !selection.size || !Number.isFinite(target)) return;
+  const seqType = sequencerTypes[currentPage] || "mono";
+  const minOct = (seqType === "poly" || seqType === "drum") ? -3 : -2;
+  const maxOct = (seqType === "poly" || seqType === "drum") ? 4 : 2;
+  const nextOct = Math.max(minOct, Math.min(maxOct, Math.round(target)));
+  selection.forEach((key) => {
+    const info = infoMap.get(key);
+    if (!info?.on) return;
+    const delta = nextOct - (Number(info.octave) || 0);
+    if (!delta) return;
+    ws?.readyState === WebSocket.OPEN && ws.send(JSON.stringify({ type: "set_step_octave", x: info.x, y: info.y, delta }));
+    info.octave = (Number(info.octave) || 0) + delta;
+  });
+  updateSelectionPopover();
+  renderFrameIfReady();
+}
+
+function applySelectionMicro(target) {
+  const selection = selectionByPage[currentPage];
+  const infoMap = selectionInfoByPage[currentPage];
+  if (!selection || !selection.size || !Number.isFinite(target)) return;
+  const nextMicro = clampMicroInput(target);
+  selection.forEach((key) => {
+    const info = infoMap.get(key);
+    if (!info?.on) return;
+    const delta = nextMicro - (Number(info.microOffset) || 0);
+    if (!delta) return;
+    ws?.readyState === WebSocket.OPEN && ws.send(JSON.stringify({ type: "set_step_micro", x: info.x, y: info.y, delta }));
+    info.microOffset = (Number(info.microOffset) || 0) + delta;
+  });
+  updateSelectionPopover();
+  renderFrameIfReady();
+}
+
+function applySelectionAccent(nextVal) {
+  const selection = selectionByPage[currentPage];
+  const infoMap = selectionInfoByPage[currentPage];
+  if (!selection || !selection.size) return;
+  selection.forEach((key) => {
+    const info = infoMap.get(key);
+    if (!info?.on || info.canAccent === false) return;
+    ws?.readyState === WebSocket.OPEN &&
+      ws.send(JSON.stringify({ type: "set_step_accent", x: info.x, y: info.y, accent: !!nextVal }));
+    info.accent = !!nextVal;
+  });
+  updateSelectionPopover();
+  renderFrameIfReady();
+}
+
+function applySelectionSlide(nextVal) {
+  const selection = selectionByPage[currentPage];
+  const infoMap = selectionInfoByPage[currentPage];
+  if (!selection || !selection.size) return;
+  selection.forEach((key) => {
+    const info = infoMap.get(key);
+    if (!info?.on || info.canSlide === false) return;
+    ws?.readyState === WebSocket.OPEN &&
+      ws.send(JSON.stringify({ type: "set_step_slide", x: info.x, y: info.y, slide: !!nextVal }));
+    info.slide = !!nextVal;
+  });
+  updateSelectionPopover();
+  renderFrameIfReady();
+}
+
 canvas.addEventListener("mousemove", (e) => {
+  if (gridPointerActive) return;
   const rect = canvas.getBoundingClientRect();
   const scaleX = rect.width / CANVAS_WIDTH;
   const scaleY = rect.height / CANVAS_HEIGHT;
@@ -4017,6 +4556,7 @@ canvas.addEventListener("mousemove", (e) => {
     hoveredStep = null;
     if (!isOverOctaveControls) octaveControls.style.display = "none";
     if (!isOverMicroControls) microControls.style.display = "none";
+    updateSelectionPopover();
     return;
   }
 
@@ -4027,17 +4567,20 @@ canvas.addEventListener("mousemove", (e) => {
     hoveredStep = null;
     if (!isOverOctaveControls) octaveControls.style.display = "none";
     if (!isOverMicroControls) microControls.style.display = "none";
+    updateSelectionPopover();
     return;
   }
   if (val <= 0) {
     hoveredStep = null;
     if (!isOverOctaveControls) octaveControls.style.display = "none";
     if (!isOverMicroControls) microControls.style.display = "none";
+    updateSelectionPopover();
     return;
   }
 
   const target = withinHoverBand && anchor ? anchor : { x, y };
   hoveredStep = target;
+  updateSelectionPopover();
   if (withinHoverBand && (octaveHoverTimer || pendingOctaveHover || octaveControls.style.display === "flex")) return;
 
   if (octaveControls.style.display === "flex" && movedCell && !isOverOctaveControls) {
@@ -4057,6 +4600,215 @@ canvas.addEventListener("mousemove", (e) => {
     ws?.readyState === WebSocket.OPEN && ws.send(JSON.stringify({ type: "get_step_state", x: target.x, y: target.y }));
   }, 500);
 });
+
+canvas.addEventListener("pointerdown", (e) => {
+  if (e.button !== 0) return;
+  const hit = getGridHit(e.clientX, e.clientY);
+  if (!hit.inBounds) return;
+  const playable = isPlayableCell(hit);
+  const selection = selectionByPage[currentPage];
+  const hasSelection = selection && selection.size > 0;
+  const key = playable ? cellKey(hit.x, hit.y) : null;
+  const isSelectedCell = key && selection?.has(key);
+  const mode = e.shiftKey ? "add" : (e.metaKey || e.ctrlKey ? "remove" : "replace");
+
+  gridPointerActive = true;
+  try {
+    canvas.setPointerCapture(e.pointerId);
+  } catch (err) {
+    // ignore if not supported
+  }
+  selectionRenderOffset = null;
+  if (octaveHoverTimer) {
+    clearTimeout(octaveHoverTimer);
+    octaveHoverTimer = null;
+  }
+  pendingOctaveHover = null;
+  hoveredStep = null;
+  octaveControls.style.display = "none";
+  microControls.style.display = "none";
+
+  if ((e.shiftKey || e.metaKey || e.ctrlKey) && playable) {
+    updateSelectionFromCells([{ x: hit.x, y: hit.y }], mode);
+    updateSelectionRectFromCells(selectionByPage[currentPage]);
+    renderFrameIfReady();
+    e.preventDefault();
+    return;
+  }
+
+  if (playable && isSelectedCell && hasSelection) {
+    selectionDragActive = true;
+    selectionDragStart = { x: hit.x, y: hit.y };
+    selectionRenderOffset = { dx: 0, dy: 0 };
+    selectionCopyActive = e.altKey;
+    updateSelectionRectFromCells(selection, selectionRenderOffset);
+    e.preventDefault();
+    return;
+  }
+
+  if (playable) {
+    dragPaintActive = true;
+    dragPaintVisited = new Set([key]);
+    toggleGridCell(hit.x, hit.y);
+    e.preventDefault();
+    return;
+  }
+
+  if (hit.inBounds && !hit.inCell) {
+    startSelectionBox(hit, mode);
+    e.preventDefault();
+  }
+});
+
+canvas.addEventListener("pointermove", (e) => {
+  if (!gridPointerActive) return;
+  const hit = getGridHit(e.clientX, e.clientY);
+  if (dragPaintActive && isPlayableCell(hit)) {
+    const key = cellKey(hit.x, hit.y);
+    if (!dragPaintVisited.has(key)) {
+      dragPaintVisited.add(key);
+      toggleGridCell(hit.x, hit.y);
+    }
+    return;
+  }
+  if (selectionBoxActive && selectionBoxStart) {
+    const clamped = clampRel(hit);
+    const left = Math.min(selectionBoxStart.relX, clamped.relX) * selectionBoxStart.scaleX;
+    const top = Math.min(selectionBoxStart.relY, clamped.relY) * selectionBoxStart.scaleY;
+    const width = Math.abs(selectionBoxStart.relX - clamped.relX) * selectionBoxStart.scaleX;
+    const height = Math.abs(selectionBoxStart.relY - clamped.relY) * selectionBoxStart.scaleY;
+    updateSelectionRectFromCanvasBox({ left, top, width, height });
+    const boxCells = collectCellsInBox(selectionBoxStart, { ...hit, ...clamped });
+    const frame = frames[currentPage] || [];
+    selectionBoxPreviewCells = new Set();
+    boxCells.forEach(({ x, y }) => {
+      if ((frame[y * WIDTH + x] || 0) > 0) {
+        selectionBoxPreviewCells.add(cellKey(x, y));
+      }
+    });
+    renderFrameIfReady();
+    return;
+  }
+  if (selectionDragActive && selectionDragStart && hit.inCell) {
+    const dx = hit.x - selectionDragStart.x;
+    const dy = hit.y - selectionDragStart.y;
+    if (!dx && !dy) return;
+    selectionRenderOffset = { dx, dy };
+    updateSelectionRectFromCells(selectionByPage[currentPage], selectionRenderOffset);
+    renderFrameIfReady();
+  }
+});
+
+canvas.addEventListener("pointerup", (e) => {
+  if (!gridPointerActive) return;
+  if (dragPaintActive) {
+    dragPaintActive = false;
+    dragPaintVisited.clear();
+  } else if (selectionBoxActive && selectionBoxStart) {
+    const hit = getGridHit(e.clientX, e.clientY);
+    finishSelectionBox(hit);
+  } else if (selectionDragActive && selectionRenderOffset) {
+    const selection = selectionByPage[currentPage];
+    const dx = selectionRenderOffset.dx || 0;
+    const dy = selectionRenderOffset.dy || 0;
+    selectionDragActive = false;
+    selectionDragStart = null;
+    selectionRenderOffset = null;
+    if (dx !== 0 || dy !== 0) {
+      performSelectionMove(dx, dy);
+    } else {
+      updateSelectionRectFromCells(selection);
+      updateSelectionPopover();
+      renderFrameIfReady();
+    }
+    selectionCopyActive = false;
+  }
+  gridPointerActive = false;
+  try {
+    canvas.releasePointerCapture(e.pointerId);
+  } catch (err) {
+    // ignore if not captured
+  }
+});
+
+canvas.addEventListener("pointercancel", (e) => {
+  dragPaintActive = false;
+  selectionBoxActive = false;
+  selectionDragActive = false;
+  selectionRenderOffset = null;
+  selectionBoxStart = null;
+  dragPaintVisited.clear();
+  selectionBoxPreviewCells.clear();
+  gridPointerActive = false;
+  hideSelectionRect();
+  selectionCopyActive = false;
+  try {
+    canvas.releasePointerCapture(e.pointerId);
+  } catch (err) {
+    // ignore if not captured
+  }
+});
+
+const selectionDragRoots = [gridWrap, gridPanel, mainPanel, document.body].filter(Boolean);
+selectionDragRoots.forEach((root) => {
+  root.addEventListener("pointerdown", (e) => {
+    if (e.button !== 0) return;
+    if (e.target === canvas) return;
+    if (e.target.closest("button, input, select, textarea")) return;
+    if (gridPanel) {
+      const rect = gridPanel.getBoundingClientRect();
+      const withinBand = e.clientY >= rect.top && e.clientY <= rect.bottom;
+      if (!withinBand) return;
+    }
+    const hit = getGridHit(e.clientX, e.clientY);
+    const mode = e.shiftKey ? "add" : (e.metaKey || e.ctrlKey ? "remove" : "replace");
+    gridPointerActive = true;
+    startSelectionBox(hit, mode);
+    try {
+      root.setPointerCapture(e.pointerId);
+    } catch (err) {
+      // ignore if not supported
+    }
+    e.preventDefault();
+  });
+
+  root.addEventListener("pointermove", (e) => {
+    if (!selectionBoxActive || !selectionBoxStart) return;
+    const hit = getGridHit(e.clientX, e.clientY);
+    const clamped = clampRel(hit);
+    const left = Math.min(selectionBoxStart.relX, clamped.relX) * selectionBoxStart.scaleX;
+    const top = Math.min(selectionBoxStart.relY, clamped.relY) * selectionBoxStart.scaleY;
+    const width = Math.abs(selectionBoxStart.relX - clamped.relX) * selectionBoxStart.scaleX;
+    const height = Math.abs(selectionBoxStart.relY - clamped.relY) * selectionBoxStart.scaleY;
+    updateSelectionRectFromCanvasBox({ left, top, width, height });
+  });
+
+  root.addEventListener("pointerup", (e) => {
+    if (!selectionBoxActive || !selectionBoxStart) return;
+    const hit = getGridHit(e.clientX, e.clientY);
+    finishSelectionBox(hit);
+    gridPointerActive = false;
+    try {
+      root.releasePointerCapture(e.pointerId);
+    } catch (err) {
+      // ignore if not captured
+    }
+  });
+
+  root.addEventListener("pointercancel", (e) => {
+    selectionBoxActive = false;
+    selectionBoxStart = null;
+    selectionBoxPreviewCells.clear();
+    gridPointerActive = false;
+    hideSelectionRect();
+    try {
+      root.releasePointerCapture(e.pointerId);
+    } catch (err) {
+      // ignore if not captured
+    }
+  });
+});
+
 canvas.addEventListener("mouseleave", () => {
   pendingOctaveHover = null;
   if (octaveHoverTimer) {
@@ -4080,19 +4832,13 @@ canvas.addEventListener("contextmenu", (e) => {
 function nudgeStepOctave(delta) {
   const target = hoveredStep || lastOctaveTarget;
   if (!target) return;
-  const { x, y } = target;
-  const msg = { page: currentPage, x, y, delta };
-  handleOctaveOverlayMessage(msg);
-  ws?.readyState === WebSocket.OPEN && ws.send(JSON.stringify({ type: "set_step_octave", x, y, delta }));
+  applySelectionDelta(target, "octave", delta);
 }
 
 function nudgeStepMicro(delta) {
   const target = hoveredStep || lastOctaveTarget;
   if (!target) return;
-  const { x, y } = target;
-  const msg = { page: currentPage, x, y, microOffset: delta, delta };
-  handleMicroOverlayMessage(msg);
-  ws?.readyState === WebSocket.OPEN && ws.send(JSON.stringify({ type: "set_step_micro", x, y, delta }));
+  applySelectionDelta(target, "micro", delta);
 }
 
 function showOctaveControls(hover) {
@@ -4282,6 +5028,8 @@ applyPatternControlLatchUI();
 window.addEventListener("resize", () => {
   syncDeviceTabProgressCanvas();
   renderDeviceTabProgressFrame();
+  positionSelectionPopover();
+  updateSelectionRectFromCells(selectionByPage[currentPage], selectionRenderOffset || { dx: 0, dy: 0 });
 });
 updateSetTitle(setName);
 
@@ -4519,6 +5267,24 @@ function handleStepStateMessage(msg) {
       showZero: true
     });
   }
+}
+
+function handleStepsStateMessage(msg) {
+  const requestId = msg.requestId;
+  if (!requestId) return;
+  const cb = pendingStepsStateRequests.get(requestId);
+  if (!cb) return;
+  pendingStepsStateRequests.delete(requestId);
+  cb(Array.isArray(msg.steps) ? msg.steps : []);
+}
+
+function handleMoveStepsResult(msg) {
+  const requestId = msg.requestId;
+  if (!requestId) return;
+  const cb = pendingMoveStepsRequests.get(requestId);
+  if (!cb) return;
+  pendingMoveStepsRequests.delete(requestId);
+  cb(msg);
 }
 
 if (scaleRootSel) {
@@ -5359,6 +6125,12 @@ const tabDeviceColorInput = null;
 
 if (drumInputs.length) {
   drumInputs.forEach((input) => {
+    input.addEventListener("focus", () => {
+      editingDrumInputs.add(input);
+    });
+    input.addEventListener("blur", () => {
+      editingDrumInputs.delete(input);
+    });
     input.addEventListener("change", () => {
       const row = Number(input.dataset.row);
       if (!Number.isFinite(row)) return;
@@ -5590,6 +6362,14 @@ document.addEventListener("keydown", (e) => {
   }
   if (e.shiftKey && (e.key === "ArrowLeft" || e.key === "ArrowRight" || e.key === "ArrowUp" || e.key === "ArrowDown")) {
     if (isTypingTarget(e.target)) return;
+    const selection = selectionByPage[currentPage];
+    if (selection && selection.size) {
+      const dx = e.key === "ArrowLeft" ? -1 : (e.key === "ArrowRight" ? 1 : 0);
+      const dy = e.key === "ArrowUp" ? -1 : (e.key === "ArrowDown" ? 1 : 0);
+      e.preventDefault();
+      performSelectionMove(dx, dy);
+      return;
+    }
     const patIdx = activePatterns[currentPage] || 1;
     const bar = (barViews[currentPage] && barViews[currentPage][patIdx]) || 0;
     const payload = { type: "shift_pattern", page: currentPage, pattern: patIdx, bar, dx: 0, dy: 0 };
@@ -5599,6 +6379,13 @@ document.addEventListener("keydown", (e) => {
     if (e.key === "ArrowDown") payload.dy = 1;
     e.preventDefault();
     ws?.readyState === WebSocket.OPEN && ws.send(JSON.stringify(payload));
+  }
+  if ((e.key === "Backspace" || e.key === "Delete") && !isTypingTarget(e.target)) {
+    const selection = selectionByPage[currentPage];
+    if (selection && selection.size) {
+      e.preventDefault();
+      clearSelectedNotes();
+    }
   }
 });
 
@@ -5865,9 +6652,7 @@ if (noteMenuAccent) {
   noteMenuAccent.onclick = () => {
     if (!noteMenuTarget || !noteMenuTarget.canAccent) return closeNoteMenu();
     const next = !noteMenuTarget.accent;
-    handleAccentOverlayMessage({ page: currentPage, x: noteMenuTarget.x, y: noteMenuTarget.y, accent: next });
-    ws?.readyState === WebSocket.OPEN &&
-      ws.send(JSON.stringify({ type: "set_step_accent", x: noteMenuTarget.x, y: noteMenuTarget.y, accent: next }));
+    applySelectionToggle(noteMenuTarget, "accent", next);
     closeNoteMenu();
   };
 }
@@ -5875,10 +6660,9 @@ if (noteMenuSlide) {
   noteMenuSlide.onclick = () => {
     if (!noteMenuTarget || !noteMenuTarget.canSlide) return closeNoteMenu();
     const next = !noteMenuTarget.slide;
-    handleSlideOverlayMessage({ page: currentPage, x: noteMenuTarget.x, y: noteMenuTarget.y, slide: next });
-    ws?.readyState === WebSocket.OPEN &&
-      ws.send(JSON.stringify({ type: "set_step_slide", x: noteMenuTarget.x, y: noteMenuTarget.y, slide: next }));
+    applySelectionToggle(noteMenuTarget, "slide", next);
     closeNoteMenu();
   };
 }
+
 // studio grid frontend logic: handles UI, WebSocket sync, WebMIDI, rendering the grid canvas, and local config caching.
