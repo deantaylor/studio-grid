@@ -8,3 +8,4 @@ debug/*
 spec/*
 studio-grid.code-workspace
 .DS_Store
+test_scripts/*
