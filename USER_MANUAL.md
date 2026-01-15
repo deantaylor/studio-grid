@@ -92,6 +92,7 @@ Saving, loading, and sets
 -------------------------
 - Export set: top-bar download saves the full snapshot as `.sgridset` (JSON) via /api/export.
 - Import set: top-bar upload accepts `.json` or `.sgridset` and replaces the current state.
+- Sets include musical data plus per-page MIDI routing; UI/config settings (LED levels, clock, base note length, gate length, mono slide pad, pattern-control latch) are saved separately in config.
 - New set: clears all patterns; optional “Keep device names” and “Keep MIDI settings”; default device color can be preserved.
 - Auto-load last set: toggle in Settings to reload the previous snapshot on startup.
 - Config save/restore: Settings → Save config writes LED levels, clock mode, MIDI selections, UI scale, default colors, and toggles to localStorage; Restore defaults clears localStorage and reverts to factory defaults.
@@ -141,4 +142,3 @@ Extras & caveats
 ----------------
 - Program-change filtering: outgoing program changes are filtered; the server side handles this automatically (no UI control). - to be removed
 - Device notes: an optional per-device notes field exists in the toolbar; it may be hidden in the current layout but loads/saves with the set when used. - to be removed
-

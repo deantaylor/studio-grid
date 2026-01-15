@@ -680,8 +680,6 @@ export class SGridState {
       setName: this.setName,
       tempo: this.tempo,
       swing: this.swing,
-      baseDivision: this.baseDivision,
-      gateLength: this.gateLength,
       microFormat: "int96",
       scale: this.scale,
       currentPage: this.currentPage,
@@ -692,11 +690,8 @@ export class SGridState {
       deviceColors: this.deviceColors,
       deviceOrder: this.deviceOrder,
       midi: this.midi,
-      ledLevels: { ...this.ledLevels },
       ccNumbers: this.pages.map((p, idx) => (idx === 0 ? null : clamp(Math.round(p?.ccNumber ?? DEFAULT_CC), 0, 127))),
       mdTracks: this.pages.map((p, idx) => (idx === 0 ? null : clamp(Math.round(p?.mdTrack || 1), 1, 16))),
-      monoSlidePad: this.monoSlidePad,
-      patternControlLatch: this.patternControlLatch
     };
   }
 
@@ -708,8 +703,6 @@ export class SGridState {
     }
     if (snap.tempo) this.tempo = clamp(Number(snap.tempo) || 120, 20, 300);
     if (snap.swing) this.swing = clamp(Number(snap.swing) || 50, 50, 80);
-    if (snap.baseDivision) this.setBaseDivision(snap.baseDivision);
-    if (snap.gateLength !== undefined) this.setGateLength(snap.gateLength);
     if (snap.scale && typeof snap.scale === "object") {
       this.scale = {
         root: clamp(Number(snap.scale.root) || 0, -24, 24),
@@ -718,13 +711,6 @@ export class SGridState {
     }
     if (snap.currentPage) {
       this.currentPage = clamp(Math.round(snap.currentPage) || this.currentPage || 1, 1, 8);
-    }
-    if (snap.ledLevels && typeof snap.ledLevels === "object") {
-      Object.keys(this.ledLevels).forEach((k) => {
-        if (snap.ledLevels[k] !== undefined) {
-          this.ledLevels[k] = clamp(Math.round(snap.ledLevels[k]), 0, 15);
-        }
-      });
     }
     if (Array.isArray(snap.deviceNames)) this.deviceNames = snap.deviceNames.slice(0, 9);
     if (Array.isArray(snap.deviceNotes)) this.deviceNotes = snap.deviceNotes.slice(0, 9);
@@ -744,12 +730,6 @@ export class SGridState {
           this.pages[idx].mdTrack = clamp(Math.round(t || 1), 1, 16);
         }
       });
-    }
-    if (snap.monoSlidePad !== undefined) {
-      this.setMonoSlidePad(snap.monoSlidePad);
-    }
-    if (typeof snap.patternControlLatch === "boolean") {
-      this.patternControlLatch = snap.patternControlLatch;
     }
 
     if (Array.isArray(snap.pages)) {

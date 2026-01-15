@@ -238,92 +238,104 @@
           <h4>Settings</h4>
           <button id="settings-close" aria-label="Close">×</button>
         </div>
-        <div class="modal-grid">
-          <h4>General</h4>
-
-          <label><span class="label-text">UI Scale</span>
-            <div class="select-wrap">
-              <select id="ui-scale">
-                <option value="0.75">0.75x</option>
-                <option value="1" selected>1x</option>
-                <option value="1.25">1.25x</option>
-              </select>
-              <i class="iconoir-nav-arrow-down select-caret" aria-hidden="true"></i>
-            </div>
-          </label>
-          <div class="default-color-row">
-            <span class="label label-text">Default device color</span>
-            <button type="button" id="default-color-trigger" class="color-chip"
-              aria-label="Choose default device color"></button>
+        <div class="settings-layout">
+          <nav class="settings-tabs" role="tablist" aria-label="Settings sections">
+            <button type="button" class="settings-tab is-active" role="tab" aria-selected="true"
+              aria-controls="settings-panel-interface" data-tab="settings-panel-interface">Interface</button>
+            <button type="button" class="settings-tab" role="tab" aria-selected="false"
+              aria-controls="settings-panel-midi" data-tab="settings-panel-midi">MIDI / Clock</button>
+            <button type="button" class="settings-tab" role="tab" aria-selected="false"
+              aria-controls="settings-panel-workflow" data-tab="settings-panel-workflow">Workflow</button>
+          </nav>
+          <div class="settings-panels">
+            <section id="settings-panel-interface" class="settings-panel is-active" role="tabpanel">
+              <label><span class="label-text">UI Scale</span>
+                <div class="select-wrap">
+                  <select id="ui-scale">
+                    <option value="0.75">0.75x</option>
+                    <option value="1" selected>1x</option>
+                    <option value="1.25">1.25x</option>
+                  </select>
+                  <i class="iconoir-nav-arrow-down select-caret" aria-hidden="true"></i>
+                </div>
+              </label>
+              <div class="default-color-row">
+                <span class="label label-text">Default device color</span>
+                <button type="button" id="default-color-trigger" class="color-chip"
+                  aria-label="Choose default device color"></button>
+              </div>
+              <div class="toggle-row" aria-label="Temperature">
+                <span class="label label-text">Temperature</span>
+                <div class="toggle-group" role="group">
+                  <button type="button" class="toggle-btn" id="temp-warm" data-value="warm">Warm</button>
+                  <button type="button" class="toggle-btn" id="temp-cold" data-value="cold">Cold</button>
+                </div>
+              </div>
+              <div class="toggle-row" aria-label="Colors">
+                <span class="label label-text">Colors</span>
+                <div class="toggle-group" role="group">
+                  <button type="button" class="toggle-btn" id="colors-pastel" data-value="pastel">Soft</button>
+                  <button type="button" class="toggle-btn" id="colors-solid" data-value="solid">Solid</button>
+                </div>
+              </div>
+            </section>
+            <section id="settings-panel-midi" class="settings-panel" role="tabpanel">
+              <label><span class="label-text">Clock</span>
+                <div class="select-wrap">
+                  <select id="clock-source">
+                    <option value="internal">Internal</option>
+                    <option value="external">External</option>
+                  </select>
+                  <i class="iconoir-nav-arrow-down select-caret" aria-hidden="true"></i>
+                </div>
+              </label>
+              <label id="clock-source-wrap" class="hidden"><span class="label-text">Clock In</span>
+                <div class="select-wrap">
+                  <select id="clock-input"></select>
+                  <i class="iconoir-nav-arrow-down select-caret" aria-hidden="true"></i>
+                </div>
+              </label>
+              <label class="switch-option">
+                <input type="checkbox" id="clock-out-enable" />
+                <span class="label-text">Send MIDI clock out</span>
+              </label>
+              <label id="clock-out-wrap"><span class="label-text">Clock Out Port</span>
+                <div class="select-wrap">
+                  <select id="clock-out-port"></select>
+                  <i class="iconoir-nav-arrow-down select-caret" aria-hidden="true"></i>
+                </div>
+              </label>
+            </section>
+            <section id="settings-panel-workflow" class="settings-panel" role="tabpanel">
+              <label class="switch-option">
+                <input type="checkbox" id="auto-fill" checked />
+                <span class="label-text">Auto-fill new bars</span>
+              </label>
+              <label class="switch-option">
+                <input type="checkbox" id="auto-load-set" />
+                <span class="label-text">Auto-load last set on start-up</span>
+              </label>
+              <label class="switch-option">
+                <input type="checkbox" id="pattern-control-latch" checked />
+                <span class="label-text">Latch pattern launch page</span>
+              </label>
+              <label class="switch-option hidden" id="monome-controls-wrap">
+                <input type="checkbox" id="show-monome-controls" checked />
+                <span class="label-text">Show monome controls</span>
+              </label>
+              <label><span class="label-text">Gate length</span>
+                <div class="select-wrap">
+                  <select id="gate-length">
+                    <option value="25">25%</option>
+                    <option value="50">50%</option>
+                    <option value="75">75%</option>
+                    <option value="100" selected>100%</option>
+                  </select>
+                  <i class="iconoir-nav-arrow-down select-caret" aria-hidden="true"></i>
+                </div>
+              </label>
+            </section>
           </div>
-          <div class="toggle-row" aria-label="Temperature">
-            <span class="label label-text">Temperature</span>
-            <div class="toggle-group" role="group">
-              <button type="button" class="toggle-btn" id="temp-warm" data-value="warm">Warm</button>
-              <button type="button" class="toggle-btn" id="temp-cold" data-value="cold">Cold</button>
-            </div>
-          </div>
-          <div class="toggle-row" aria-label="Colors">
-            <span class="label label-text">Colors</span>
-            <div class="toggle-group" role="group">
-              <button type="button" class="toggle-btn" id="colors-pastel" data-value="pastel">Soft</button>
-              <button type="button" class="toggle-btn" id="colors-solid" data-value="solid">Solid</button>
-            </div>
-          </div>
-          <h4>Clock Settings</h4>
-          <label><span class="label-text">Clock</span>
-            <div class="select-wrap">
-              <select id="clock-source">
-                <option value="internal">Internal</option>
-                <option value="external">External</option>
-              </select>
-              <i class="iconoir-nav-arrow-down select-caret" aria-hidden="true"></i>
-            </div>
-          </label>
-          <label id="clock-source-wrap" class="hidden"><span class="label-text">Clock In</span>
-            <div class="select-wrap">
-              <select id="clock-input"></select>
-              <i class="iconoir-nav-arrow-down select-caret" aria-hidden="true"></i>
-            </div>
-          </label>
-          <label class="switch-option">
-            <input type="checkbox" id="clock-out-enable" />
-            <span class="label-text">Send MIDI clock out</span>
-          </label>
-          <label id="clock-out-wrap"><span class="label-text">Clock Out Port</span>
-            <div class="select-wrap">
-              <select id="clock-out-port"></select>
-              <i class="iconoir-nav-arrow-down select-caret" aria-hidden="true"></i>
-            </div>
-          </label>
-          <h4>Workflow</h4>
-          <label class="switch-option">
-            <input type="checkbox" id="auto-fill" checked />
-            <span class="label-text">Auto-fill new bars</span>
-          </label>
-          <label class="switch-option">
-            <input type="checkbox" id="auto-load-set" />
-            <span class="label-text">Auto-load last set on start-up</span>
-          </label>
-          <label class="switch-option">
-            <input type="checkbox" id="pattern-control-latch" checked />
-            <span class="label-text">Latch pattern launch page</span>
-          </label>
-          <label class="switch-option hidden" id="monome-controls-wrap">
-            <input type="checkbox" id="show-monome-controls" checked />
-            <span class="label-text">Show monome controls</span>
-          </label>
-          <label><span class="label-text">Gate length</span>
-            <div class="select-wrap">
-              <select id="gate-length">
-                <option value="25">25%</option>
-                <option value="50">50%</option>
-                <option value="75">75%</option>
-                <option value="100" selected>100%</option>
-              </select>
-              <i class="iconoir-nav-arrow-down select-caret" aria-hidden="true"></i>
-            </div>
-          </label>
         </div>
         <div class="modal-actions">
           <button type="button" id="settings-restore-default" class="btn">Restore default</button>
@@ -335,7 +347,7 @@
     <div id="td3-modal" class="modal hidden">
       <div class="modal-body">
         <div class="modal-head">
-          <h4>Export TD-3</h4>
+          <h4>Export to TD-3</h4>
 
           <button id="td3-close" aria-label="Close">×</button>
         </div>

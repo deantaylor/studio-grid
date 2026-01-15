@@ -198,6 +198,9 @@ const settingsClose = document.getElementById("settings-close");
 const settingsSaveCfg = document.getElementById("settings-save-config");
 const settingsRestoreCfg = document.getElementById("settings-restore-default");
 const settingsConfirm = document.getElementById("settings-confirm");
+const settingsTabs = Array.from(document.querySelectorAll(".settings-tab"));
+const settingsPanels = Array.from(document.querySelectorAll(".settings-panel"));
+let settingsActiveTabId = "settings-panel-interface";
 const showLogToggle = document.getElementById("show-log");
 const autoFillToggle = document.getElementById("auto-fill");
 const autoLoadToggle = document.getElementById("auto-load-set");
@@ -889,6 +892,44 @@ let setName = "default";
 let currentSetFilename = null;
 let pendingExportFilename = null;
 let currentSetFileHandle = null;
+const hasElectronSave = !!window.electronAPI?.saveSet;
+const NON_DIRTY_WS_TYPES = new Set([
+  "subscribe_events",
+  "midi_log",
+  "transport",
+  "clockTicks",
+  "get_step_state",
+  "get_steps_state",
+  "copy_bar",
+  "copy_pattern",
+  "copy_steps",
+  "export_state",
+  "export_td3",
+  "td3_export_sysex",
+  "td3_import_preview",
+  "td3_import_payload_preview",
+  "set_external_arm",
+  "set_follow",
+  "set_auto_fill",
+  "set_base_division",
+  "set_gate_length",
+  "set_led_levels",
+  "set_pattern_control_latch",
+  "set_midi",
+  "set_monome_controls",
+  "set_mono_slide_pad",
+  "set_clock_source",
+  "set_clock_input",
+  "set_clock_out",
+  "set_clock_out_device",
+  "set_md_slide_params",
+  "set_page",
+  "set_pattern"
+]);
+let isDirty = false;
+let pendingDirtyReset = true;
+let receivedStateOnce = false;
+window.electronAPI?.setDirty?.(isDirty);
 let activePatterns = Array.from({ length: 9 }, () => 1);
 let pendingPatterns = Array.from({ length: 9 }, () => null);
 let patternLengths = Array.from({ length: 9 }, () => Array(9).fill(16));
@@ -1206,6 +1247,14 @@ function buildScaleSelectors() {
 
 function connectWS() {
   ws = new WebSocket(WS_URL);
+  const rawSend = ws.send.bind(ws);
+  ws.send = (data) => {
+    try {
+      const msg = typeof data === "string" ? JSON.parse(data) : data;
+      if (receivedStateOnce && shouldMarkDirty(msg)) setDirty(true);
+    } catch (e) {}
+    return rawSend(data);
+  };
   ws.onopen = () => {
     if (wsStatus) wsStatus.textContent = "WS: connected";
     log("WS connected");
@@ -1387,6 +1436,11 @@ function connectWS() {
       if (typeof msg.gridConnected === "boolean" || typeof msg.fullScaleMode === "boolean" || typeof msg.showMonomeControls === "boolean") {
         const nextConnected = typeof msg.gridConnected === "boolean" ? msg.gridConnected : gridConnected;
         handleGridStatus(nextConnected, msg.fullScaleMode ?? null, msg.devices ?? null, msg.showMonomeControls ?? null);
+      }
+      if (!receivedStateOnce || pendingDirtyReset) {
+        setDirty(false);
+        pendingDirtyReset = false;
+        receivedStateOnce = true;
       }
     } else if (msg.type === "page_change") {
       if (Array.isArray(msg.octaveOverlays)) {
@@ -1609,6 +1663,7 @@ function connectWS() {
       updateSetTitle(setName);
       pendingExportFilename = null;
       currentSetFileHandle = null;
+      setDirty(false);
     } else if (msg.type === "export_td3") {
       if (msg.data) {
         downloadBase64Binary(msg.data, "sgrid_td3_pattern.seq");
@@ -2881,6 +2936,13 @@ document.getElementById("export").onclick = () => {
     return;
   }
   const suggested = setName && setName.toLowerCase() !== "default" ? setName : "Untitled";
+  if (hasElectronSave) {
+    saveSnapshotToElectron(suggested, { overwrite: false }).catch(() => {
+      showToast("Save failed");
+      log("Save failed");
+    });
+    return;
+  }
   if (window.showSaveFilePicker) {
     requestSaveHandle(suggested)
       .then((handle) => {
@@ -3410,10 +3472,23 @@ function applySettingsFromInputs() {
   updateDefaultColorTrigger();
 }
 
+function setSettingsTab(panelId) {
+  settingsActiveTabId = panelId || settingsActiveTabId;
+  settingsTabs.forEach((btn) => {
+    const active = btn.dataset.tab === settingsActiveTabId;
+    btn.classList.toggle("is-active", active);
+    btn.setAttribute("aria-selected", active ? "true" : "false");
+  });
+  settingsPanels.forEach((panel) => {
+    panel.classList.toggle("is-active", panel.id === settingsActiveTabId);
+  });
+}
+
   if (settingsBtn && settingsModal && settingsBackdrop) {
     const openSettings = () => {
     settingsOpen = true;
     syncSettingsInputs();
+    setSettingsTab(settingsActiveTabId);
     settingsModal.classList.remove("hidden");
     settingsBackdrop.classList.remove("hidden");
   };
@@ -3427,6 +3502,11 @@ function applySettingsFromInputs() {
     if (!settingsOpen) return;
     closeSettings();
   };
+  if (settingsTabs.length) {
+    settingsTabs.forEach((btn) => {
+      btn.onclick = () => setSettingsTab(btn.dataset.tab);
+    });
+  }
   settingsBtn.onclick = openSettings;
   if (settingsClose) settingsClose.onclick = closeSettings;
   settingsBackdrop.onclick = closeSettings;
@@ -3648,6 +3728,68 @@ function displaySetName(name) {
   return raw.replace(/\.(sgridset|json)$/i, "") || "Untitled";
 }
 
+function setDirty(next) {
+  const safe = !!next;
+  if (isDirty === safe) return;
+  isDirty = safe;
+  window.electronAPI?.setDirty?.(isDirty);
+}
+
+function shouldMarkDirty(msg) {
+  if (!msg || typeof msg !== "object") return false;
+  const type = msg.type;
+  if (!type) return false;
+  if (type === "import_state") {
+    pendingDirtyReset = true;
+    return false;
+  }
+  return !NON_DIRTY_WS_TYPES.has(type);
+}
+
+async function saveBeforeQuit() {
+  if (!isDirty) return false;
+  const suggested = setName && setName.toLowerCase() !== "default" ? setName : "Untitled";
+  const targetName = currentSetFilename || suggested;
+  if (hasElectronSave) {
+    const overwrite = !!currentSetFilename;
+    await saveSnapshotToElectron(targetName, { overwrite });
+    return true;
+  }
+  if (currentSetFileHandle) {
+    await saveSnapshotToHandle(currentSetFileHandle);
+    return true;
+  }
+  if (window.showSaveFilePicker) {
+    const handle = await requestSaveHandle(targetName);
+    if (handle?.name) {
+      currentSetFilename = handle.name;
+      setName = displaySetName(handle.name || setName);
+      updateSetTitle(setName);
+    }
+    await saveSnapshotToHandle(handle);
+    return true;
+  }
+  startExport(targetName);
+  return true;
+}
+
+if (window.electronAPI?.onSaveBeforeQuit) {
+  window.electronAPI.onSaveBeforeQuit(async () => {
+    if (!isDirty) {
+      window.electronAPI?.respondSaveBeforeQuit?.(true);
+      return;
+    }
+    try {
+      await saveBeforeQuit();
+      window.electronAPI?.respondSaveBeforeQuit?.(true);
+    } catch (e) {
+      showToast("Save failed");
+      log("Save failed");
+      window.electronAPI?.respondSaveBeforeQuit?.(false);
+    }
+  });
+}
+
 async function saveSnapshotToHandle(handle) {
   if (!handle) return false;
   const resp = await fetch("/api/export");
@@ -3663,6 +3805,27 @@ async function saveSnapshotToHandle(handle) {
   updateSetTitle(setName);
   showToast("Set saved");
   log("Saved current set");
+  setDirty(false);
+  return true;
+}
+
+async function saveSnapshotToElectron(name, { overwrite = false } = {}) {
+  if (!hasElectronSave) return false;
+  const resp = await fetch("/api/export");
+  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+  const data = await resp.json();
+  const payload = data.data || data;
+  const targetName = ensureSetFilename(name || "Untitled.sgridset");
+  const result = await window.electronAPI.saveSet({ name: targetName, data: payload, overwrite });
+  if (result?.filename) {
+    currentSetFilename = result.filename;
+    currentSetFileHandle = null;
+    setName = displaySetName(result.filename || setName);
+    updateSetTitle(setName);
+  }
+  showToast("Set saved");
+  log("Saved current set");
+  setDirty(false);
   return true;
 }
 
@@ -3701,6 +3864,7 @@ function startExport(name) {
       setName = displaySetName(targetName || setName);
       updateSetTitle(setName);
       pendingExportFilename = null;
+      setDirty(false);
       log("Exported set");
     })
     .catch(() => {
@@ -3721,12 +3885,23 @@ function openConfirmDialog(message, onConfirm) {
   }
   if (dialogTitle) dialogTitle.textContent = "Confirm";
   if (dialogMessage) dialogMessage.textContent = message || "Are you sure?";
+  if (dialogCancel) dialogCancel.textContent = "Cancel";
+  if (dialogOk) dialogOk.textContent = "OK";
+  if (dialogOk) dialogOk.removeAttribute("disabled");
+  if (dialogCancel) dialogCancel.removeAttribute("disabled");
   dialogOkHandler = typeof onConfirm === "function" ? onConfirm : null;
   dialogModal.classList.remove("hidden");
 }
 
 function openSaveSetModal() {
   if (!saveSetModal) {
+    if (hasElectronSave) {
+      saveSnapshotToElectron(currentSetFilename || "Untitled.sgridset", { overwrite: true }).catch(() => {
+        showToast("Save failed");
+        log("Save failed");
+      });
+      return;
+    }
     startExport(currentSetFilename || "Untitled.sgridset");
     return;
   }
@@ -3740,6 +3915,13 @@ function openSaveSetModal() {
       saveSetModal.classList.add("hidden");
       const target = displaySetName(currentSetFilename || "Untitled.sgridset");
       openConfirmDialog(`Are you sure you want to save over "${target}"?`, () => {
+        if (hasElectronSave) {
+          saveSnapshotToElectron(currentSetFilename || `${target}.sgridset`, { overwrite: true }).catch(() => {
+            showToast("Save failed");
+            log("Save failed");
+          });
+          return;
+        }
         if (currentSetFileHandle) {
           saveSnapshotToHandle(currentSetFileHandle).catch(() => {
             showToast("Save failed");
@@ -3768,6 +3950,13 @@ function openSaveSetModal() {
     saveSetNew.onclick = () => {
       saveSetModal.classList.add("hidden");
       const suggested = setName && setName.toLowerCase() !== "default" ? setName : "Untitled";
+      if (hasElectronSave) {
+        saveSnapshotToElectron(suggested, { overwrite: false }).catch(() => {
+          showToast("Save failed");
+          log("Save failed");
+        });
+        return;
+      }
       if (window.showSaveFilePicker) {
         requestSaveHandle(suggested)
           .then((handle) => {
