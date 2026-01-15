@@ -697,6 +697,11 @@ function handleClientMessage(ws, data) {
     case "subscribe_midi":
       eventListeners.add(ws);
       break;
+    case "midi_log":
+      if (data?.data) {
+        console.log("[midi-log]", data.data);
+      }
+      break;
     case "set_clock_source":
       if (data.source === "internal" || data.source === "external") {
         clockSource = data.source;

@@ -83,6 +83,8 @@ export class SGridState {
     this.patternControlHeld = false; // holding launcher in non-latch mode
     this.pulse = false;
     this.noteOffEpsilonMs = 6; // shave a few ms to avoid zero-length clips in DAWs
+    this.externalGatePadMs = 12; // extra pad to avoid external clock overlaps in DAWs
+    this.gatePadMs = 0;
     this.tickCount = 0;
     this.keyHolds = new Map(); // key -> {start, wasOn}
     this.pageTicks = Array(9).fill(0); // total ticks per page (16ths)
@@ -2390,6 +2392,7 @@ export class SGridState {
     const barChanges = [];
     const barPlayheadChanges = [];
     const midiEvents = [];
+    this.gatePadMs = externalStepMs ? this.externalGatePadMs : 0;
     this.lastTickTime = Date.now();
     const currentTick = this.tickCount; // use pre-increment tick for alignment
     const baseTickExt = Number.isFinite(transportTick) ? transportTick : (this.tickCount * TICKS_PER_STEP_EXT);
@@ -3011,7 +3014,8 @@ export class SGridState {
 
   gateDurationMs(rawMs) {
     const gated = this.applyGateLength(rawMs);
-    return Math.max(1, Math.round(gated - this.noteOffEpsilonMs));
+    const pad = this.noteOffEpsilonMs + (Number(this.gatePadMs) || 0);
+    return Math.max(1, Math.round(gated - pad));
   }
 
   stepDurationMs(time_scale) {

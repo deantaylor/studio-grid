@@ -921,6 +921,9 @@ let internalStartTimeSec = 0;
 let externalTick = 0;
 let externalTickTimes = new Map();
 let lastExternalTickMs = null;
+let externalIntervalEstMs = null;
+let externalPredictedTickMs = null;
+let externalWarmupTicks = 0;
 let lastSentExternalTick = -1;
 let externalStartSent = false;
 let autoStartPending = false;
@@ -932,6 +935,7 @@ let deviceTabProgressCssWidth = 0;
 let deviceTabProgressCssHeight = 0;
 let externalArmed = false;
 const activeNotes = new Map();
+const lastScheduledNoteOff = new Map();
 let uiScale = 1; //default Scale UI
 let uiScaleInitialized = false;
 // pattern lengths not tracked client-side
@@ -968,6 +972,25 @@ let patternControlLatch = true;
 let patternControlActive = false;
 let resetNamesOnNextState = false;
 let barFlashTimer = null;
+const MIN_MIDI_LEAD_MS = 5;
+const EXT_CLOCK_ALPHA = 0.05;
+const EXT_CLOCK_PHASE_ALPHA = 0.15;
+const EXT_CLOCK_OUTLIER_FRAC = 0.25;
+const EXT_CLOCK_WARMUP_TICKS = 24;
+const CLOCK_DEBUG = new URLSearchParams(window.location.search).has("clockDebug")
+  || window.localStorage.getItem("clockDebug") === "1";
+const MIDI_LOG = new URLSearchParams(window.location.search).has("midiLog")
+  || window.localStorage.getItem("midiLog") === "1";
+const CLOCK_DEBUG_REPORT_MS = 5000;
+const clockDebug = CLOCK_DEBUG ? {
+  lastReportMs: 0,
+  lastServerLogMs: 0,
+  extObs: makeStats(),
+  extEst: makeStats(),
+  leadClock: makeStats(),
+  leadNote: makeStats()
+} : null;
+let midiLogAnnounced = false;
 const lastSentState = {
   clockSource: null,
   clockInputId: null,
@@ -1188,6 +1211,12 @@ function connectWS() {
     log("WS connected");
     resetLastSentState();
     ws.send(JSON.stringify({ type: "subscribe_events" }));
+    if (MIDI_LOG && !midiLogAnnounced) {
+      midiLogAnnounced = true;
+      const payload = { kind: "enabled", nowTs: Number(performance.now().toFixed(3)) };
+      console.log("[midi-log]", payload);
+      ws.send(JSON.stringify({ type: "midi_log", data: payload }));
+    }
     panicAll();
     // push saved config (LED/clock/log/auto-fill) if we have it
     pushSavedConfigToServer();
@@ -1218,6 +1247,24 @@ function connectWS() {
   };
   ws.onmessage = (ev) => {
     const msg = JSON.parse(ev.data);
+    if (clockDebug && (msg.type === "tempo" || msg.type === "clock_status")) {
+      const now = performance.now();
+      if ((now - clockDebug.lastServerLogMs) > 2000) {
+        clockDebug.lastServerLogMs = now;
+        if (msg.type === "clock_status") {
+          const serverTick = msg?.data?.tick;
+          const predictedTick = getInterpolatedTransportTickExt();
+          const tickDelta = Number.isFinite(serverTick) ? (serverTick - predictedTick) : null;
+          console.log("[clock-debug] server clock_status", {
+            tickDelta: Number.isFinite(tickDelta) ? tickDelta.toFixed(3) : "n/a",
+            serverTick,
+            predictedTick: Number.isFinite(predictedTick) ? predictedTick.toFixed(3) : "n/a"
+          });
+        } else if (msg.type === "tempo") {
+          console.log("[clock-debug] server tempo", msg.bpm);
+        }
+      }
+    }
     if (msg.type === "log") {
       log(msg.message);
     } else if (msg.type === "led_frame") {
@@ -1834,13 +1881,16 @@ function resolveTickTime(tickInt) {
   const tickExt = intToExtTick(tickInt);
   const baseTickExt = Math.floor(tickExt);
   const baseTime = externalTickTimes.get(baseTickExt);
-  const extTickPeriodSec = tempo > 0 ? 60 / (tempo * PPQN_EXT) : null;
+  const extIntervalMs = Number.isFinite(externalIntervalEstMs) ? externalIntervalEstMs : null;
+  const extTickPeriodSec = extIntervalMs
+    ? (extIntervalMs / 1000)
+    : (tempo > 0 ? 60 / (tempo * PPQN_EXT) : null);
   if (Number.isFinite(baseTime) && Number.isFinite(extTickPeriodSec)) {
     return baseTime + (tickExt - baseTickExt) * extTickPeriodSec;
   }
   if (clockSource === "external" && Number.isFinite(extTickPeriodSec)) {
-    if (Number.isFinite(lastExternalTickMs) && audioTimeOriginMs) {
-      const lastTickSec = (lastExternalTickMs - audioTimeOriginMs) / 1000;
+    if (Number.isFinite(externalPredictedTickMs) && audioTimeOriginMs) {
+      const lastTickSec = (externalPredictedTickMs - audioTimeOriginMs) / 1000;
       return lastTickSec + (tickExt - transportTickExt) * extTickPeriodSec;
     }
   }
@@ -1850,6 +1900,54 @@ function resolveTickTime(tickInt) {
 function getNowSec() {
   if (!audioTimeOriginMs) audioTimeOriginMs = performance.now();
   return (performance.now() - audioTimeOriginMs) / 1000;
+}
+
+function makeStats() {
+  return { count: 0, mean: 0, m2: 0, min: Infinity, max: -Infinity };
+}
+
+function updateStats(stats, value) {
+  if (!stats || !Number.isFinite(value)) return;
+  stats.count += 1;
+  const delta = value - stats.mean;
+  stats.mean += delta / stats.count;
+  stats.m2 += delta * (value - stats.mean);
+  stats.min = Math.min(stats.min, value);
+  stats.max = Math.max(stats.max, value);
+}
+
+function summarizeStats(stats) {
+  if (!stats || !stats.count) return "n=0";
+  const variance = stats.count > 1 ? (stats.m2 / (stats.count - 1)) : 0;
+  const std = Math.sqrt(variance);
+  return `n=${stats.count} mean=${stats.mean.toFixed(3)}ms min=${stats.min.toFixed(3)}ms max=${stats.max.toFixed(3)}ms std=${std.toFixed(3)}ms`;
+}
+
+function resetStats(stats) {
+  if (!stats) return;
+  stats.count = 0;
+  stats.mean = 0;
+  stats.m2 = 0;
+  stats.min = Infinity;
+  stats.max = -Infinity;
+}
+
+function maybeReportClockDebug(nowMs) {
+  if (!clockDebug || !Number.isFinite(nowMs)) return;
+  if (!clockDebug.lastReportMs) clockDebug.lastReportMs = nowMs;
+  if (nowMs - clockDebug.lastReportMs < CLOCK_DEBUG_REPORT_MS) return;
+  clockDebug.lastReportMs = nowMs;
+  console.log(
+    "[clock-debug]",
+    "extObs:", summarizeStats(clockDebug.extObs),
+    "extEst:", summarizeStats(clockDebug.extEst),
+    "leadClock:", summarizeStats(clockDebug.leadClock),
+    "leadNote:", summarizeStats(clockDebug.leadNote)
+  );
+  resetStats(clockDebug.extObs);
+  resetStats(clockDebug.extEst);
+  resetStats(clockDebug.leadClock);
+  resetStats(clockDebug.leadNote);
 }
 
 function ensureScheduler() {
@@ -1932,6 +2030,10 @@ function noteKey(out, channel) {
   return `${out?.id || "none"}:${channel || 1}`;
 }
 
+function noteEventKey(out, channel, note) {
+  return `${noteKey(out, channel)}:${note}`;
+}
+
 function trackNoteOn(out, channel, note) {
   if (!out) return;
   const key = noteKey(out, channel);
@@ -1952,8 +2054,16 @@ function scheduleMidiEvent(evt, targetTimeSec) {
   const out = getMidiOutForPage(evt.page);
   if (!out) return;
   const channel = getMidiChannelForPage(evt.page, evt.channel);
-  const safeTime = Math.max(targetTimeSec, getNowSec() + 0.001);
-  const ts = audioTimeToPerfMs(safeTime);
+  const nowPerf = performance.now();
+  let targetPerf = audioTimeToPerfMs(targetTimeSec);
+  if (evt.type === "note_on") {
+    const key = noteEventKey(out, channel, evt.note);
+    const lastOff = lastScheduledNoteOff.get(key);
+    if (Number.isFinite(lastOff) && targetPerf <= lastOff + 0.5) {
+      targetPerf = lastOff + 1;
+    }
+  }
+  const ts = Math.max(targetPerf, nowPerf);
   if (evt.type === "note_on") {
     const status = 0x90 + (channel - 1);
     const vel = Math.max(0, Math.min(127, Math.round(evt.velocity || 0)));
@@ -1962,6 +2072,8 @@ function scheduleMidiEvent(evt, targetTimeSec) {
   } else if (evt.type === "note_off") {
     const status = 0x80 + (channel - 1);
     sendMIDISafe(out, [status, evt.note, 0], ts);
+    const key = noteEventKey(out, channel, evt.note);
+    lastScheduledNoteOff.set(key, ts);
     const delay = Math.max(0, ts - performance.now());
     setTimeout(() => trackNoteOff(out, channel, evt.note), delay);
   } else if (evt.type === "cc") {
@@ -1996,7 +2108,40 @@ function sendMIDISafe(out, bytes, ts) {
     console.warn("Blocked program change message", bytes);
     return;
   }
-  out.send(bytes, ts);
+  let sendTime = ts;
+  if (Number.isFinite(sendTime)) {
+    const now = performance.now();
+    if (sendTime < now) sendTime = now;
+    if (MIDI_LOG && (status === 0x80 || status === 0x90)) {
+      const note = bytes[1];
+      const vel = bytes[2] ?? 0;
+      const kind = (status === 0x80 || vel === 0) ? "note_off" : "note_on";
+      const payload = {
+        kind,
+        note,
+        velocity: vel,
+        targetTs: Number.isFinite(ts) ? Number(ts.toFixed(3)) : "n/a",
+        sendTs: Number.isFinite(sendTime) ? Number(sendTime.toFixed(3)) : "n/a",
+        nowTs: Number(now.toFixed(3)),
+        leadMs: Number.isFinite(sendTime) ? Number((sendTime - now).toFixed(3)) : "n/a"
+      };
+      console.log("[midi-log]", payload);
+      ws?.readyState === WebSocket.OPEN &&
+        ws.send(JSON.stringify({ type: "midi_log", data: payload }));
+    } else if (MIDI_LOG) {
+      console.log("[midi-log]", { kind: "non_note", status: bytes[0], nowTs: Number(now.toFixed(3)) });
+    }
+    if (clockDebug) {
+      const lead = sendTime - now;
+      if (bytes[0] === 0xf8) {
+        updateStats(clockDebug.leadClock, lead);
+      } else if (status === 0x80 || status === 0x90 || status === 0xb0) {
+        updateStats(clockDebug.leadNote, lead);
+      }
+      maybeReportClockDebug(now);
+    }
+  }
+  out.send(bytes, sendTime);
 }
 
 function sendMIDI(page, pitch, vel, durMs, delayMs, chan) {
@@ -2382,6 +2527,9 @@ function handleClockSourceChange(prev, next) {
   externalTick = 0;
   externalTickTimes = new Map();
   lastExternalTickMs = null;
+  externalIntervalEstMs = null;
+  externalPredictedTickMs = null;
+  externalWarmupTicks = 0;
   lastSentExternalTick = -1;
   externalStartSent = false;
   autoStartPending = false;
@@ -2524,6 +2672,8 @@ function detachClockInput() {
   externalTick = 0;
   externalTickTimes = new Map();
   lastExternalTickMs = null;
+  externalIntervalEstMs = null;
+  externalPredictedTickMs = null;
   lastSentExternalTick = -1;
   externalStartSent = false;
   autoStartPending = false;
@@ -2539,6 +2689,9 @@ function handleClockMessage(evt) {
     externalTick = 0;
     externalTickTimes = new Map();
     lastExternalTickMs = null;
+    externalIntervalEstMs = null;
+    externalPredictedTickMs = null;
+    externalWarmupTicks = 0;
     lastSentExternalTick = -1;
     externalStartSent = true;
     autoStartPending = false;
@@ -2561,6 +2714,9 @@ function handleClockMessage(evt) {
     scheduler?.clear();
     externalTickTimes = new Map();
     lastExternalTickMs = null;
+    externalIntervalEstMs = null;
+    externalPredictedTickMs = null;
+    externalWarmupTicks = 0;
     lastSentExternalTick = -1;
     externalStartSent = false;
     autoStartPending = false;
@@ -2590,6 +2746,8 @@ function handleClockMessage(evt) {
     setTransportTickExt(tick);
     externalTick = tick;
     lastSentExternalTick = tick - 1;
+    externalPredictedTickMs = null;
+    externalWarmupTicks = 0;
     autoStartPending = false;
     autoStartFirstMs = 0;
     autoStartTicks = 0;
@@ -2604,16 +2762,52 @@ function handleClockMessage(evt) {
   ensureScheduler();
   const nowMs = Number.isFinite(evt.timeStamp) ? evt.timeStamp : performance.now();
   if (!audioTimeOriginMs) audioTimeOriginMs = nowMs;
-  const nowSec = (nowMs - audioTimeOriginMs) / 1000;
-  const intervalMs = lastExternalTickMs ? (nowMs - lastExternalTickMs) : null;
+  const intervalObsMs = lastExternalTickMs ? (nowMs - lastExternalTickMs) : null;
   lastExternalTickMs = nowMs;
+  if (Number.isFinite(intervalObsMs) && intervalObsMs > 0) {
+    if (externalWarmupTicks < EXT_CLOCK_WARMUP_TICKS) {
+      externalIntervalEstMs = intervalObsMs;
+      externalWarmupTicks += 1;
+    } else if (!Number.isFinite(externalIntervalEstMs)) {
+      externalIntervalEstMs = intervalObsMs;
+    } else {
+      const maxDev = externalIntervalEstMs * EXT_CLOCK_OUTLIER_FRAC;
+      const clampedObs = Math.min(externalIntervalEstMs + maxDev, Math.max(externalIntervalEstMs - maxDev, intervalObsMs));
+      externalIntervalEstMs = externalIntervalEstMs + EXT_CLOCK_ALPHA * (clampedObs - externalIntervalEstMs);
+    }
+  }
+  let predictedMs = externalPredictedTickMs;
+  if (!Number.isFinite(predictedMs)) {
+    predictedMs = nowMs;
+  } else if (Number.isFinite(externalIntervalEstMs)) {
+    predictedMs += externalIntervalEstMs;
+  } else if (Number.isFinite(intervalObsMs)) {
+    predictedMs += intervalObsMs;
+  } else {
+    predictedMs = nowMs;
+  }
+  const phaseError = nowMs - predictedMs;
+  if (Number.isFinite(phaseError)) {
+    predictedMs += phaseError * EXT_CLOCK_PHASE_ALPHA;
+  }
+  externalPredictedTickMs = predictedMs;
+  const nowSecObserved = (nowMs - audioTimeOriginMs) / 1000;
+  const intervalMs = (externalWarmupTicks && externalWarmupTicks <= EXT_CLOCK_WARMUP_TICKS)
+    ? intervalObsMs
+    : (Number.isFinite(externalIntervalEstMs) ? externalIntervalEstMs : intervalObsMs);
+  if (clockDebug) {
+    updateStats(clockDebug.extObs, intervalObsMs);
+    updateStats(clockDebug.extEst, externalIntervalEstMs);
+    maybeReportClockDebug(nowMs);
+  }
 
   setTransportTickExt(externalTick);
   if (externalTick <= lastSentExternalTick) {
     externalTick += 1;
     return;
   }
-  externalTickTimes.set(externalTick, nowSec);
+  // Anchor tick times to observed clock to avoid cumulative drift in note gating.
+  externalTickTimes.set(externalTick, nowSecObserved);
   if (externalTickTimes.size > 1024) {
     const cutoff = externalTick - 512;
     externalTickTimes.forEach((_, key) => {
@@ -2643,6 +2837,7 @@ function handleClockMessage(evt) {
     }
   }
 
+  // Send smoothed timing to avoid per-tick jitter feeding back into the server clock model.
   ws?.readyState === WebSocket.OPEN &&
     ws.send(JSON.stringify({
       type: "clockTicks",
@@ -3716,9 +3911,11 @@ function getInterpolatedTransportTickExt() {
     return (nowSec - internalStartTimeSec) / internalTickPeriodSec;
   }
   if (clockSource === "external" && tempo > 0) {
-    if (!lastExternalTickMs || !audioTimeOriginMs) return transportTickExt;
-    const lastTickSec = (lastExternalTickMs - audioTimeOriginMs) / 1000;
-    const tickPeriodSec = 60 / (tempo * PPQN_EXT);
+    if (!Number.isFinite(externalPredictedTickMs) || !audioTimeOriginMs) return transportTickExt;
+    const lastTickSec = (externalPredictedTickMs - audioTimeOriginMs) / 1000;
+    const tickPeriodSec = Number.isFinite(externalIntervalEstMs)
+      ? (externalIntervalEstMs / 1000)
+      : (60 / (tempo * PPQN_EXT));
     return transportTickExt + Math.max(0, (nowSec - lastTickSec) / tickPeriodSec);
   }
   return transportTickExt;
