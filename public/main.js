@@ -484,6 +484,16 @@ const td3ActionModal = document.getElementById("td3-action-modal");
 const td3ActionClose = document.getElementById("td3-action-close");
 const td3ImportBtn = document.getElementById("td3-import-btn");
 const td3ExportBtn = document.getElementById("td3-export-btn");
+const td3ImportSysexBtn = document.getElementById("td3-import-sysex-btn");
+const td3ExportSysexBtn = document.getElementById("td3-export-sysex-btn");
+const td3SysexModal = document.getElementById("td3-sysex-modal");
+const td3SysexTitle = document.getElementById("td3-sysex-title");
+const td3SysexClose = document.getElementById("td3-sysex-close");
+const td3SysexCancel = document.getElementById("td3-sysex-cancel");
+const td3SysexConfirm = document.getElementById("td3-sysex-confirm");
+const td3SysexGroupInput = document.getElementById("td3-sysex-group");
+const td3SysexBankSelect = document.getElementById("td3-sysex-bank");
+const td3SysexPatternInput = document.getElementById("td3-sysex-pattern");
 const td3ScaleModal = document.getElementById("td3-scale-modal");
 const td3ScaleClose = document.getElementById("td3-scale-close");
 const td3ScaleFit = document.getElementById("td3-scale-fit");
@@ -805,7 +815,14 @@ logMissingDom([
   "td3-modal",
   "td3-group",
   "td3-pattern",
-  "td3-confirm"
+  "td3-confirm",
+  "td3-action-modal",
+  "td3-import-sysex-btn",
+  "td3-export-sysex-btn",
+  "td3-sysex-modal",
+  "td3-sysex-group",
+  "td3-sysex-bank",
+  "td3-sysex-pattern"
 ]);
 
 let frames = Array.from({ length: 9 }, () => new Array(WIDTH * HEIGHT).fill(0));
@@ -936,7 +953,8 @@ let showMonomeControls = true;
 let gridDevices = [];
 let monomeControlsAvailable = false;
 const LOCAL_CONFIG_KEY = "studio_grid_config";
-let pendingTd3Import = null; // { data, page }
+let pendingTd3Import = null; // { data, page, kind }
+let pendingTd3SysexExport = null; // { output }
 const DEFAULT_DRUMS = [36, 38, 41, 43, 45, 47, 55, 60]; // C1..C2 bottom->top
 let drumNotes = Array.from({ length: 9 }, () => DEFAULT_DRUMS.slice());
 const DEFAULT_CC = 1;
@@ -1551,6 +1569,20 @@ function connectWS() {
       } else {
         log("TD-3 export failed: no data");
       }
+    } else if (msg.type === "td3_export_sysex") {
+      if (!pendingTd3SysexExport?.output) {
+        log("TD-3 SysEx export ignored (no output)");
+        return;
+      }
+      if (msg.data) {
+        const bytes = Uint8Array.from(atob(msg.data), (c) => c.charCodeAt(0));
+        sendSysex(pendingTd3SysexExport.output, bytes);
+        log("TD-3 SysEx sent");
+        showToast("TD-3 pattern sent");
+      } else {
+        log("TD-3 SysEx export failed: no data");
+      }
+      pendingTd3SysexExport = null;
     } else if (msg.type === "td3_import_preview") {
       if (!pendingTd3Import) return;
       if (msg.empty) {
@@ -1598,7 +1630,7 @@ function connectWS() {
 
 async function initMIDI() {
   try {
-    midiAccess = await navigator.requestMIDIAccess({ sysex: true });
+    midiAccess = await requestMidiAccessSysex();
     if (midiStatus) midiStatus.textContent = "MIDI: ok";
     refreshMIDIDevices();
     midiAccess.onstatechange = refreshMIDIDevices;
@@ -2672,7 +2704,8 @@ document.getElementById("export").onclick = () => {
   startExport(suggested);
 };
 const anyTd3ModalOpen = () =>
-  [td3Modal, td3ActionModal, td3ScaleModal, td3ReplaceModal].some((modal) => modal && !modal.classList.contains("hidden"));
+  [td3Modal, td3ActionModal, td3ScaleModal, td3ReplaceModal, td3SysexModal]
+    .some((modal) => modal && !modal.classList.contains("hidden"));
 const showTd3Backdrop = () => td3Backdrop?.classList.remove("hidden");
 const hideTd3BackdropIfIdle = () => {
   if (!td3Backdrop) return;
@@ -2714,6 +2747,135 @@ const closeTd3ReplaceModal = () => {
   hideTd3BackdropIfIdle();
 };
 
+let td3SysexMode = "export";
+const openTd3SysexModal = (mode = "export") => {
+  td3SysexMode = mode === "import" ? "import" : "export";
+  if (td3SysexTitle) td3SysexTitle.textContent = td3SysexMode === "import" ? "Import from TD-3" : "Write to TD-3 ";
+  if (td3SysexConfirm) td3SysexConfirm.textContent = td3SysexMode === "import" ? "Read pattern" : "Write pattern";
+  if (td3SysexModal) td3SysexModal.classList.remove("hidden");
+  showTd3Backdrop();
+};
+const closeTd3SysexModal = () => {
+  if (td3SysexModal) td3SysexModal.classList.add("hidden");
+  hideTd3BackdropIfIdle();
+};
+
+async function requestMidiAccessSysex() {
+  if (midiAccess) return midiAccess;
+  midiAccess = await navigator.requestMIDIAccess({ sysex: true });
+  refreshMIDIDevices();
+  midiAccess.onstatechange = refreshMIDIDevices;
+  return midiAccess;
+}
+
+function findTd3Ports(access) {
+  if (!access) return { input: null, output: null };
+  let input = null;
+  let output = null;
+  access.inputs?.forEach((inp) => {
+    if (!input && TD3_NAME_REGEX.test(inp.name || "")) input = inp;
+  });
+  access.outputs?.forEach((out) => {
+    if (!output && TD3_NAME_REGEX.test(out.name || "")) output = out;
+  });
+  return { input, output };
+}
+
+function sendSysex(output, data) {
+  if (!output) throw new Error("MIDI output unavailable");
+  output.send(data);
+}
+
+function buildTd3SysexRequestPattern(group, slot) {
+  return new Uint8Array([0xf0, 0x00, 0x20, 0x32, 0x00, 0x01, 0x0a, 0x77, group & 0x7f, slot & 0x7f, 0xf7]);
+}
+
+function td3DestToAddress({ groupUI, bank, patternUI } = {}) {
+  const groupSafe = Math.max(0, Math.min(3, Math.round(groupUI || 1) - 1));
+  const bankSafe = bank === "B" ? "B" : "A";
+  const patternSafe = Math.max(1, Math.min(8, Math.round(patternUI || 1)));
+  const slot = (bankSafe === "B" ? 8 : 0) + (patternSafe - 1);
+  return { group: groupSafe, slot };
+}
+
+function resolveTd3Ports(access) {
+  const found = findTd3Ports(access);
+  const selectedOut = midiOut && TD3_NAME_REGEX.test(midiOut.name || "") ? midiOut : null;
+  return { input: found.input, output: selectedOut || found.output };
+}
+
+function requestTd3Pattern({ input, output }, { group, slot }, { timeoutMs = 2000 } = {}) {
+  return new Promise((resolve, reject) => {
+    if (!input || !output) {
+      reject(new Error("TD-3 MIDI ports unavailable"));
+      return;
+    }
+    let timeoutId = null;
+    const handler = (evt) => {
+      const data = evt?.data ? new Uint8Array(evt.data) : null;
+      if (!data || data.length < 123) return;
+      if (data[0] !== 0xf0 || data[7] !== 0x78 || data[data.length - 1] !== 0xf7) return;
+      if (data[1] !== 0x00 || data[2] !== 0x20 || data[3] !== 0x32 || data[4] !== 0x00 || data[5] !== 0x01 || data[6] !== 0x0a) return;
+      if (data[8] !== (group & 0x7f) || data[9] !== (slot & 0x7f)) return;
+      cleanup();
+      resolve(data);
+    };
+    const cleanup = () => {
+      if (timeoutId) clearTimeout(timeoutId);
+      input.removeEventListener("midimessage", handler);
+    };
+    timeoutId = setTimeout(() => {
+      cleanup();
+      reject(new Error("TD-3 SysEx response timeout"));
+    }, Math.max(250, timeoutMs));
+    input.addEventListener("midimessage", handler);
+    sendSysex(output, buildTd3SysexRequestPattern(group, slot));
+  });
+}
+
+async function importTd3PatternFromSynth(state, midiPorts, {
+  groupUI,
+  bank,
+  patternUI,
+  page,
+  applyMode,
+  timeoutMs
+} = {}) {
+  const access = midiAccess || await requestMidiAccessSysex();
+  const ports = midiPorts || resolveTd3Ports(access);
+  const { group, slot } = td3DestToAddress({ groupUI, bank, patternUI });
+  const resp = await requestTd3Pattern(ports, { group, slot }, { timeoutMs });
+  const payload = resp.slice(12, 122);
+  const b64 = btoa(String.fromCharCode(...payload));
+  pendingTd3Import = { data: b64, page: page || currentPage, kind: "sysex" };
+  if (applyMode === "fit_current" || applyMode === "switch_scale") {
+    finalizeTd3Import(applyMode);
+    return;
+  }
+  const hasData = patternHasData(currentPage);
+  if (hasData) {
+    openTd3ReplaceModal();
+    return;
+  }
+  requestTd3ImportPreview(pendingTd3Import);
+}
+
+async function exportTd3PatternToSynth(state, midiPorts, {
+  page,
+  pattern,
+  groupUI,
+  bank,
+  patternUI
+} = {}) {
+  const access = midiAccess || await requestMidiAccessSysex();
+  const ports = midiPorts || resolveTd3Ports(access);
+  const { group, slot } = td3DestToAddress({ groupUI, bank, patternUI });
+  if (!ports.output) throw new Error("TD-3 MIDI output unavailable");
+  if (!ws || ws.readyState !== WebSocket.OPEN) throw new Error("WS not connected");
+  pendingTd3SysexExport = { output: ports.output };
+  ws.send(JSON.stringify({ type: "td3_export_sysex", group, slot, page, pattern }));
+}
+
 async function triggerTd3Export(tdGroup, tdPattern) {
   const safeGroup = Math.max(1, Math.min(16, Math.round(tdGroup || 5)));
   const safePattern = Math.max(1, Math.min(16, Math.round(tdPattern || 8)));
@@ -2734,6 +2896,18 @@ async function triggerTd3Export(tdGroup, tdPattern) {
   }
 }
 
+function requestTd3ImportPreview(entry, { silent = false } = {}) {
+  if (!entry || !ws || ws.readyState !== WebSocket.OPEN) {
+    if (!silent) {
+      log("WS not connected; cannot import");
+      pendingTd3Import = null;
+    }
+    return;
+  }
+  const type = entry.kind === "sysex" ? "td3_import_payload_preview" : "td3_import_preview";
+  ws.send(JSON.stringify({ type, data: entry.data, page: entry.page }));
+}
+
 function launchTd3ImportPicker() {
   const picker = document.createElement("input");
   picker.type = "file";
@@ -2745,14 +2919,13 @@ function launchTd3ImportPicker() {
     reader.onload = (ev) => {
       const buf = new Uint8Array(ev.target.result);
       const b64 = btoa(String.fromCharCode(...buf));
-      pendingTd3Import = { data: b64, page: currentPage };
+      pendingTd3Import = { data: b64, page: currentPage, kind: "seq" };
       const hasData = patternHasData(currentPage);
       if (hasData) {
         openTd3ReplaceModal();
         return;
       }
-      ws?.readyState === WebSocket.OPEN &&
-        ws.send(JSON.stringify({ type: "td3_import_preview", data: b64, page: currentPage }));
+      requestTd3ImportPreview(pendingTd3Import, { silent: true });
     };
     reader.readAsArrayBuffer(file);
   };
@@ -2761,8 +2934,9 @@ function launchTd3ImportPicker() {
 
 function finalizeTd3Import(mode = "fit_current") {
   if (!pendingTd3Import) return;
+  const type = pendingTd3Import.kind === "sysex" ? "td3_import_payload_apply" : "td3_import_apply";
   ws?.readyState === WebSocket.OPEN &&
-    ws.send(JSON.stringify({ type: "td3_import_apply", data: pendingTd3Import.data, page: pendingTd3Import.page, mode }));
+    ws.send(JSON.stringify({ type, data: pendingTd3Import.data, page: pendingTd3Import.page, mode }));
   pendingTd3Import = null;
 }
 
@@ -2770,12 +2944,24 @@ if (exportTd3Btn) exportTd3Btn.onclick = openTd3ActionModal;
 if (td3ActionClose) td3ActionClose.onclick = closeTd3ActionModal;
 if (td3ExportBtn) td3ExportBtn.onclick = () => {
   closeTd3ActionModal();
-  openTd3Modal();
+  triggerTd3Export();
 };
 if (td3ImportBtn) {
   td3ImportBtn.onclick = () => {
     closeTd3ActionModal();
     launchTd3ImportPicker();
+  };
+}
+if (td3ExportSysexBtn) {
+  td3ExportSysexBtn.onclick = () => {
+    closeTd3ActionModal();
+    openTd3SysexModal("export");
+  };
+}
+if (td3ImportSysexBtn) {
+  td3ImportSysexBtn.onclick = () => {
+    closeTd3ActionModal();
+    openTd3SysexModal("import");
   };
 }
 if (td3Close) td3Close.onclick = closeTd3Modal;
@@ -2786,6 +2972,28 @@ if (td3Confirm) {
     const patVal = Number(td3PatternInput?.value || 8);
     closeTd3Modal();
     triggerTd3Export(groupVal, patVal);
+  };
+}
+if (td3SysexClose) td3SysexClose.onclick = closeTd3SysexModal;
+if (td3SysexCancel) td3SysexCancel.onclick = closeTd3SysexModal;
+if (td3SysexConfirm) {
+  td3SysexConfirm.onclick = async () => {
+    const groupUI = Number(td3SysexGroupInput?.value || 1);
+    const bank = td3SysexBankSelect?.value || "A";
+    const patternUI = Number(td3SysexPatternInput?.value || 1);
+    closeTd3SysexModal();
+    try {
+      if (td3SysexMode === "import") {
+        await importTd3PatternFromSynth(null, null, { groupUI, bank, patternUI, page: currentPage });
+        log("TD-3 SysEx import requested");
+      } else {
+        await exportTd3PatternToSynth(null, null, { groupUI, bank, patternUI, page: currentPage });
+        log("TD-3 SysEx export requested");
+      }
+    } catch (e) {
+      log(`TD-3 SysEx failed: ${e.message || e}`);
+      showToast("TD-3 SysEx failed");
+    }
   };
 }
 if (td3ScaleClose) td3ScaleClose.onclick = () => {
@@ -2808,12 +3016,7 @@ if (td3ReplaceCancel) {
 }
 if (td3ReplaceConfirm) {
   td3ReplaceConfirm.onclick = () => {
-    if (pendingTd3Import && ws?.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({ type: "td3_import_preview", data: pendingTd3Import.data, page: pendingTd3Import.page }));
-    } else if (!ws || ws.readyState !== WebSocket.OPEN) {
-      log("WS not connected; cannot import");
-      pendingTd3Import = null;
-    }
+    requestTd3ImportPreview(pendingTd3Import);
     closeTd3ReplaceModal();
   };
 }
@@ -3455,6 +3658,7 @@ function renderTabs() {
     btn.oncontextmenu = (e) => {
       e.preventDefault();
       e.stopPropagation();
+      focusPage();
       menuTargetPage = page;
       openDeviceMenu(e.clientX, e.clientY);
     };
@@ -6604,6 +6808,17 @@ document.addEventListener("click", (e) => {
     closeNoteMenu();
   }
 });
+document.addEventListener("pointerdown", (e) => {
+  if (deviceMenu && !deviceMenu.classList.contains("hidden") && !deviceMenu.contains(e.target)) {
+    closeDeviceMenu();
+  }
+  if (patternLengthMenu && !patternLengthMenu.classList.contains("hidden") && !patternLengthMenu.contains(e.target)) {
+    closePatternLengthMenu();
+  }
+  if (noteMenu && !noteMenu.classList.contains("hidden") && !noteMenu.contains(e.target)) {
+    closeNoteMenu();
+  }
+}, true);
 document.addEventListener("contextmenu", (e) => {
   if (deviceMenu && !deviceMenu.classList.contains("hidden") && !deviceMenu.contains(e.target)) {
     closeDeviceMenu();

@@ -63,6 +63,11 @@ function encodeMaskSysex(bits16) {
   return [b0, b1, b2, b3];
 }
 
+export function buildTd3SysexRequestPattern(group, slot) {
+  const header = [0xf0, 0x00, 0x20, 0x32, 0x00, 0x01, 0x0a, 0x77];
+  return new Uint8Array([...header, group & 0x7f, slot & 0x7f, 0xf7]);
+}
+
 export function buildTd3SysexPattern(pat) {
   const body = buildTd3PatternBlock(pat, { maskEncoder: encodeMaskSysex });
   const header = [
@@ -110,7 +115,7 @@ function buildTd3SeqPayload(pat) {
   return buildTd3PatternBlock(pat);
 }
 
-function deriveTd3PatternFromState(state, { page, pattern, tdGroup, tdPattern } = {}) {
+export function deriveTd3PatternFromState(state, { page, pattern, tdGroup, tdPattern } = {}) {
   let pageIdx = clamp(Math.round(page || state.currentPage || 1), 1, 8);
   let pg = state.pages[pageIdx];
   if (!pg) {
@@ -210,6 +215,14 @@ function deriveTd3PatternFromState(state, { page, pattern, tdGroup, tdPattern } 
   };
 }
 
+export function td3DestToAddress({ groupUI, bank, patternUI } = {}) {
+  const groupSafe = clamp(Math.round(groupUI || 1) - 1, 0, 3);
+  const bankSafe = bank === "B" ? "B" : "A";
+  const patternSafe = clamp(Math.round(patternUI || 1), 1, 8);
+  const slot = (bankSafe === "B" ? 8 : 0) + (patternSafe - 1);
+  return { group: groupSafe, slot };
+}
+
 function resolveTemplate(templatePath) {
   const candidates = [
     templatePath,
@@ -227,10 +240,6 @@ function resolveTemplate(templatePath) {
 
 export async function buildTd3Seq(state, opts = {}) {
   const td3Pattern = deriveTd3PatternFromState(state, opts);
-  const hasData = td3Pattern.steps.some((s) => !s.rest);
-  if (!hasData) {
-    throw new Error("TD-3 export failed: pattern is empty");
-  }
   const templatePath = resolveTemplate(opts.templatePath);
   const template = await readFile(templatePath);
   if (template.length < TD3_TOTAL_LENGTH) throw new Error("TD-3 template is too small");
@@ -246,7 +255,14 @@ export async function buildTd3Seq(state, opts = {}) {
 export function parseTd3SeqBuffer(buf) {
   const { offset } = locateTd3Payload(buf);
   const payload = buf.slice(offset, offset + TD3_PAYLOAD_LENGTH);
-  const data = payload;
+  return parseTd3PatternPayload(payload);
+}
+
+export function parseTd3PatternPayload(payload) {
+  if (!payload || payload.length < TD3_PAYLOAD_LENGTH) {
+    throw new Error("TD-3 payload is too small");
+  }
+  const data = payload.length === TD3_PAYLOAD_LENGTH ? payload : payload.slice(0, TD3_PAYLOAD_LENGTH);
   const pitches = [];
   for (let i = 0; i < 32; i += 2) {
     const hi = data[i] & 0x0f;
@@ -465,7 +481,7 @@ function mapNoteToScale(note, scale, transpose, allowPenalty = false) {
   return best;
 }
 
-export function importTd3Pattern(state, buf, { page, applyMode = "fit_current" } = {}) {
+function applyTd3PatternParsed(state, parsed, { page, applyMode = "fit_current" } = {}) {
   const pageIdx = clamp(Math.round(page || state.currentPage || 1), 1, 8);
   const pg = state.pages[pageIdx];
   if (!pg) throw new Error("Page not found");
@@ -473,7 +489,6 @@ export function importTd3Pattern(state, buf, { page, applyMode = "fit_current" }
   const pat = pg.patterns[patIdx];
   if (!pat) throw new Error("Pattern not found");
 
-  const parsed = parseTd3SeqBuffer(buf);
   const notes = parsed.steps.filter((s) => !s.rest).map((s) => s.midiNote);
   const detectedScale = detectScale(notes);
   const currentScale = state.scale || { root: 0, mode: "major" };
@@ -572,6 +587,16 @@ export function importTd3Pattern(state, buf, { page, applyMode = "fit_current" }
   state.currentPage = prevPage;
 
   return { detectedScale, appliedScale: targetScale, transpose: pg.transpose, page: pageIdx, pattern: patIdx };
+}
+
+export function importTd3Pattern(state, buf, { page, applyMode = "fit_current" } = {}) {
+  const parsed = parseTd3SeqBuffer(buf);
+  return applyTd3PatternParsed(state, parsed, { page, applyMode });
+}
+
+export function importTd3PatternPayload(state, payload, { page, applyMode = "fit_current" } = {}) {
+  const parsed = parseTd3PatternPayload(payload);
+  return applyTd3PatternParsed(state, parsed, { page, applyMode });
 }
 
 function deriveSlideChainFlags(steps, len) {

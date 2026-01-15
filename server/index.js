@@ -4,7 +4,16 @@ import path from "path";
 import { fileURLToPath } from "url";
 import { WebSocketServer } from "ws";
 import { SerialOSCBridge } from "./serialosc-bridge.js";
-import { buildTd3Seq, parseTd3SeqBuffer, detectScale, importTd3Pattern } from "./td3.js";
+import {
+  buildTd3Seq,
+  buildTd3SysexPattern,
+  parseTd3SeqBuffer,
+  parseTd3PatternPayload,
+  detectScale,
+  importTd3Pattern,
+  importTd3PatternPayload,
+  deriveTd3PatternFromState
+} from "./td3.js";
 import { SGridState } from "./state.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -785,6 +794,25 @@ function handleClientMessage(ws, data) {
         }
       })();
       break;
+    case "td3_import_payload_preview":
+      (() => {
+        try {
+          const payload = Buffer.from(data?.data || "", "base64");
+          const parsed = parseTd3PatternPayload(payload);
+          const notes = parsed.steps.filter((s) => !s.rest).map((s) => s.midiNote);
+          if (!notes.length) {
+            ws.send(JSON.stringify({ type: "td3_import_preview", empty: true }));
+            return;
+          }
+          const detected = detectScale(notes);
+          const currentScale = state.scale || { root: 0, mode: "major" };
+          const differs = detected.mode !== (currentScale.mode || "major") || detected.root !== (currentScale.root || 0);
+          ws.send(JSON.stringify({ type: "td3_import_preview", detectedScale: detected, currentScale, differs }));
+        } catch (e) {
+          ws.send(JSON.stringify({ type: "error", message: e.message || String(e) }));
+        }
+      })();
+      break;
     case "td3_import_apply":
       (async () => {
         try {
@@ -805,6 +833,26 @@ function handleClientMessage(ws, data) {
         }
       })();
       break;
+    case "td3_import_payload_apply":
+      (async () => {
+        try {
+          const payload = Buffer.from(data?.data || "", "base64");
+          const mode = data?.mode === "switch_scale" ? "switch_scale" : "fit_current";
+          if (mode === "switch_scale") {
+            const parsed = parseTd3PatternPayload(payload);
+            const notes = parsed.steps.filter((s) => !s.rest).map((s) => s.midiNote);
+            const detected = detectScale(notes);
+            state.scale = { root: detected.root, mode: detected.mode };
+          }
+          const res = importTd3PatternPayload(state, payload, { page: data?.page, applyMode: mode });
+          broadcastState();
+          renderAndPush();
+          ws.send(JSON.stringify({ type: "td3_import_applied", ...res }));
+        } catch (e) {
+          ws.send(JSON.stringify({ type: "error", message: e.message || String(e) }));
+        }
+      })();
+      break;
     case "export_td3":
       (async () => {
         try {
@@ -816,6 +864,27 @@ function handleClientMessage(ws, data) {
           const { buffer } = await buildTd3Seq(state, opts);
           const data = buffer.toString("base64");
           ws.send(JSON.stringify({ type: "export_td3", data }));
+        } catch (e) {
+          ws.send(JSON.stringify({ type: "error", message: e.message || String(e) }));
+        }
+      })();
+      break;
+    case "td3_export_sysex":
+      (async () => {
+        try {
+          const tdGroup = Number(data?.group ?? data?.tdGroup);
+          const tdPattern = Number(data?.slot ?? data?.tdPattern);
+          const tdPage = Number(data?.page);
+          const srcPattern = Number(data?.pattern ?? data?.patternSrc ?? data?.srcPattern);
+          const opts = {};
+          if (Number.isFinite(tdPage)) opts.page = tdPage;
+          if (Number.isFinite(srcPattern)) opts.pattern = srcPattern;
+          if (Number.isFinite(tdGroup)) opts.tdGroup = tdGroup;
+          if (Number.isFinite(tdPattern)) opts.tdPattern = tdPattern;
+          const td3Pattern = deriveTd3PatternFromState(state, opts);
+          const sysex = buildTd3SysexPattern(td3Pattern);
+          const data64 = Buffer.from(sysex).toString("base64");
+          ws.send(JSON.stringify({ type: "td3_export_sysex", data: data64 }));
         } catch (e) {
           ws.send(JSON.stringify({ type: "error", message: e.message || String(e) }));
         }

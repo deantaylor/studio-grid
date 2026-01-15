@@ -341,10 +341,10 @@
         </div>
         <div class="modal-grid">
           <label><span class="label-text">Group</span>
-            <input type="number" id="td3-group" min="1" max="8" value="5" />
+            <input type="number" id="td3-group" class="input-sm" min="1" max="8" value="5" />
           </label>
           <label><span class="label-text">Pattern</span>
-            <input type="number" id="td3-pattern" min="1" max="16" value="8" />
+            <input type="number" id="td3-pattern" class="input-sm" min="1" max="16" value="8" />
           </label>
         </div>
         <div class="modal-actions">
@@ -363,6 +363,37 @@
         <div class="modal-actions">
           <button id="td3-import-btn" type="button" class="btn">Import .seq</button>
           <button id="td3-export-btn" type="button" class="btn primary">Export .seq</button>
+          <button id="td3-import-sysex-btn" type="button" class="btn">Import from TD3</button>
+          <button id="td3-export-sysex-btn" type="button" class="btn primary">Write to TD3</button>
+        </div>
+      </div>
+    </div>
+    <div id="td3-sysex-modal" class="modal hidden">
+      <div class="modal-body">
+        <div class="modal-head">
+          <h4 id="td3-sysex-title">Export TD-3 (SysEx)</h4>
+          <button id="td3-sysex-close" aria-label="Close">×</button>
+        </div>
+        <div class="modal-grid">
+          <label><span class="label-text">Group</span>
+            <input type="number" id="td3-sysex-group" class="input-sm" min="1" max="4" value="1" />
+          </label>
+          <label><span class="label-text">Bank</span>
+            <div class="select-wrap">
+              <select id="td3-sysex-bank" class="input-sm">
+                <option value="A" selected>A</option>
+                <option value="B">B</option>
+              </select>
+              <i class="iconoir-nav-arrow-down select-caret" aria-hidden="true"></i>
+            </div>
+          </label>
+          <label><span class="label-text">Pattern</span>
+            <input type="number" id="td3-sysex-pattern" class="input-sm" min="1" max="8" value="1" />
+          </label>
+        </div>
+        <div class="modal-actions">
+          <button id="td3-sysex-cancel" type="button" class="btn ghost">Cancel</button>
+          <button id="td3-sysex-confirm" type="button" class="btn primary">Write pattern</button>
         </div>
       </div>
     </div>
