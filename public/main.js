@@ -930,6 +930,15 @@ const NON_DIRTY_WS_TYPES = new Set([
 let isDirty = false;
 let pendingDirtyReset = true;
 let receivedStateOnce = false;
+const UNDO_HISTORY_LIMIT = 50;
+let undoHistory = [];
+let redoHistory = [];
+let undoInitialized = false;
+let undoSnapshotTimer = null;
+let undoSnapshotInFlight = false;
+let undoSnapshotQueued = false;
+let pendingUndoReset = false;
+let applyingUndoRedo = false;
 window.electronAPI?.setDirty?.(isDirty);
 let activePatterns = Array.from({ length: 9 }, () => 1);
 let pendingPatterns = Array.from({ length: 9 }, () => null);
@@ -1252,7 +1261,13 @@ function connectWS() {
   ws.send = (data) => {
     try {
       const msg = typeof data === "string" ? JSON.parse(data) : data;
-      if (receivedStateOnce && shouldMarkDirty(msg)) setDirty(true);
+      if (msg?.type === "import_state" && !applyingUndoRedo) {
+        resetUndoHistory();
+      }
+      if (receivedStateOnce && shouldMarkDirty(msg)) {
+        setDirty(true);
+        queueUndoSnapshot();
+      }
     } catch (e) {}
     return rawSend(data);
   };
@@ -1442,6 +1457,12 @@ function connectWS() {
         setDirty(false);
         pendingDirtyReset = false;
         receivedStateOnce = true;
+      }
+      if (pendingUndoReset && !applyingUndoRedo) {
+        pendingUndoReset = false;
+        queueUndoSnapshot({ force: true, replace: true });
+      } else if (!undoInitialized) {
+        queueUndoSnapshot({ force: true, replace: true });
       }
     } else if (msg.type === "page_change") {
       if (Array.isArray(msg.octaveOverlays)) {
@@ -3734,6 +3755,92 @@ function setDirty(next) {
   if (isDirty === safe) return;
   isDirty = safe;
   window.electronAPI?.setDirty?.(isDirty);
+}
+
+function resetUndoHistory() {
+  undoHistory = [];
+  redoHistory = [];
+  undoInitialized = false;
+  pendingUndoReset = true;
+  if (undoSnapshotTimer) {
+    clearTimeout(undoSnapshotTimer);
+    undoSnapshotTimer = null;
+  }
+}
+
+function queueUndoSnapshot({ force = false, replace = false } = {}) {
+  if ((!receivedStateOnce && !force) || applyingUndoRedo) return;
+  if (undoSnapshotTimer) clearTimeout(undoSnapshotTimer);
+  const delay = force ? 0 : 250;
+  undoSnapshotTimer = setTimeout(() => {
+    undoSnapshotTimer = null;
+    captureUndoSnapshot({ replace });
+  }, delay);
+}
+
+async function captureUndoSnapshot({ replace = false } = {}) {
+  if (undoSnapshotInFlight) {
+    undoSnapshotQueued = true;
+    return;
+  }
+  undoSnapshotInFlight = true;
+  try {
+    const resp = await fetch("/api/export");
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const data = await resp.json();
+    const payload = data.data || data;
+    const snapshot = JSON.stringify(payload);
+    if (replace || !undoHistory.length) {
+      undoHistory = [snapshot];
+      redoHistory = [];
+    } else if (undoHistory[undoHistory.length - 1] !== snapshot) {
+      undoHistory.push(snapshot);
+      if (undoHistory.length > UNDO_HISTORY_LIMIT) undoHistory.shift();
+      redoHistory = [];
+    }
+    undoInitialized = true;
+  } catch (e) {
+    console.warn("Undo snapshot failed", e);
+  } finally {
+    undoSnapshotInFlight = false;
+    if (undoSnapshotQueued) {
+      undoSnapshotQueued = false;
+      captureUndoSnapshot();
+    }
+  }
+}
+
+function applySnapshotFromHistory(snapshot) {
+  if (!snapshot || ws?.readyState !== WebSocket.OPEN) return;
+  let payload = snapshot;
+  if (typeof snapshot === "string") {
+    try {
+      payload = JSON.parse(snapshot);
+    } catch (e) {
+      console.warn("Undo snapshot parse failed", e);
+      return;
+    }
+  }
+  applyingUndoRedo = true;
+  ws.send(JSON.stringify({ type: "import_state", snapshot: payload }));
+  setTimeout(() => {
+    applyingUndoRedo = false;
+  }, 0);
+}
+
+function performUndo() {
+  if (undoHistory.length < 2) return;
+  const current = undoHistory.pop();
+  redoHistory.push(current);
+  const target = undoHistory[undoHistory.length - 1];
+  applySnapshotFromHistory(target);
+}
+
+function performRedo() {
+  if (!redoHistory.length) return;
+  const next = redoHistory.pop();
+  undoHistory.push(next);
+  applySnapshotFromHistory(next);
 }
 
 function shouldMarkDirty(msg) {
@@ -6955,6 +7062,19 @@ document.addEventListener("keydown", (e) => {
   if (e.key === "Escape") {
     closeColorModal();
     closeDefaultColorModal();
+    return;
+  }
+  const key = String(e.key || "").toLowerCase();
+  if ((e.metaKey || e.ctrlKey) && key === "z" && !e.shiftKey) {
+    if (isTypingTarget(e.target)) return;
+    e.preventDefault();
+    performUndo();
+    return;
+  }
+  if (((e.metaKey || e.ctrlKey) && e.shiftKey && key === "z") || (e.ctrlKey && key === "y")) {
+    if (isTypingTarget(e.target)) return;
+    e.preventDefault();
+    performRedo();
     return;
   }
   if ((e.metaKey || e.ctrlKey) && (e.key === "ArrowUp" || e.key === "ArrowDown")) {
