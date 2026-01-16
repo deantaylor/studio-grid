@@ -631,6 +631,7 @@ export class SGridState {
       if (idx === 0 || !p) return null;
       const patterns = p.patterns.map((pat, pi) => {
         if (pi === 0 || !pat) return null;
+        if (!this.patternHasData(idx, pi)) return null;
         return {
           length_steps: pat.length_steps,
           root: pat.root,
@@ -653,15 +654,15 @@ export class SGridState {
           }))
         };
       });
-      return {
-        name: p.name,
-        note: p.note,
-        color: p.color,
-        active_pattern: p.active_pattern,
-        sequencerStopped: !!p.sequencerStopped,
-        muted: !!p.muted, // legacy export
-        transpose: p.transpose || 0,
-        sequencerType: p.sequencerType || "mono",
+        return {
+          name: p.name,
+          note: p.note,
+          color: p.color,
+          active_pattern: 1,
+          sequencerStopped: false,
+          muted: !!p.muted, // legacy export
+          transpose: p.transpose || 0,
+          sequencerType: p.sequencerType || "mono",
         drumNotes: Array.isArray(p.drumNotes) ? p.drumNotes.slice(0, 8) : undefined,
         ccNumber: clamp(Math.round(p.ccNumber ?? DEFAULT_CC), 0, 127),
         mdTrack: clamp(Math.round(p.mdTrack || 1), 1, 16),
@@ -674,7 +675,6 @@ export class SGridState {
       swing: this.swing,
       microFormat: "int96",
       scale: this.scale,
-      currentPage: this.currentPage,
       sequencerTypes: this.pages.map((p, idx) => (idx === 0 ? null : p?.sequencerType || "mono")),
       pages,
       deviceNames: this.deviceNames,
@@ -700,9 +700,6 @@ export class SGridState {
         root: clamp(Number(snap.scale.root) || 0, -24, 24),
         mode: snap.scale.mode || "major"
       };
-    }
-    if (snap.currentPage) {
-      this.currentPage = clamp(Math.round(snap.currentPage) || this.currentPage || 1, 1, 8);
     }
     if (Array.isArray(snap.deviceNames)) this.deviceNames = snap.deviceNames.slice(0, 9);
     if (Array.isArray(snap.deviceNotes)) this.deviceNotes = snap.deviceNotes.slice(0, 9);
@@ -733,9 +730,7 @@ export class SGridState {
         page.note = pageSnap.note || page.note;
         page.color = pageSnap.color || page.color;
         // page.muted = typeof pageSnap.muted === "boolean" ? pageSnap.muted : !!page.muted; // legacy mute restore
-        page.sequencerStopped = typeof pageSnap.sequencerStopped === "boolean"
-          ? pageSnap.sequencerStopped
-          : (typeof pageSnap.muted === "boolean" ? pageSnap.muted : !!page.sequencerStopped);
+        page.sequencerStopped = false;
         page.pendingStop = null;
         page.pendingMute = null; // legacy mute flag
         page.sequencerType = pageSnap.sequencerType || page.sequencerType || "mono";
@@ -744,39 +739,43 @@ export class SGridState {
         page.ccNumber = clamp(Math.round(pageSnap.ccNumber ?? page.ccNumber ?? DEFAULT_CC), 0, 127);
         page.mdTrack = clamp(Math.round(pageSnap.mdTrack || page.mdTrack || 1), 1, 16);
         if (Array.isArray(pageSnap.drumNotes)) page.drumNotes = pageSnap.drumNotes.slice(0, 8).map((n) => clamp(Number(n) || 0, 0, 127));
-        page.active_pattern = clamp(pageSnap.active_pattern || 1, 1, 8);
+        page.active_pattern = 1;
         if (Array.isArray(pageSnap.patterns)) {
           for (let pi = 1; pi <= 8; pi++) {
             const patSnap = pageSnap.patterns[pi];
-            if (!patSnap) continue;
-            const pat = page.patterns[pi];
-      pat.length_steps = clamp(patSnap.length_steps || pat.length_steps, 1, 128);
-      pat.root = patSnap.root || 0;
-      pat.scale_mode = patSnap.scale_mode || "major";
-      const snapScale = patSnap.time_scale || pat.time_scale || 1;
-      pat.time_scale = Math.max(1, Math.min(4, Number(snapScale) || 1));
-      pat.change_mode = patSnap.change_mode || pat.change_mode;
-      pat.barView = clamp(patSnap.barView || 0, 0, Math.max(0, Math.ceil(pat.length_steps / 16) - 1));
-      if (Array.isArray(patSnap.steps)) {
-        for (let si = 0; si < pat.steps.length && si < patSnap.steps.length; si++) {
-          const ss = patSnap.steps[si];
-          if (!ss) continue;
-          pat.steps[si] = {
-            on: !!ss.on,
-            degree: clamp(ss.degree || 0, 0, 6),
-            octave: clamp(ss.octave || 0, -3, 4),
-            micro: this.normalizeMicroValue(ss.micro || 0, { legacy: legacyMicro }),
-            accent: !!ss.accent,
-            slide: !!ss.slide,
-            tie: !!ss.tie,
-            cc: clamp(Math.round(ss.cc || 0), 0, 127),
-            notes: Array.isArray(ss.notes) ? ss.notes.map((n) => clamp(n, 0, 6)) : [],
-            accented: Array.isArray(ss.accented) ? ss.accented.map((n) => clamp(n, 0, 6)) : [],
-            noteOctaves: this.sanitizeNoteOctaves(ss.noteOctaves),
-            noteMicros: this.sanitizeNoteMicros(ss.noteMicros, { legacy: legacyMicro })
-          };
-        }
-      }
+            if (!patSnap) {
+              page.patterns[pi] = this.makeEmptyPattern();
+              continue;
+            }
+            const pat = page.patterns[pi] || this.makeEmptyPattern();
+            page.patterns[pi] = pat;
+            pat.length_steps = clamp(patSnap.length_steps || pat.length_steps, 1, 128);
+            pat.root = patSnap.root || 0;
+            pat.scale_mode = patSnap.scale_mode || "major";
+            const snapScale = patSnap.time_scale || pat.time_scale || 1;
+            pat.time_scale = Math.max(1, Math.min(4, Number(snapScale) || 1));
+            pat.change_mode = patSnap.change_mode || pat.change_mode;
+            pat.barView = clamp(patSnap.barView || 0, 0, Math.max(0, Math.ceil(pat.length_steps / 16) - 1));
+            if (Array.isArray(patSnap.steps)) {
+              for (let si = 0; si < pat.steps.length && si < patSnap.steps.length; si++) {
+                const ss = patSnap.steps[si];
+                if (!ss) continue;
+                pat.steps[si] = {
+                  on: !!ss.on,
+                  degree: clamp(ss.degree || 0, 0, 6),
+                  octave: clamp(ss.octave || 0, -3, 4),
+                  micro: this.normalizeMicroValue(ss.micro || 0, { legacy: legacyMicro }),
+                  accent: !!ss.accent,
+                  slide: !!ss.slide,
+                  tie: !!ss.tie,
+                  cc: clamp(Math.round(ss.cc || 0), 0, 127),
+                  notes: Array.isArray(ss.notes) ? ss.notes.map((n) => clamp(n, 0, 6)) : [],
+                  accented: Array.isArray(ss.accented) ? ss.accented.map((n) => clamp(n, 0, 6)) : [],
+                  noteOctaves: this.sanitizeNoteOctaves(ss.noteOctaves),
+                  noteMicros: this.sanitizeNoteMicros(ss.noteMicros, { legacy: legacyMicro })
+                };
+              }
+            }
           }
         }
       }

@@ -468,6 +468,7 @@ let dialogOkHandler = null;
 let renameTargetPage = null;
 let renameTargetPattern = null;
 let renameMode = "device";
+let pendingSetSaveResolver = null;
 const renameDefaults = {
   title: renameTitle?.textContent || "Rename Device",
   label: renameLabel?.textContent || "Name",
@@ -2931,15 +2932,20 @@ function handleClockMessage(evt) {
   }
 }
 document.getElementById("export").onclick = () => {
-  if (currentSetFilename) {
+  const hasNamedSet = currentSetFilename
+    && displaySetName(currentSetFilename).toLowerCase() !== "untitled";
+  if (hasNamedSet) {
     openSaveSetModal();
     return;
   }
   const suggested = setName && setName.toLowerCase() !== "default" ? setName : "Untitled";
   if (hasElectronSave) {
-    saveSnapshotToElectron(suggested, { overwrite: false }).catch(() => {
-      showToast("Save failed");
-      log("Save failed");
+    openSaveNameModal(suggested).then((name) => {
+      if (!name) return;
+      saveSnapshotToElectron(name, { overwrite: false }).catch(() => {
+        showToast("Save failed");
+        log("Save failed");
+      });
     });
     return;
   }
@@ -3287,20 +3293,15 @@ document.getElementById("import").onclick = () => {
     const fileName = file.name || "Untitled";
     const reader = new FileReader();
     reader.onload = (ev) => {
-      try {
-        const data = JSON.parse(ev.target.result);
-        if (!data.setName) data.setName = deriveSetNameFromFilename(fileName);
-        if (ws?.readyState === WebSocket.OPEN) {
-          currentSetFilename = ensureSetFilename(fileName);
-          currentSetFileHandle = null;
-          ws.send(JSON.stringify({ type: "import_state", snapshot: data }));
-          log("Import sent to server");
-          showToast(`${fileName} loaded`);
-        } else {
-          log("WS not connected; cannot import");
-        }
-      } catch (e) {
-        log("Import failed: invalid JSON");
+      const raw = String(ev.target.result || "");
+      if (ws?.readyState === WebSocket.OPEN) {
+        currentSetFilename = ensureSetFilename(fileName);
+        currentSetFileHandle = null;
+        ws.send(JSON.stringify({ type: "import_state", snapshot: raw, filename: fileName }));
+        log("Import sent to server");
+        showToast(`${fileName} loaded`);
+      } else {
+        log("WS not connected; cannot import");
       }
     };
     reader.readAsText(file);
@@ -3749,9 +3750,16 @@ function shouldMarkDirty(msg) {
 async function saveBeforeQuit() {
   if (!isDirty) return false;
   const suggested = setName && setName.toLowerCase() !== "default" ? setName : "Untitled";
-  const targetName = currentSetFilename || suggested;
+  const hasNamedSet = currentSetFilename
+    && displaySetName(currentSetFilename).toLowerCase() !== "untitled";
+  let targetName = hasNamedSet ? currentSetFilename : suggested;
   if (hasElectronSave) {
-    const overwrite = !!currentSetFilename;
+    if (!hasNamedSet) {
+      const picked = await openSaveNameModal(suggested);
+      if (!picked) return false;
+      targetName = picked;
+    }
+    const overwrite = hasNamedSet;
     await saveSnapshotToElectron(targetName, { overwrite });
     return true;
   }
@@ -3951,9 +3959,12 @@ function openSaveSetModal() {
       saveSetModal.classList.add("hidden");
       const suggested = setName && setName.toLowerCase() !== "default" ? setName : "Untitled";
       if (hasElectronSave) {
-        saveSnapshotToElectron(suggested, { overwrite: false }).catch(() => {
-          showToast("Save failed");
-          log("Save failed");
+        openSaveNameModal(suggested).then((name) => {
+          if (!name) return;
+          saveSnapshotToElectron(name, { overwrite: false }).catch(() => {
+            showToast("Save failed");
+            log("Save failed");
+          });
         });
         return;
       }
@@ -4533,7 +4544,7 @@ function applyPatternLauncherTypeUI() {
   if (patternToolbar) patternToolbar.classList.toggle("hidden", showLauncher);
   if (scaleNotesWrap) {
     const type = sequencerTypes[currentPage] || "mono";
-    const showScaleNotes = type === "mono" || type === "poly" || type === "mdtonal";
+    const showScaleNotes = type === "mono" || type === "poly" || type === "mdtonal" || type === "cc";
     scaleNotesWrap.classList.toggle("hidden", showLauncher || !showScaleNotes);
   }
   const transposeWrap = document.querySelector(".transpose-switch");
@@ -4612,19 +4623,27 @@ function applyDrumNotesUI() {
 function applyScaleNotesUI() {
   if (!scaleNotesWrap) return;
   const type = sequencerTypes[currentPage] || "mono";
-  const show = type === "mono" || type === "poly" || type === "mdtonal";
+  const show = type === "mono" || type === "poly" || type === "mdtonal" || type === "cc";
   scaleNotesWrap.classList.toggle("hidden", !show);
   if (!show) return;
 
-  const mode = scale?.mode || "major";
-  const root = Number(scale?.root) || 0;
-  const steps = SCALE_STEPS[mode] || SCALE_STEPS.major;
   const labels = [];
   const rows = getStepRows();
-  for (let row = 0; row < rows; row += 1) {
-    const degree = (fullScaleMode && row === 0) ? 0 : (rows - 1 - row);
-    const note = NOTE_NAMES[((root + steps[degree]) % 12 + 12) % 12];
-    labels.push(note);
+  if (type === "cc") {
+    for (let row = 0; row < rows; row += 1) {
+      const clamped = Math.max(0, Math.min(6, row));
+      const t = (6 - clamped) / 6;
+      labels.push(String(Math.max(0, Math.min(127, Math.round(t * 127)))));
+    }
+  } else {
+    const mode = scale?.mode || "major";
+    const root = Number(scale?.root) || 0;
+    const steps = SCALE_STEPS[mode] || SCALE_STEPS.major;
+    for (let row = 0; row < rows; row += 1) {
+      const degree = (fullScaleMode && row === 0) ? 0 : (rows - 1 - row);
+      const note = NOTE_NAMES[((root + steps[degree]) % 12 + 12) % 12];
+      labels.push(note);
+    }
   }
 
   scaleNotesWrap.innerHTML = labels
@@ -6993,6 +7012,27 @@ function configureRenameModal({ title, label, maxLength, inputMode, value }) {
   }
 }
 
+function openSaveNameModal(defaultName) {
+  return new Promise((resolve) => {
+    if (!renameModal || !renameInput) {
+      resolve(null);
+      return;
+    }
+    pendingSetSaveResolver = resolve;
+    renameMode = "set_name";
+    const display = displaySetName(defaultName || "Untitled");
+    configureRenameModal({
+      title: "Save Set As",
+      label: "Set name",
+      maxLength: 40,
+      inputMode: "",
+      value: display
+    });
+    renameModal.classList.remove("hidden");
+    setTimeout(() => renameInput?.focus(), 0);
+  });
+}
+
 function openRenameModalForDevice(page) {
   if (!renameModal || !renameInput) return;
   renameMode = "device";
@@ -7027,10 +7067,15 @@ function openRenameModalForPatternLength() {
   setTimeout(() => renameInput?.focus(), 0);
 }
 function closeRenameModal() {
+  const prevMode = renameMode;
   if (renameModal) renameModal.classList.add("hidden");
   renameTargetPage = null;
   renameTargetPattern = null;
   renameMode = "device";
+  if (prevMode === "set_name" && pendingSetSaveResolver) {
+    pendingSetSaveResolver(null);
+    pendingSetSaveResolver = null;
+  }
   configureRenameModal({
     title: renameDefaults.title,
     label: renameDefaults.label,
@@ -7054,6 +7099,13 @@ if (renameSave) {
   renameSave.onclick = () => {
     const raw = (renameInput?.value || "").trim();
     if (!raw.length) return closeRenameModal();
+    if (renameMode === "set_name") {
+      const resolver = pendingSetSaveResolver;
+      pendingSetSaveResolver = null;
+      closeRenameModal();
+      resolver?.(raw);
+      return;
+    }
     if (renameMode === "pattern_length") {
       const parsed = Math.max(1, Math.min(64, Math.round(Number(raw) || 0)));
       if (!parsed) return closeRenameModal();

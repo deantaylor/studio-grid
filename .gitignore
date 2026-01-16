@@ -9,3 +9,4 @@ spec/*
 studio-grid.code-workspace
 .DS_Store
 test_scripts/*
+TD3/example.seq

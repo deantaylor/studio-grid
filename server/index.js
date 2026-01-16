@@ -170,13 +170,15 @@ function buildExportPayload() {
   const snap = state.snapshot();
   return {
     ...snap,
-    clockSource,
-    clockInput: clockInputId,
-    clockOut: clockOutEnabled,
-    clockOutDevice,
-    follow: followEnabled,
     autoFill: autoFillBars
   };
+}
+
+function deriveSetNameFromFilename(filename) {
+  const raw = String(filename || "").trim();
+  if (!raw) return "default";
+  const base = raw.replace(/\.[^.]+$/, "");
+  return base || "default";
 }
 
 function dispatchGridEvents(events) {
@@ -897,30 +899,40 @@ function handleClientMessage(ws, data) {
       break;
     case "import_state":
       if (data?.snapshot || data?.state) {
-        const snap = data.snapshot || data.state || {};
-        if (snap.clockSource === "internal" || snap.clockSource === "external") {
-          clockSource = snap.clockSource;
-          transport.mode = clockSource === "internal" ? "INTERNAL" : "EXTERNAL_MIDI";
-          broadcastClockSource();
+        let snap = data.snapshot || data.state || {};
+        if (typeof snap === "string") {
+          try {
+            snap = JSON.parse(snap);
+          } catch (e) {
+            ws.send(JSON.stringify({ type: "error", message: "Import failed: invalid JSON" }));
+            break;
+          }
         }
-        if (snap.clockInput) {
-          clockInputId = snap.clockInput;
-          broadcastClockInputs();
-        }
-        if (typeof snap.clockOut === "boolean") {
-          clockOutEnabled = snap.clockOut;
-          broadcastClockOut();
-        }
-        if (snap.clockOutDevice) {
-          clockOutDevice = snap.clockOutDevice;
-          broadcastClockOutDevice();
+        if (snap && typeof snap === "object" && typeof data?.filename === "string" && !snap.setName) {
+          snap.setName = deriveSetNameFromFilename(data.filename);
         }
         if (state.loadSnapshot(snap)) {
-          transport.bpm = state.tempo;
-          if (typeof snap.follow === "boolean") {
-            followEnabled = !!snap.follow;
-            broadcast({ type: "follow", enabled: followEnabled });
+          if (typeof snap.baseDivision === "number") {
+            state.setBaseDivision(snap.baseDivision);
+            broadcast({ type: "base_division", division: state.baseDivision });
           }
+          if (typeof snap.gateLength === "number") {
+            state.setGateLength(snap.gateLength);
+            broadcast({ type: "gate_length", length: state.gateLength });
+          }
+          if (typeof snap.monoSlidePad === "number") {
+            state.setMonoSlidePad(snap.monoSlidePad);
+            broadcast({ type: "mono_slide_pad", value: state.monoSlidePad });
+          }
+          if (typeof snap.patternControlLatch === "boolean") {
+            state.patternControlLatch = !!snap.patternControlLatch;
+            broadcast({ type: "pattern_control_latch", enabled: state.patternControlLatch });
+          }
+          if (snap.ledLevels && typeof snap.ledLevels === "object") {
+            state.setLedLevels(snap.ledLevels);
+            broadcast({ type: "led_levels", levels: state.ledLevels });
+          }
+          transport.bpm = state.tempo;
           if (typeof snap.autoFill === "boolean") {
             autoFillBars = !!snap.autoFill;
             broadcast({ type: "auto_fill", enabled: autoFillBars });
