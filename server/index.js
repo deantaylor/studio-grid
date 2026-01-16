@@ -71,7 +71,7 @@ const server = http.createServer(async (req, res) => {
 const wss = new WebSocketServer({ server });
 const serial = new SerialOSCBridge({ prefix: "sgrid" });
 const state = new SGridState();
-state.requestRender = () => renderAndPush(true);
+state.requestRender = () => renderAndPush();
 const PPQN_EXT = 24;
 const PPQN_INT = 96;
 const INT_MULT = PPQN_INT / PPQN_EXT;
@@ -1286,8 +1286,8 @@ function scheduleLedSend(force = false) {
     lastRenderedFrame = frameToSend;
     // broadcast a UI-safe frame without octave neighbor hints
     const uiFrame = fullScaleMode
-      ? state.renderUIFrame(Date.now(), { includeOctaveHint: false, ignorePatternHoldDim: true })
-      : state.renderLED(Date.now(), { includeOctaveHint: false, ignorePatternHoldDim: true });
+      ? state.renderUIFrame(Date.now(), { includeOctaveHint: false, includeMicroHint: false, ignorePatternHoldDim: true })
+      : state.renderLED(Date.now(), { includeOctaveHint: false, includeMicroHint: false, ignorePatternHoldDim: true });
     const inPatternControl = state.patternControlMode || state.patternControlHeld || state.patternHeld;
     broadcast({
       type: "led_frame",

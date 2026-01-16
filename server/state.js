@@ -179,20 +179,12 @@ export class SGridState {
     if (!payload || typeof payload !== "object") return;
     if (!this.pendingOctaveOverlays) this.pendingOctaveOverlays = [];
     this.pendingOctaveOverlays.push(payload);
-    this.forceLedRefresh = true;
-    if (typeof this.requestRender === "function") {
-      this.requestRender();
-    }
   }
 
   enqueueMicroOverlay(payload) {
     if (!payload || typeof payload !== "object") return;
     if (!this.pendingMicroOverlays) this.pendingMicroOverlays = [];
     this.pendingMicroOverlays.push(payload);
-    this.forceLedRefresh = true;
-    if (typeof this.requestRender === "function") {
-      this.requestRender();
-    }
   }
 
   consumeOctaveOverlays() {
@@ -1052,8 +1044,6 @@ export class SGridState {
           const res = this.setStepMicroOffset(this.heldStep.x, this.heldStep.y, delta, { uiMode });
           if (res) {
             this.heldStepModified = true;
-            this.forceLedRefresh = true;
-            if (typeof this.requestRender === "function") this.requestRender();
             const seqTypeHeld = page?.sequencerType || "mono";
             const heldDeg = this.holdTargetDegree != null ? clamp(this.holdTargetDegree, 0, 6) : clamp(6 - this.heldStep.y, 0, 6);
             const heldOct = (seqTypeHeld === "poly" || seqTypeHeld === "drum")
@@ -3222,6 +3212,7 @@ export class SGridState {
     }
     const baseFrame = this.renderLED(slideTimeMs, {
       includeOctaveHint: opts.includeOctaveHint,
+      includeMicroHint: opts.includeMicroHint,
       ignorePatternHoldDim: opts.ignorePatternHoldDim
     });
     if (ignorePatternControl && prevPatternControl) {
@@ -3282,6 +3273,7 @@ export class SGridState {
   // DO NOT CHANGE LOGIC: monome LED frame generation depends on this exact pipeline.
   renderLED(slideTimeMs, opts = {}) {
     const includeOctaveHint = opts.includeOctaveHint !== false;
+    const includeMicroHint = opts.includeMicroHint !== false;
     const ignorePatternHoldDim = !!opts.ignorePatternHoldDim;
     const WIDTH = 16;
     const HEIGHT = 8;
@@ -3319,8 +3311,8 @@ export class SGridState {
     const heldInfo = heldKey ? this.keyHolds.get(heldKey) : null;
     const multiHoldAny = this.keyHolds.size > 1;
     const multiRecent = Date.now() - (this.lastMultiSelectTime || 0) < 150;
-    const inEditMode = this.heldStep && heldInfo && !multiHoldAny && !multiRecent
-      && (heldInfo.editMode || (heldInfo.start && (Date.now() - heldInfo.start) >= 150));
+    const inEditMode = this.heldStep && heldInfo && !multiHoldAny
+      && (heldInfo.editMode || (!multiRecent && heldInfo.start && (Date.now() - heldInfo.start) >= 150));
     if (pat) {
       const bar = pat.barView || 0;
       const slideStarts = [];
@@ -3416,7 +3408,7 @@ export class SGridState {
         });
       }
       // microtiming hint in edit mode: light left/right neighbors by offset sign
-      if (inEditMode && this.heldStep) {
+      if (includeMicroHint && inEditMode && this.heldStep) {
         const hx = this.heldStep.x;
         const hy = this.heldStep.y;
         const seqTypeHint = page?.sequencerType || "mono";
