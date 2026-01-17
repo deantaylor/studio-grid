@@ -3045,10 +3045,14 @@ export class SGridState {
                 }
                 // Trim by swing/epsilon plus a small margin so the slide gate doesn't run past the following note.
                 const chainDurMs = baseDur * Math.max(1, chainLen);
-                const slidePad = this.monoSlidePad || 0;
-                const gatedChainMs = this.applyGateLength(chainDurMs);
-                const padMs = this.noteOffEpsilonMs + Math.round(gatedChainMs * slidePad);
-                const durMs = Math.max(1, Math.round(gatedChainMs - padMs));
+                const durMs = step.chain
+                  ? Math.max(1, Math.round(chainDurMs - this.noteOffEpsilonMs))
+                  : (() => {
+                      const slidePad = this.monoSlidePad || 0;
+                      const gatedChainMs = this.applyGateLength(chainDurMs);
+                      const padMs = this.noteOffEpsilonMs + Math.round(gatedChainMs * slidePad);
+                      return Math.max(1, Math.round(gatedChainMs - padMs));
+                    })();
                 if (emit) {
                   this.pushMidiNote(midiEvents, {
                     type: "midi_note",
@@ -3067,10 +3071,14 @@ export class SGridState {
               }
               if (isSlideStart) {
                 const chainDurMs = baseDur * Math.max(1, chainLen);
-                const slidePad = this.monoSlidePad || 0;
-                const gatedChainMs = this.applyGateLength(chainDurMs);
-                const padMs = this.noteOffEpsilonMs + Math.round(gatedChainMs * slidePad);
-                const durMs = Math.max(1, Math.round(gatedChainMs - padMs)); // hold through the chain without overshooting
+                const durMs = step.chain
+                  ? Math.max(1, Math.round(chainDurMs - this.noteOffEpsilonMs))
+                  : (() => {
+                      const slidePad = this.monoSlidePad || 0;
+                      const gatedChainMs = this.applyGateLength(chainDurMs);
+                      const padMs = this.noteOffEpsilonMs + Math.round(gatedChainMs * slidePad);
+                      return Math.max(1, Math.round(gatedChainMs - padMs));
+                    })(); // hold through the chain without overshooting
                 if (emit) {
                   this.pushMidiNote(midiEvents, {
                     type: "midi_note",
@@ -3124,9 +3132,11 @@ export class SGridState {
                 const microOffset = this.getNoteMicroOffset(step, deg, seqTypePlay);
                 const eventTick = baseTick + swingOffsetTicks + microOffset;
                 const emit = microOffset >= 0;
-                const chainLen = this.hasPolyNoteSlide(step, deg) ? this.slideChainLength(pat, pos, { seqType: "poly", degree: deg }) : 1;
-                const durMs = this.hasPolyNoteSlide(step, deg)
-                  ? this.gateDurationMs(baseDur * Math.max(1, chainLen))
+                const hasChain = this.hasPolyNoteSlide(step, deg);
+                const chainLen = hasChain ? this.slideChainLength(pat, pos, { seqType: "poly", degree: deg }) : 1;
+                const chainDurMs = baseDur * Math.max(1, chainLen);
+                const durMs = hasChain
+                  ? Math.max(1, Math.round(chainDurMs - this.noteOffEpsilonMs))
                   : this.gateDurationMs(baseDur);
                 const noteVel = Array.isArray(step.accented) && step.accented.includes(deg) ? 120 : 96;
                 if (emit) {
@@ -3289,10 +3299,14 @@ export class SGridState {
                   });
                 } else {
                   const chainDurMs = baseDur * Math.max(1, chainLen);
-                  const slidePad = this.monoSlidePad || 0;
-                  const gatedChainMs = this.applyGateLength(chainDurMs);
-                  const padMs = this.noteOffEpsilonMs + Math.round(gatedChainMs * slidePad);
-                  const durMs = Math.max(1, Math.round(gatedChainMs - padMs));
+                  const durMs = nextStepObj.chain
+                    ? Math.max(1, Math.round(chainDurMs - this.noteOffEpsilonMs))
+                    : (() => {
+                        const slidePad = this.monoSlidePad || 0;
+                        const gatedChainMs = this.applyGateLength(chainDurMs);
+                        const padMs = this.noteOffEpsilonMs + Math.round(gatedChainMs * slidePad);
+                        return Math.max(1, Math.round(gatedChainMs - padMs));
+                      })();
                   this.pushMidiNote(midiEvents, {
                     type: "midi_note",
                     page: p,
@@ -3308,10 +3322,14 @@ export class SGridState {
                 }
               } else if (isSlideStart) {
                 const chainDurMs = baseDur * Math.max(1, chainLen);
-                const slidePad = this.monoSlidePad || 0;
-                const gatedChainMs = this.applyGateLength(chainDurMs);
-                const padMs = this.noteOffEpsilonMs + Math.round(gatedChainMs * slidePad);
-                const durMs = Math.max(1, Math.round(gatedChainMs - padMs));
+                const durMs = nextStepObj.chain
+                  ? Math.max(1, Math.round(chainDurMs - this.noteOffEpsilonMs))
+                  : (() => {
+                      const slidePad = this.monoSlidePad || 0;
+                      const gatedChainMs = this.applyGateLength(chainDurMs);
+                      const padMs = this.noteOffEpsilonMs + Math.round(gatedChainMs * slidePad);
+                      return Math.max(1, Math.round(gatedChainMs - padMs));
+                    })();
                 this.pushMidiNote(midiEvents, {
                   type: "midi_note",
                   page: p,
@@ -3367,9 +3385,11 @@ export class SGridState {
                 const eventTick = nextBaseTick + nextSwingOffsetTicks + microOffset;
                 const pageTranspose = this.pages[p].transpose || 0;
                 const pitch = this.calcPitch(pat.root || 0, mode, deg || 0, octave) + pageTranspose;
-                const chainLen = this.hasPolyNoteSlide(nextStepObj, deg) ? this.slideChainLength(pat, nextPos, { seqType: "poly", degree: deg }) : 1;
-                const durMs = this.hasPolyNoteSlide(nextStepObj, deg)
-                  ? this.gateDurationMs(baseDur * Math.max(1, chainLen))
+                const hasChain = this.hasPolyNoteSlide(nextStepObj, deg);
+                const chainLen = hasChain ? this.slideChainLength(pat, nextPos, { seqType: "poly", degree: deg }) : 1;
+                const chainDurMs = baseDur * Math.max(1, chainLen);
+                const durMs = hasChain
+                  ? Math.max(1, Math.round(chainDurMs - this.noteOffEpsilonMs))
                   : this.gateDurationMs(baseDur);
                 const noteVel = Array.isArray(nextStepObj.accented) && nextStepObj.accented.includes(deg) ? 120 : 96;
                 this.pushMidiNote(midiEvents, {
