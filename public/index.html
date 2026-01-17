@@ -27,16 +27,18 @@
       <div class="top-controls">
         <div class="tempo-block" id="tempo-block">
           <span class="label label-text" id="tempo-label-top">Tempo</span>
+          <div class="select-wrap tempo-clock-select hidden" id="clock-source-top-wrap">
+            <select id="clock-source-top" aria-label="Clock source">
+              <option value="internal">Internal</option>
+              <option value="external">External</option>
+            </select>
+            <i class="iconoir-nav-arrow-down select-caret" aria-hidden="true"></i>
+          </div>
           <input type="number" class="input-sm" id="tempo" min="20" max="300" step="0.1" />
         </div>
-        <div class="swing-block hidden" id="swing-block">
+        <div class="swing-block" id="swing-block">
           <span class="label label-text" id="swing-label-top">Swing</span>
           <input type="number" id="swing" min="50" max="80" step="1" />
-        </div>
-        <div class="transport">
-          <button id="transport-toggle" class="icon-btn" title="Play" aria-pressed="false">
-            <i class="iconoir-play-solid" aria-hidden="true"></i>
-          </button>
         </div>
         <div class="scale-inline">
           <span class="label label-text">Scale</span>
@@ -52,7 +54,13 @@
           </div>
         </div>
       </div>
-      <div class="top-actions">
+      <div class="transport">
+        <button id="transport-toggle" class="transport-btn" title="Play" aria-pressed="false">
+          <span class="transport-label">Play</span>
+          <i class="iconoir-play-solid" aria-hidden="true"></i>
+        </button>
+      </div>
+      <div class="top-actions hidden">
         <button id="new-set" class="icon-btn" title="New set"><i class="iconoir-empty-page"
             aria-hidden="true"></i></button>
         <button id="import" class="icon-btn" title="Load set"><i class="iconoir-upload" aria-hidden="true"></i></button>
@@ -322,6 +330,10 @@
               <label class="switch-option hidden" id="monome-controls-wrap">
                 <input type="checkbox" id="show-monome-controls" checked />
                 <span class="label-text">Show monome controls</span>
+              </label>
+              <label class="switch-option">
+                <input type="checkbox" id="gate-led-boost" />
+                <span class="label-text">Brighten device LED on gate</span>
               </label>
               <label><span class="label-text">Gate length</span>
                 <div class="select-wrap">

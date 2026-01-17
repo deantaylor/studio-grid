@@ -59,6 +59,9 @@ export class SGridState {
     this.deviceNotes = this.pages.map((p, i) => (i === 0 ? null : p.note));
     this.deviceColors = this.pages.map((p, i) => (i === 0 ? null : p.color));
     this.deviceOrder = Array.from({ length: 8 }, (_, i) => i + 1);
+    this.deviceGateWindows = Array.from({ length: 9 }, () => []);
+    this.gateLedBoost = false;
+    this.gateLedFlashMs = 40;
     this.setName = "default";
     this.currentPage = 1;
     this.playheads = Array(9).fill(0); // 1-indexed
@@ -136,6 +139,57 @@ export class SGridState {
     this.setName = clean || "default";
   }
 
+  registerDeviceGate(page, delayMs, durMs) {
+    const pageIdx = Math.round(Number(page) || 0);
+    if (pageIdx < 1 || pageIdx > 8) return;
+    const now = Date.now();
+    const startMs = now + Math.max(0, Number(delayMs) || 0);
+    const flashMs = Math.max(10, Math.round(Number(this.gateLedFlashMs) || 80));
+    const endMs = startMs + flashMs;
+    if (!Number.isFinite(endMs) || endMs <= now) return;
+    if (!Array.isArray(this.deviceGateWindows[pageIdx])) {
+      this.deviceGateWindows[pageIdx] = [];
+    }
+    this.deviceGateWindows[pageIdx].push({ startMs, endMs });
+    this.pruneDeviceGateWindows(pageIdx, now);
+    if (typeof this.requestRender === "function") {
+      const startDelay = Math.max(0, startMs - now);
+      const endDelay = Math.max(0, endMs - now);
+      setTimeout(() => this.requestRender?.(), startDelay);
+      setTimeout(() => this.requestRender?.(), endDelay);
+    }
+  }
+
+  pruneDeviceGateWindows(pageIdx, now = Date.now()) {
+    const windows = this.deviceGateWindows[pageIdx];
+    if (!Array.isArray(windows) || !windows.length) return;
+    this.deviceGateWindows[pageIdx] = windows.filter((win) => win && win.endMs > now);
+  }
+
+  isDeviceGateActive(pageIdx, now = Date.now()) {
+    if (!this.gateLedBoost) return false;
+    const windows = this.deviceGateWindows[pageIdx];
+    if (!Array.isArray(windows) || !windows.length) return false;
+    let active = false;
+    const remaining = [];
+    windows.forEach((win) => {
+      if (!win || !Number.isFinite(win.endMs)) return;
+      if (win.endMs > now) {
+        remaining.push(win);
+        if (win.startMs <= now) active = true;
+      }
+    });
+    if (remaining.length !== windows.length) {
+      this.deviceGateWindows[pageIdx] = remaining;
+    }
+    return active;
+  }
+
+  pushMidiNote(midiEvents, payload) {
+    midiEvents.push(payload);
+    this.registerDeviceGate(payload?.page, payload?.delayMs, payload?.durMs);
+  }
+
   patternHasPolySteps(pageIdx, patternIdx) {
     if (pageIdx < 1 || pageIdx > 8) return false;
     if (patternIdx < 1 || patternIdx > 8) return false;
@@ -162,7 +216,7 @@ export class SGridState {
   makeEmptyPattern() {
     const steps = [];
     for (let i = 0; i < 128; i++) {
-      steps.push({ on: false, degree: 0, octave: 0, micro: 0, accent: false, slide: false, mdSlide: false, tie: false, notes: [], accented: [], noteOctaves: {}, noteMicros: {}, cc: 0 });
+      steps.push({ on: false, degree: 0, octave: 0, micro: 0, accent: false, slide: false, mdSlide: false, chain: false, tie: false, notes: [], accented: [], noteOctaves: {}, noteMicros: {}, noteSlides: {}, cc: 0 });
     }
     return {
       length_steps: 16,
@@ -266,6 +320,18 @@ export class SGridState {
       const safeDeg = clamp(Math.round(degNum), 0, 6);
       const safeMicro = this.normalizeMicroValue(microRaw, opts);
       if (safeMicro) res[safeDeg] = safeMicro;
+    });
+    return res;
+  }
+
+  sanitizeNoteSlides(noteSlides) {
+    const res = {};
+    if (!noteSlides || typeof noteSlides !== "object") return res;
+    Object.entries(noteSlides).forEach(([degRaw, slideRaw]) => {
+      const degNum = Number(degRaw);
+      if (!Number.isFinite(degNum)) return;
+      const safeDeg = clamp(Math.round(degNum), 0, 6);
+      if (slideRaw) res[safeDeg] = true;
     });
     return res;
   }
@@ -585,6 +651,17 @@ export class SGridState {
           if (s?.slide) s.mdSlide = true;
         });
       });
+    } else if (type === "poly" && prevType !== "poly") {
+      pg.patterns.forEach((pat, idx) => {
+        if (!pat || idx === 0 || !Array.isArray(pat.steps)) return;
+        pat.steps.forEach((s) => {
+          if (!s?.slide) return;
+          const deg = s.degree ?? 0;
+          if (!s.noteSlides || typeof s.noteSlides !== "object") s.noteSlides = {};
+          s.noteSlides[deg] = true;
+          s.slide = false;
+        });
+      });
     } else if (type === "mono" && prevType === "mdtonal") {
       // translate mdSlides back into mono slides when leaving mdtonal
       pg.patterns.forEach((pat, idx) => {
@@ -646,11 +723,13 @@ export class SGridState {
             micro: this.clampMicro(s.micro || 0),
             accent: !!s.accent,
             slide: !!s.slide,
+            chain: !!s.chain,
             cc: clamp(Math.round(s.cc || 0), 0, 127),
             notes: Array.isArray(s.notes) ? s.notes.slice() : [],
             accented: Array.isArray(s.accented) ? s.accented.slice() : [],
             noteOctaves: this.sanitizeNoteOctaves(s.noteOctaves),
-            noteMicros: this.sanitizeNoteMicros(s.noteMicros)
+            noteMicros: this.sanitizeNoteMicros(s.noteMicros),
+            noteSlides: this.sanitizeNoteSlides(s.noteSlides)
           }))
         };
       });
@@ -837,6 +916,83 @@ export class SGridState {
     return true;
   }
 
+  applySlideChainGesture(x, y, rowInfo, opts = {}) {
+    const pat = this.getPattern();
+    const page = this.pages[this.currentPage];
+    const seqType = page?.sequencerType || "mono";
+    if (!pat || !rowInfo?.stepRow) return null;
+    if (seqType === "drum" || seqType === "cc") return null;
+    if (!this.heldStep) return null;
+    const held = this.heldStep;
+    if (held.x === x && held.y === y) return null;
+    const heldRow = this.getRowInfo(held.y, opts);
+    if (!heldRow?.stepRow) return null;
+    if (heldRow.degree !== rowInfo.degree || (heldRow.octaveOffset || 0) !== (rowInfo.octaveOffset || 0)) return null;
+    const startX = Math.min(held.x, x);
+    const endX = Math.max(held.x, x);
+    if (endX - startX < 1) return null;
+    const bar = pat.barView || 0;
+    const len = Math.max(1, pat.length_steps || 16);
+    for (let cx = startX; cx <= endX; cx++) {
+      const abs = cx + bar * 16;
+      if (abs < 0 || abs >= len) return null;
+      const step = pat.steps[abs];
+      if (!step?.on) return null;
+      if (!this.noteMatchesRow(step, rowInfo.degree, seqType, rowInfo)) return null;
+      if (cx < endX) {
+        const nextStep = pat.steps[abs + 1];
+        if (!nextStep?.on || !this.noteMatchesRow(nextStep, rowInfo.degree, seqType, rowInfo)) return null;
+        if (seqType === "poly") {
+          const octCur = this.getNoteOctave(step, rowInfo.degree);
+          const octNext = this.getNoteOctave(nextStep, rowInfo.degree);
+          if (octCur !== octNext) return null;
+        } else if (seqType === "mono") {
+          const octCur = step.octave || 0;
+          const octNext = nextStep.octave || 0;
+          if (octCur !== octNext) return null;
+        }
+      }
+    }
+    const slideProp = seqType === "mdtonal" ? "mdSlide" : "slide";
+    const events = [];
+    for (let cx = startX; cx < endX; cx++) {
+      const abs = cx + bar * 16;
+      const step = pat.steps[abs];
+      if (!step) continue;
+      if (seqType === "poly") {
+        if (!step.noteSlides || typeof step.noteSlides !== "object") step.noteSlides = {};
+        step.noteSlides[rowInfo.degree] = true;
+        step.slide = false;
+      } else if (seqType === "mono") {
+        step.chain = true;
+        step.slide = false;
+      } else {
+        step[slideProp] = true;
+      }
+      if (seqType !== "mdtonal") step.tie = false;
+      events.push({ type: "slide", x: cx, y: held.y, slide: true });
+    }
+    if (seqType === "poly") {
+      const endAbs = endX + bar * 16;
+      const endStep = pat.steps[endAbs];
+      if (endStep?.noteSlides && Object.prototype.hasOwnProperty.call(endStep.noteSlides, rowInfo.degree)) {
+        delete endStep.noteSlides[rowInfo.degree];
+      }
+      const len = Math.max(1, pat.length_steps || 16);
+      for (let idx = endAbs + 1; idx < len; idx++) {
+        const tailStep = pat.steps[idx];
+        if (!tailStep?.on || !Array.isArray(tailStep.notes) || !tailStep.notes.includes(rowInfo.degree)) break;
+        if (!tailStep.noteSlides || !Object.prototype.hasOwnProperty.call(tailStep.noteSlides, rowInfo.degree)) break;
+        delete tailStep.noteSlides[rowInfo.degree];
+      }
+    } else if (seqType === "mono") {
+      const endAbs = endX + bar * 16;
+      const endStep = pat.steps[endAbs];
+      if (endStep?.chain) endStep.chain = false;
+    }
+    return events.length ? events : null;
+  }
+
   handleGridKey(x, y, s, opts = {}) {
     const forcePatternControl = !!opts.forcePatternControl;
     const uiMode = !!opts.uiMode;
@@ -957,6 +1113,29 @@ export class SGridState {
       const heldInfo = heldKey ? this.keyHolds.get(heldKey) : null;
       if (s === 1) {
         const now = Date.now();
+        const heldAbs = this.heldStep && pat ? this.heldStep.x + pat.barView * 16 : -1;
+        const heldStepObj = heldAbs >= 0 ? pat?.steps[heldAbs] : null;
+        if (heldInfo?.editMode && heldStepObj?.on) {
+          const heldRow = this.getRowInfo(this.heldStep.y, { uiMode });
+          const heldMatches = this.noteMatchesRow(heldStepObj, heldRow.degree, seqType, heldRow);
+          if (heldMatches) {
+            const chainEvents = this.applySlideChainGesture(x, y, rowInfo, { uiMode });
+            if (chainEvents) {
+              const actionType = seqType === "mdtonal" ? "mdslide" : "slide";
+              heldInfo.slideTriggered = true;
+              heldInfo.action = actionType;
+              heldInfo.actionDone = true;
+              this.keyHolds.set(heldKey, heldInfo);
+              const timer = this.holdTimers.get(heldKey);
+              if (timer) {
+                clearTimeout(timer);
+                this.holdTimers.delete(heldKey);
+              }
+              this.heldStepModified = true;
+              return chainEvents;
+            }
+          }
+        }
         const multiHoldAny = this.keyHolds.size > 1;
         if (multiHoldAny) {
           this.holdTimers.forEach((t) => clearTimeout(t));
@@ -976,8 +1155,6 @@ export class SGridState {
           this.holdTimers.clear();
           this.enqueueOctaveOverlay({ page: this.currentPage, clear: true });
         }
-        const heldAbs = this.heldStep && pat ? this.heldStep.x + pat.barView * 16 : -1;
-        const heldStepObj = heldAbs >= 0 ? pat?.steps[heldAbs] : null;
         const wasOn = heldInfo?.wasOn || !!heldStepObj?.on;
         const heldDuration = heldInfo?.start ? (Date.now() - heldInfo.start) : 0;
         const currentAction = heldInfo?.action || null;
@@ -1162,6 +1339,40 @@ export class SGridState {
           }
         }
         const rowMatch = step ? this.noteMatchesRow(step, targetDegree, seqType, rowInfo) : false;
+        const prevHeld = this.heldStep && this.heldStep.x === x ? this.heldStep : null;
+        const prevHeldY = prevHeld ? prevHeld.y : null;
+        const prevRawY = Number.isFinite(prevHeldY)
+          ? (uiMode ? (prevHeldY === 0 ? 6 : prevHeldY - 1) : prevHeldY)
+          : null;
+        const nextRawY = uiMode ? (y === 0 ? 6 : y - 1) : y;
+        const queueMicroOverlayShift = (stepObj, seqTypeNow) => {
+          if (!stepObj) return;
+          if (Number.isFinite(prevRawY) && prevRawY !== nextRawY) {
+            this.enqueueMicroOverlay({
+              page: this.currentPage,
+              x,
+              y: prevHeldY,
+              rawY: prevRawY,
+              microOffset: 0,
+              delta: 0,
+              showZero: false
+            });
+          }
+          const microOffset = this.getNoteMicroOffset(stepObj, targetDegree, seqTypeNow);
+          if (!microOffset) return;
+          const octave = (seqTypeNow === "poly" || seqTypeNow === "drum")
+            ? this.getNoteOctave(stepObj, targetDegree)
+            : (stepObj.octave || 0);
+          this.enqueueMicroOverlay({
+            page: this.currentPage,
+            x,
+            y,
+            rawY: nextRawY,
+            microOffset,
+            delta: 0,
+            octave
+          });
+        };
         if (step && step.on && !rowMatch) {
           const prevDegree = step.degree || 0;
           const prevOctave = step.octave || 0;
@@ -1179,11 +1390,12 @@ export class SGridState {
               // note already present; just enter hold/edit for this note
               this.heldStep = { x, y };
               this.heldStepModified = false;
+              queueMicroOverlayShift(step, seqTypeCur);
               return null;
             }
             step.notes.push(targetDegree);
             step.degree = step.notes[0] ?? targetDegree;
-            step.slide = false; // no slides in poly
+            if (seqTypeCur === "drum") step.slide = false;
             step.accent = false; // per-note accent only
             if (!step.noteOctaves || typeof step.noteOctaves !== "object") step.noteOctaves = {};
             if (!Object.prototype.hasOwnProperty.call(step.noteOctaves, targetDegree)) {
@@ -1197,10 +1409,59 @@ export class SGridState {
             if (!Object.prototype.hasOwnProperty.call(step.noteMicros, targetDegree)) {
               step.noteMicros[targetDegree] = 0;
             }
+            if (!step.noteSlides || typeof step.noteSlides !== "object") step.noteSlides = {};
           } else {
             step.degree = targetDegree;
             step.notes = [targetDegree];
             step.octave = uiMode ? targetOctave : 0;
+            if (seqTypeCur === "mono") {
+              const slideProp = "chain";
+              const lenSteps = Math.max(1, pat.length_steps || 16);
+              let endAbs = abs;
+              if (step[slideProp]) {
+                while (endAbs < lenSteps - 1) {
+                  const curStep = pat.steps[endAbs];
+                  const nextStep = pat.steps[endAbs + 1];
+                  if (!curStep?.[slideProp] || !nextStep?.on) break;
+                  endAbs += 1;
+                }
+              }
+              if (endAbs > abs) {
+                for (let idx = abs + 1; idx <= endAbs; idx++) {
+                  this.clearStep(pat, idx, this.currentPage, { skipChainClear: true, skipAutoClear: true });
+                }
+              }
+              if (abs > 0) {
+                const prevStep = pat.steps[abs - 1];
+                if (prevStep?.on && prevStep.chain) prevStep.chain = false;
+              }
+              step.chain = false;
+            } else if (seqTypeCur === "mdtonal") {
+              const slideProp = "mdSlide";
+              const lenSteps = Math.max(1, pat.steps.length);
+              let startAbs = abs;
+              while (startAbs > 0) {
+                const prevStep = pat.steps[startAbs - 1];
+                if (!prevStep?.on || !prevStep[slideProp]) break;
+                startAbs -= 1;
+              }
+              let endAbs = abs;
+              while (endAbs < lenSteps - 1) {
+                const curStep = pat.steps[endAbs];
+                const nextStep = pat.steps[endAbs + 1];
+                if (!curStep?.[slideProp] || !nextStep?.on) break;
+                endAbs += 1;
+              }
+              const newOctave = step.octave || 0;
+              for (let idx = startAbs; idx <= endAbs; idx++) {
+                const chainStep = pat.steps[idx];
+                if (!chainStep?.on) continue;
+                chainStep.degree = targetDegree;
+                chainStep.notes = [targetDegree];
+                chainStep.octave = newOctave;
+                chainStep.micro = 0;
+              }
+            }
           }
           step.micro = 0;
           if (seqTypeCur !== "poly" && seqTypeCur !== "drum") {
@@ -1211,6 +1472,7 @@ export class SGridState {
               this.enqueueOctaveOverlay({ page: this.currentPage, x, y: clamp(6 - step.degree, 0, 6), octave: step.octave, delta: 0 });
             }
           }
+          queueMicroOverlayShift(step, seqTypeCur);
           // if previous step was a tie into this step and pitch now changes, convert previous to slide
           const prevStep = abs > 0 ? pat.steps[abs - 1] : null;
           if ((page?.sequencerType || "mono") === "mono" && prevStep && prevStep.on && prevStep.tie) {
@@ -1241,6 +1503,7 @@ export class SGridState {
             if (!Object.prototype.hasOwnProperty.call(step.noteMicros, targetDegree)) {
               step.noteMicros[targetDegree] = 0;
             }
+            if (!step.noteSlides || typeof step.noteSlides !== "object") step.noteSlides = {};
           } else {
             step.degree = targetDegree;
             step.notes = [targetDegree];
@@ -1351,7 +1614,10 @@ export class SGridState {
             if (!Array.isArray(step2.notes)) step2.notes = [];
             const idx = step2.notes.indexOf(targetDeg);
             const rowMatch = this.noteMatchesRow(step2, targetDeg, seqType, rowInfo);
-          if (idx !== -1 && rowMatch) {
+            if (idx !== -1 && rowMatch) {
+              const prevStep = abs2 > 0 ? pat2.steps[abs2 - 1] : null;
+              const inChain = seqType === "poly" && (this.hasPolyNoteSlide(step2, targetDeg) || this.hasPolyNoteSlide(prevStep, targetDeg));
+              const chainEndAbs = inChain ? this.polyChainEnd(pat2, abs2, targetDeg) : abs2;
               const prevOct = this.getNoteOctave(step2, targetDeg);
               step2.notes.splice(idx, 1);
               if (Array.isArray(step2.accented)) step2.accented = step2.accented.filter((n) => n !== targetDeg);
@@ -1361,9 +1627,20 @@ export class SGridState {
               if (step2.noteMicros && typeof step2.noteMicros === "object") {
                 delete step2.noteMicros[targetDeg];
               }
+              if (step2.noteSlides && typeof step2.noteSlides === "object") {
+                delete step2.noteSlides[targetDeg];
+              }
               if (prevOct) {
                 const clearY = clamp(6 - targetDeg, 0, 6);
                 this.enqueueOctaveOverlay({ page: this.currentPage, x: hx, y: clearY, clear: true });
+              }
+              if (seqType === "poly" && inChain) {
+                if (prevStep?.noteSlides && Object.prototype.hasOwnProperty.call(prevStep.noteSlides, targetDeg)) {
+                  delete prevStep.noteSlides[targetDeg];
+                }
+                for (let idx2 = abs2 + 1; idx2 <= chainEndAbs; idx2++) {
+                  this.removePolyNoteFromStep(pat2, idx2, targetDeg, this.currentPage);
+                }
               }
             }
             if (!step2.notes.length) {
@@ -1463,13 +1740,16 @@ export class SGridState {
     const slideProp = seqType === "mdtonal" ? "mdSlide" : "slide";
     const canSlide = seqType === "mono" || seqType === "mdtonal";
     const canAccent = seqType !== "cc" && seqType !== "drum";
+    const noteSlide = seqType === "poly"
+      ? (!!step?.noteSlides?.[degree] || (!step?.noteSlides && step?.slide && degree === (step.degree || 0)))
+      : !!step?.[slideProp];
     return {
       exists: !!step,
       on: isNoteOn,
       octave: this.getNoteOctave(step, degree),
       microOffset: this.getNoteMicroOffset(step, degree, seqType),
       accent,
-      slide: !!step?.[slideProp],
+      slide: noteSlide,
       seqType,
       degree,
       canSlide: isNoteOn && canSlide,
@@ -1509,6 +1789,13 @@ export class SGridState {
     if (abs < 0 || abs >= pat.steps.length) return null;
     const step = pat.steps[abs];
     if (!this.noteMatchesRow(step, rowInfo.degree, seqType, rowInfo)) return null;
+    if (seqType === "poly") {
+      if (!step.noteSlides || typeof step.noteSlides !== "object") step.noteSlides = {};
+      if (value) step.noteSlides[rowInfo.degree] = true;
+      else delete step.noteSlides[rowInfo.degree];
+      step.slide = false;
+      return { slide: !!step.noteSlides[rowInfo.degree] };
+    }
     if (seqType !== "mono" && seqType !== "mdtonal") return null;
     const prop = seqType === "mdtonal" ? "mdSlide" : "slide";
     step[prop] = !!value;
@@ -1520,6 +1807,7 @@ export class SGridState {
     const page = this.pages[this.currentPage];
     const seqType = page?.sequencerType || "mono";
     const rowInfo = this.getRowInfo(y, opts);
+    const skipChainClear = !!opts.skipChainClear;
     if (!pat || !rowInfo.stepRow) return null;
     if (seqType === "drum" || seqType === "cc") return null;
     const abs = x + (pat.barView || 0) * 16;
@@ -1533,14 +1821,96 @@ export class SGridState {
       const currentOct = this.getNoteOctave(step, targetDeg);
       const nextOct = clamp((currentOct || 0) + (delta || 0), -2, 2);
       if (nextOct === currentOct) return null;
+      const prevStep = abs > 0 ? pat.steps[abs - 1] : null;
+      const hasSlideChain = this.hasPolyNoteSlide(step, targetDeg) || this.hasPolyNoteSlide(prevStep, targetDeg);
+      const prevInChain = prevStep?.on && this.hasPolyNoteSlide(prevStep, targetDeg)
+        && Array.isArray(prevStep.notes) && prevStep.notes.includes(targetDeg)
+        && this.getNoteOctave(prevStep, targetDeg) === currentOct;
+      const chainStart = hasSlideChain && !prevInChain;
       step.noteOctaves[targetDeg] = nextOct;
+      const chainEndAbs = hasSlideChain ? this.polyChainEnd(pat, abs, targetDeg) : abs;
+      if (!skipChainClear) {
+        if (chainStart && chainEndAbs > abs) {
+          const barBase = (pat.barView || 0) * 16;
+          for (let idx = abs + 1; idx <= chainEndAbs; idx++) {
+            const step2 = pat.steps[idx];
+            if (!step2?.on || !Array.isArray(step2.notes) || !step2.notes.includes(targetDeg)) break;
+            if (!step2.noteOctaves || typeof step2.noteOctaves !== "object") step2.noteOctaves = {};
+            step2.noteOctaves[targetDeg] = nextOct;
+            if (idx >= barBase && idx < barBase + 16) {
+              const x2 = idx - barBase;
+              this.enqueueOctaveOverlay({ page: this.currentPage, x: x2, y, octave: nextOct, delta: delta || 0 });
+            }
+          }
+          this.enqueueOctaveOverlay({ page: this.currentPage, x, y, octave: nextOct, delta: delta || 0 });
+          return { octave: nextOct, delta: delta || 0 };
+        }
+        if (step.noteSlides && Object.prototype.hasOwnProperty.call(step.noteSlides, targetDeg)) {
+          delete step.noteSlides[targetDeg];
+        }
+        if (prevStep?.noteSlides && Object.prototype.hasOwnProperty.call(prevStep.noteSlides, targetDeg)) {
+          delete prevStep.noteSlides[targetDeg];
+        }
+        if (hasSlideChain) {
+          for (let idx = abs + 1; idx <= chainEndAbs; idx++) {
+            this.removePolyNoteFromStep(pat, idx, targetDeg, this.currentPage);
+          }
+        }
+      }
       this.enqueueOctaveOverlay({ page: this.currentPage, x, y, octave: nextOct, delta: delta || 0 });
       return { octave: nextOct, delta: delta || 0 };
     }
     // keep octave offsets within a musical window
     const nextOct = clamp((step.octave || 0) + (delta || 0), -2, 2);
     if (nextOct === (step.octave || 0)) return null;
+    const slideProp = seqType === "mdtonal" ? "mdSlide" : "slide";
+    let endAbs = abs;
+    if ((seqType === "mono" && step.chain) || (seqType !== "mono" && step[slideProp])) {
+      const len = Math.max(1, pat.length_steps || 16);
+      while (endAbs < len - 1) {
+        const curStep = pat.steps[endAbs];
+        const nextStep = pat.steps[endAbs + 1];
+        if (seqType === "mono") {
+          if (!curStep?.chain || !nextStep?.on) break;
+        } else if (!curStep?.[slideProp] || !nextStep?.on) {
+          break;
+        }
+        endAbs += 1;
+      }
+    }
     step.octave = nextOct;
+    if (!skipChainClear) {
+      if (seqType === "mono") {
+        const prevStep = abs > 0 ? pat.steps[abs - 1] : null;
+        const isChainStart = step.chain && !(prevStep?.on && prevStep.chain);
+        if (step.chain && isChainStart && endAbs > abs) {
+          const barBase = (pat.barView || 0) * 16;
+          for (let idx = abs + 1; idx <= endAbs; idx++) {
+            const step2 = pat.steps[idx];
+            if (!step2?.on) break;
+            step2.octave = nextOct;
+            if (idx >= barBase && idx < barBase + 16) {
+              const x2 = idx - barBase;
+              this.enqueueOctaveOverlay({ page: this.currentPage, x: x2, y, octave: nextOct, delta: delta || 0 });
+            }
+          }
+        } else {
+          if (step.chain) step.chain = false;
+          if (prevStep?.on && prevStep.chain) prevStep.chain = false;
+          if (endAbs > abs) {
+            for (let idx = abs + 1; idx <= endAbs; idx++) {
+              this.clearStep(pat, idx, this.currentPage, { skipChainClear: true, skipAutoClear: true });
+            }
+          }
+        }
+      } else {
+        if (step[slideProp]) step[slideProp] = false;
+        if (abs > 0) {
+          const prevStep = pat.steps[abs - 1];
+          if (prevStep?.on && prevStep[slideProp]) prevStep[slideProp] = false;
+        }
+      }
+    }
     this.enqueueOctaveOverlay({ page: this.currentPage, x, y, octave: step.octave, delta: delta || 0 });
     return { octave: step.octave, delta: delta || 0 };
   }
@@ -1622,6 +1992,9 @@ export class SGridState {
         if (step.noteMicros && typeof step.noteMicros === "object") {
           delete step.noteMicros[move.info.degree];
         }
+        if (step.noteSlides && typeof step.noteSlides === "object") {
+          delete step.noteSlides[move.info.degree];
+        }
         const clearY = clamp(6 - move.info.degree, 0, 6);
         this.enqueueOctaveOverlay({ page: this.currentPage, clears: [{ x: move.x, y: clearY }], clear: true });
         this.enqueueMicroOverlay({ page: this.currentPage, x: move.x, y: clearY, rawY: clearY, microOffset: 0, delta: 0, showZero: false });
@@ -1648,6 +2021,7 @@ export class SGridState {
         if (!Array.isArray(step.notes)) step.notes = [];
         if (!step.noteOctaves || typeof step.noteOctaves !== "object") step.noteOctaves = {};
         if (!step.noteMicros || typeof step.noteMicros !== "object") step.noteMicros = {};
+        if (!step.noteSlides || typeof step.noteSlides !== "object") step.noteSlides = {};
         if (!step.notes.includes(targetDeg)) step.notes.push(targetDeg);
         step.on = true;
         step.degree = step.notes[0];
@@ -1656,6 +2030,7 @@ export class SGridState {
         step.mdSlide = false;
         step.noteOctaves[targetDeg] = nextOct;
         step.noteMicros[targetDeg] = this.clampMicro(move.info.microOffset || 0);
+        if (move.info.seqType === "poly" && move.info.slide) step.noteSlides[targetDeg] = true;
         if (!Array.isArray(step.accented)) step.accented = [];
         if (move.info.accent && !step.accented.includes(targetDeg)) step.accented.push(targetDeg);
       } else {
@@ -1719,6 +2094,7 @@ export class SGridState {
         if (!Array.isArray(step.notes)) step.notes = [];
         if (!step.noteOctaves || typeof step.noteOctaves !== "object") step.noteOctaves = {};
         if (!step.noteMicros || typeof step.noteMicros !== "object") step.noteMicros = {};
+        if (!step.noteSlides || typeof step.noteSlides !== "object") step.noteSlides = {};
         if (!step.notes.includes(targetDeg)) step.notes.push(targetDeg);
         step.on = true;
         step.degree = step.notes[0];
@@ -1727,6 +2103,7 @@ export class SGridState {
         step.mdSlide = false;
         step.noteOctaves[targetDeg] = nextOct;
         step.noteMicros[targetDeg] = this.clampMicro(move.info.microOffset || 0);
+        if (move.info.seqType === "poly" && move.info.slide) step.noteSlides[targetDeg] = true;
         if (!Array.isArray(step.accented)) step.accented = [];
         if (move.info.accent && !step.accented.includes(targetDeg)) step.accented.push(targetDeg);
       } else {
@@ -2056,12 +2433,78 @@ export class SGridState {
   clearStep(pat, abs, pageIdx = this.currentPage, opts = {}) {
     const step = pat.steps[abs];
     if (!step) return;
-    const { skipAutoClear = false, patternIdx = null } = opts || {};
+    const { skipAutoClear = false, patternIdx = null, skipChainClear = false } = opts || {};
+    const page = this.pages[pageIdx];
+    const seqType = page?.sequencerType || "mono";
+    const slideProp = seqType === "mdtonal" ? "mdSlide" : "slide";
+    if (!skipChainClear && step.on && seqType === "poly") {
+      const degrees = Array.isArray(step.notes) ? step.notes.slice() : [];
+      degrees.forEach((deg) => {
+        const prevStep = abs > 0 ? pat.steps[abs - 1] : null;
+        const inChain = this.hasPolyNoteSlide(step, deg) || this.hasPolyNoteSlide(prevStep, deg);
+        if (inChain) {
+          this.clearPolyChainTail(pat, abs, deg, pageIdx);
+        }
+      });
+    }
+    if (!skipChainClear && step.on && seqType === "mono" && step.chain) {
+      const prevStep = abs > 0 ? pat.steps[abs - 1] : null;
+      const isChainStart = !(prevStep?.on && prevStep.chain);
+      if (isChainStart) {
+        const len = Math.max(1, pat.length_steps || 16);
+        let endAbs = abs;
+        while (endAbs < len - 1) {
+          const curStep = pat.steps[endAbs];
+          const nextStep = pat.steps[endAbs + 1];
+          if (!curStep?.chain || !nextStep?.on) break;
+          endAbs += 1;
+        }
+        for (let idx = abs; idx <= endAbs; idx++) {
+          this.clearStep(pat, idx, pageIdx, { skipAutoClear: true, skipChainClear: true, patternIdx });
+        }
+        if (!skipAutoClear) {
+          const hasDataInLength = pat.steps.slice(0, len).some((s) => s?.on);
+          if (!hasDataInLength) {
+            const hasHiddenData = pat.steps.slice(len).some((s) => s?.on);
+            if (hasHiddenData) {
+              const pg = this.pages[pageIdx];
+              const targetPattern = patternIdx || pg?.active_pattern;
+              if (targetPattern) this.clearPattern(pageIdx, targetPattern);
+            }
+          }
+        }
+        return;
+      }
+    }
+    if (!skipChainClear && step.on && seqType === "mono") {
+      const prevStep = abs > 0 ? pat.steps[abs - 1] : null;
+      const inChain = (prevStep?.on && prevStep.chain) || !!step.chain;
+      if (inChain && prevStep?.on && prevStep.chain) {
+        const len = Math.max(1, pat.length_steps || 16);
+        let endAbs = abs;
+        while (endAbs < len - 1) {
+          const curStep = pat.steps[endAbs];
+          const nextStep = pat.steps[endAbs + 1];
+          if (!curStep?.chain || !nextStep?.on) break;
+          endAbs += 1;
+        }
+        for (let idx = abs + 1; idx <= endAbs; idx++) {
+          this.clearStep(pat, idx, pageIdx, { skipAutoClear: true, skipChainClear: true, patternIdx });
+        }
+      }
+    }
+    if (abs > 0 && seqType === "mono") {
+      const prevStep = pat.steps[abs - 1];
+      if (prevStep?.on && prevStep.chain) {
+        prevStep.chain = false;
+      }
+    }
     const prevDeg = step.degree || 0;
     const yPos = clamp(6 - prevDeg, 0, 6);
     const xPos = abs % 16;
     // clear slide/tie on this step only; preserve previous links when clearing/moving targets
     step.slide = false;
+    step.chain = false;
     step.mdSlide = false;
     step.on = false;
     step.degree = 0;
@@ -2075,6 +2518,7 @@ export class SGridState {
     step.accented = [];
     step.noteOctaves = {};
     step.noteMicros = {};
+    step.noteSlides = {};
     // clear overlays for the notes that existed on this step
     const clears = [];
     if (prevNotes.length) {
@@ -2114,13 +2558,15 @@ export class SGridState {
         micro: this.clampMicro(s.micro || 0),
         accent: !!s.accent,
         slide: !!s.slide,
+        chain: !!s.chain,
         tie: !!s.tie,
         cc: clamp(Math.round(s.cc || 0), 0, 127),
         mdSlide: !!s.mdSlide,
         notes: Array.isArray(s.notes) ? s.notes.slice() : [],
         accented: Array.isArray(s.accented) ? s.accented.slice() : [],
         noteOctaves: this.sanitizeNoteOctaves(s.noteOctaves),
-        noteMicros: this.sanitizeNoteMicros(s.noteMicros)
+        noteMicros: this.sanitizeNoteMicros(s.noteMicros),
+        noteSlides: this.sanitizeNoteSlides(s.noteSlides)
       }))
     };
   }
@@ -2149,11 +2595,13 @@ export class SGridState {
         slide: !!s.slide,
         tie: !!s.tie,
         mdSlide: !!s.mdSlide,
+        chain: !!s.chain,
         cc: clamp(Math.round(s.cc || 0), 0, 127),
         notes: Array.isArray(s.notes) ? s.notes.map((n) => clamp(n, 0, 6)) : [],
         accented: Array.isArray(s.accented) ? s.accented.map((n) => clamp(n, 0, 6)) : [],
         noteOctaves: this.sanitizeNoteOctaves(s.noteOctaves),
-        noteMicros: this.sanitizeNoteMicros(s.noteMicros)
+        noteMicros: this.sanitizeNoteMicros(s.noteMicros),
+        noteSlides: this.sanitizeNoteSlides(s.noteSlides)
       };
     }
     if (pattern === pg.active_pattern) {
@@ -2200,11 +2648,13 @@ export class SGridState {
         slide: !!s.slide,
         tie: !!s.tie,
         mdSlide: !!s.mdSlide,
+        chain: !!s.chain,
         cc: clamp(Math.round(s.cc || 0), 0, 127),
         notes: Array.isArray(s.notes) ? s.notes.map((n) => clamp(n, 0, 6)) : [],
         accented: Array.isArray(s.accented) ? s.accented.map((n) => clamp(n, 0, 6)) : [],
         noteOctaves: this.sanitizeNoteOctaves(s.noteOctaves),
-        noteMicros: this.sanitizeNoteMicros(s.noteMicros)
+        noteMicros: this.sanitizeNoteMicros(s.noteMicros),
+        noteSlides: this.sanitizeNoteSlides(s.noteSlides)
       };
     }
   }
@@ -2422,6 +2872,7 @@ export class SGridState {
       const len = Math.max(1, pat.length_steps);
       const stepPos = Math.floor(currentTicks / scaleFactor) % len;
       const prevPos = this.pageTickPos[p] ?? -1;
+      const canWrapSlide = prevPos === (len - 1);
       this.pageTicks[p] = currentTicks + 1;
       if (prevPos === stepPos) {
         continue; // no new step to process this tick at this scale
@@ -2449,7 +2900,7 @@ export class SGridState {
       if (skipMdNote) {
         delete this.skipNextMDNote[p];
       }
-      const baseDur = externalStepMs || this.stepDurationMs(1);
+      const baseDur = externalStepMs ? (externalStepMs * scaleFactor) : this.stepDurationMs(scaleFactor);
       const swingAmt = Math.max(0, Math.min(0.5, (this.swing || 50) > 50 ? (this.swing - 50) / 60 : 0));
       const swingOffsetTicks = (pos % 2 === 1) ? Math.round(TICKS_PER_STEP_INT * swingAmt) : 0;
       const chan = clamp(this.midi[p]?.channel || 1, 1, 16);
@@ -2519,7 +2970,7 @@ export class SGridState {
               if (!skipMdNote) {
                 const noteDur = this.gateDurationMs(baseDur * 0.5);
                 if (emit) {
-                  midiEvents.push({
+                  this.pushMidiNote(midiEvents, {
                     type: "midi_note",
                     page: p,
                     tick: eventTick,
@@ -2558,9 +3009,12 @@ export class SGridState {
               // DO NOT CHANGE LOGIC: TD-3 slide playback behavior depends on this exact block.
               const pageTranspose = this.pages[p].transpose || 0;
               const pitchCur = this.calcPitch(pat.root || 0, mode, step.degree || 0, step.octave || 0) + pageTranspose;
-              const prevSlidesHere = prevStep?.on && prevStep?.slide;
-              const isSlideStart = step.slide;
-              const chainLen = this.slideChainLength(pat, pos);
+              const lastStep = pos === 0 ? pat.steps[len - 1] : null;
+              const wrapSlidesHere = pos === 0 && canWrapSlide && lastStep?.on && lastStep.slide
+                && (this.calcPitch(pat.root || 0, mode, lastStep.degree || 0, lastStep.octave || 0) + pageTranspose) === pitchCur;
+              const prevSlidesHere = (pos > 0 && prevStep?.on && (prevStep?.slide || prevStep?.chain)) || wrapSlidesHere;
+              const isSlideStart = step.slide || step.chain;
+              const chainLen = step.chain ? this.slideChainLength(pat, pos, { seqType: "mono" }) : (step.slide ? 2 : 1);
               const noteVel = step.accent ? 120 : 96;
               const microOffset = this.getNoteMicroOffset(step, step.degree || 0, seqTypePlay);
               const eventTick = baseTick + swingOffsetTicks + microOffset;
@@ -2571,10 +3025,10 @@ export class SGridState {
                 if (samePitch) {
                   continue; // already held by previous slide gate
                 }
-                if (!step.slide) {
+                if (!step.slide && !step.chain) {
                   const durMs = this.gateDurationMs(baseDur); // slide ended; play target at normal length
                   if (emit) {
-                    midiEvents.push({
+                    this.pushMidiNote(midiEvents, {
                       type: "midi_note",
                       page: p,
                       tick: eventTick,
@@ -2596,7 +3050,7 @@ export class SGridState {
                 const padMs = this.noteOffEpsilonMs + Math.round(gatedChainMs * slidePad);
                 const durMs = Math.max(1, Math.round(gatedChainMs - padMs));
                 if (emit) {
-                  midiEvents.push({
+                  this.pushMidiNote(midiEvents, {
                     type: "midi_note",
                     page: p,
                     tick: eventTick,
@@ -2606,7 +3060,7 @@ export class SGridState {
                     delayMs: 0,
                     chan,
                     accent: !!step.accent,
-                    td3Slide: true
+                    td3Slide: !!step.slide || !!step.chain
                   });
                 }
                 continue;
@@ -2618,7 +3072,7 @@ export class SGridState {
                 const padMs = this.noteOffEpsilonMs + Math.round(gatedChainMs * slidePad);
                 const durMs = Math.max(1, Math.round(gatedChainMs - padMs)); // hold through the chain without overshooting
                 if (emit) {
-                  midiEvents.push({
+                  this.pushMidiNote(midiEvents, {
                     type: "midi_note",
                     page: p,
                     tick: eventTick,
@@ -2628,7 +3082,7 @@ export class SGridState {
                     delayMs: 0,
                     chan,
                     accent: !!step.accent,
-                    td3Slide: true
+                    td3Slide: !!step.slide || !!step.chain
                   });
                 }
                 continue;
@@ -2636,7 +3090,7 @@ export class SGridState {
               if (step.tie) {
                 const durMs = this.gateDurationMs(baseDur * 2); // tie adds one step
                 if (emit) {
-                  midiEvents.push({
+                  this.pushMidiNote(midiEvents, {
                     type: "midi_note",
                     page: p,
                     tick: eventTick,
@@ -2655,25 +3109,58 @@ export class SGridState {
               }
             }
             degrees.forEach((deg) => {
+              if (seqTypePlay === "poly") {
+                const octave = this.getNoteOctave(step, deg);
+                const lastStep = pos === 0 ? pat.steps[len - 1] : null;
+                const wrapSlidesHere = pos === 0 && canWrapSlide && lastStep?.on && this.hasPolyNoteSlide(lastStep, deg)
+                  && Array.isArray(lastStep.notes) && lastStep.notes.includes(deg)
+                  && this.getNoteOctave(lastStep, deg) === octave;
+                const prevSlidesHere = (prevStep?.on && this.hasPolyNoteSlide(prevStep, deg)
+                  && Array.isArray(prevStep.notes) && prevStep.notes.includes(deg)
+                  && this.getNoteOctave(prevStep, deg) === octave) || wrapSlidesHere;
+                if (prevSlidesHere) return;
+                const pageTranspose = this.pages[p].transpose || 0;
+                const pitch = this.calcPitch(pat.root || 0, mode, deg || 0, octave) + pageTranspose;
+                const microOffset = this.getNoteMicroOffset(step, deg, seqTypePlay);
+                const eventTick = baseTick + swingOffsetTicks + microOffset;
+                const emit = microOffset >= 0;
+                const chainLen = this.hasPolyNoteSlide(step, deg) ? this.slideChainLength(pat, pos, { seqType: "poly", degree: deg }) : 1;
+                const durMs = this.hasPolyNoteSlide(step, deg)
+                  ? this.gateDurationMs(baseDur * Math.max(1, chainLen))
+                  : this.gateDurationMs(baseDur);
+                const noteVel = Array.isArray(step.accented) && step.accented.includes(deg) ? 120 : 96;
+                if (emit) {
+                  this.pushMidiNote(midiEvents, {
+                    type: "midi_note",
+                    page: p,
+                    tick: eventTick,
+                    pitch,
+                    vel: noteVel,
+                    durMs,
+                    delayMs: 0,
+                    chan,
+                    accent: noteVel >= 120,
+                    td3Slide: false
+                  });
+                }
+                return;
+              }
               let pitch;
               if (seqTypePlay === "drum") {
                 const drumOct = this.getNoteOctave(step, deg);
                 pitch = this.getDrumPitch(page, deg, drumOct);
               } else {
                 const pageTranspose = this.pages[p].transpose || 0;
-                const octave = seqTypePlay === "poly" ? this.getNoteOctave(step, deg) : this.getNoteOctave(step, deg || 0);
+                const octave = this.getNoteOctave(step, deg || 0);
                 pitch = this.calcPitch(pat.root || 0, mode, deg || 0, octave) + pageTranspose;
               }
               const microOffset = this.getNoteMicroOffset(step, deg, seqTypePlay);
               const eventTick = baseTick + swingOffsetTicks + microOffset;
               const emit = microOffset >= 0;
               const durMs = this.gateDurationMs(baseDur); // default one step with slight shorten
-              const noteVel = (seqTypePlay === "poly" || seqTypePlay === "drum")
-                ? (Array.isArray(step.accented) && step.accented.includes(deg) ? 120 : 96)
-                : (step.accent ? 120 : 96);
-              const isAccent = noteVel >= 120;
+              const noteVel = Array.isArray(step.accented) && step.accented.includes(deg) ? 120 : 96;
               if (emit) {
-                midiEvents.push({
+                this.pushMidiNote(midiEvents, {
                   type: "midi_note",
                   page: p,
                   tick: eventTick,
@@ -2682,7 +3169,7 @@ export class SGridState {
                   durMs,
                   delayMs: 0,
                   chan,
-                  accent: isAccent,
+                  accent: noteVel >= 120,
                   td3Slide: false
                 });
               }
@@ -2741,7 +3228,7 @@ export class SGridState {
                 });
               }
               const noteDur = this.gateDurationMs(baseDur * 0.5);
-              midiEvents.push({
+              this.pushMidiNote(midiEvents, {
                 type: "midi_note",
                 page: p,
                 tick: eventTick,
@@ -2765,16 +3252,18 @@ export class SGridState {
             midiEvents.push({ type: "midi_cc", page: p, tick: eventTick, cc: ccNum, value, delayMs: 0, chan });
           }
         } else {
-          const degrees = (seqTypePlay === "poly" || seqTypePlay === "drum") && Array.isArray(nextStepObj.notes) && nextStepObj.notes.length
-            ? nextStepObj.notes
-            : [nextStepObj.degree || 0];
-          const mode = (this.scale && this.scale.mode) || "major";
+            const degrees = (seqTypePlay === "poly" || seqTypePlay === "drum") && Array.isArray(nextStepObj.notes) && nextStepObj.notes.length
+              ? nextStepObj.notes
+              : [nextStepObj.degree || 0];
+            const mode = (this.scale && this.scale.mode) || "major";
           if (seqTypePlay === "mono") {
             const pageTranspose = this.pages[p].transpose || 0;
             const pitchCur = this.calcPitch(pat.root || 0, mode, nextStepObj.degree || 0, nextStepObj.octave || 0) + pageTranspose;
-            const prevSlidesHere = step?.on && step?.slide;
-            const isSlideStart = nextStepObj.slide;
-            const chainLen = this.slideChainLength(pat, nextPos);
+            const wrapSlidesHere = nextPos === 0 && pos === (len - 1) && step?.on && step.slide
+              && (this.calcPitch(pat.root || 0, mode, step.degree || 0, step.octave || 0) + pageTranspose) === pitchCur;
+            const prevSlidesHere = (nextPos > 0 && step?.on && (step?.slide || step?.chain)) || wrapSlidesHere;
+            const isSlideStart = nextStepObj.slide || nextStepObj.chain;
+            const chainLen = nextStepObj.chain ? this.slideChainLength(pat, nextPos, { seqType: "mono" }) : (nextStepObj.slide ? 2 : 1);
             const noteVel = nextStepObj.accent ? 120 : 96;
             const microOffset = this.getNoteMicroOffset(nextStepObj, nextStepObj.degree || 0, seqTypePlay);
             if (microOffset < 0 && !(this.skipNextNote && this.skipNextNote[p] === nextPos)) {
@@ -2784,9 +3273,9 @@ export class SGridState {
                 const samePitch = pitchPrev === pitchCur;
                 if (samePitch) {
                   // held by previous slide gate
-                } else if (!nextStepObj.slide) {
+                } else if (!nextStepObj.slide && !nextStepObj.chain) {
                   const durMs = this.gateDurationMs(baseDur);
-                  midiEvents.push({
+                  this.pushMidiNote(midiEvents, {
                     type: "midi_note",
                     page: p,
                     tick: eventTick,
@@ -2804,7 +3293,7 @@ export class SGridState {
                   const gatedChainMs = this.applyGateLength(chainDurMs);
                   const padMs = this.noteOffEpsilonMs + Math.round(gatedChainMs * slidePad);
                   const durMs = Math.max(1, Math.round(gatedChainMs - padMs));
-                  midiEvents.push({
+                  this.pushMidiNote(midiEvents, {
                     type: "midi_note",
                     page: p,
                     tick: eventTick,
@@ -2814,7 +3303,7 @@ export class SGridState {
                     delayMs: 0,
                     chan,
                     accent: !!nextStepObj.accent,
-                    td3Slide: true
+                    td3Slide: !!nextStepObj.slide || !!nextStepObj.chain
                   });
                 }
               } else if (isSlideStart) {
@@ -2823,7 +3312,7 @@ export class SGridState {
                 const gatedChainMs = this.applyGateLength(chainDurMs);
                 const padMs = this.noteOffEpsilonMs + Math.round(gatedChainMs * slidePad);
                 const durMs = Math.max(1, Math.round(gatedChainMs - padMs));
-                midiEvents.push({
+                this.pushMidiNote(midiEvents, {
                   type: "midi_note",
                   page: p,
                   tick: eventTick,
@@ -2833,11 +3322,11 @@ export class SGridState {
                   delayMs: 0,
                   chan,
                   accent: !!nextStepObj.accent,
-                  td3Slide: true
+                  td3Slide: !!nextStepObj.slide || !!nextStepObj.chain
                 });
               } else if (nextStepObj.tie) {
                 const durMs = this.gateDurationMs(baseDur * 2);
-                midiEvents.push({
+                this.pushMidiNote(midiEvents, {
                   type: "midi_note",
                   page: p,
                   tick: eventTick,
@@ -2851,7 +3340,7 @@ export class SGridState {
                 });
               } else {
                 const durMs = this.gateDurationMs(baseDur);
-                midiEvents.push({
+                this.pushMidiNote(midiEvents, {
                   type: "midi_note",
                   page: p,
                   tick: eventTick,
@@ -2869,6 +3358,34 @@ export class SGridState {
             degrees.forEach((deg) => {
               const microOffset = this.getNoteMicroOffset(nextStepObj, deg, seqTypePlay);
               if (microOffset >= 0) return;
+              if (seqTypePlay === "poly") {
+                const octave = this.getNoteOctave(nextStepObj, deg);
+                const prevSlidesHere = step?.on && this.hasPolyNoteSlide(step, deg)
+                  && Array.isArray(step.notes) && step.notes.includes(deg)
+                  && this.getNoteOctave(step, deg) === octave;
+                if (prevSlidesHere) return;
+                const eventTick = nextBaseTick + nextSwingOffsetTicks + microOffset;
+                const pageTranspose = this.pages[p].transpose || 0;
+                const pitch = this.calcPitch(pat.root || 0, mode, deg || 0, octave) + pageTranspose;
+                const chainLen = this.hasPolyNoteSlide(nextStepObj, deg) ? this.slideChainLength(pat, nextPos, { seqType: "poly", degree: deg }) : 1;
+                const durMs = this.hasPolyNoteSlide(nextStepObj, deg)
+                  ? this.gateDurationMs(baseDur * Math.max(1, chainLen))
+                  : this.gateDurationMs(baseDur);
+                const noteVel = Array.isArray(nextStepObj.accented) && nextStepObj.accented.includes(deg) ? 120 : 96;
+                this.pushMidiNote(midiEvents, {
+                  type: "midi_note",
+                  page: p,
+                  tick: eventTick,
+                  pitch,
+                  vel: noteVel,
+                  durMs,
+                  delayMs: 0,
+                  chan,
+                  accent: noteVel >= 120,
+                  td3Slide: false
+                });
+                return;
+              }
               const eventTick = nextBaseTick + nextSwingOffsetTicks + microOffset;
               let pitch;
               if (seqTypePlay === "drum") {
@@ -2876,15 +3393,12 @@ export class SGridState {
                 pitch = this.getDrumPitch(page, deg, drumOct);
               } else {
                 const pageTranspose = this.pages[p].transpose || 0;
-                const octave = seqTypePlay === "poly" ? this.getNoteOctave(nextStepObj, deg) : this.getNoteOctave(nextStepObj, deg || 0);
+                const octave = this.getNoteOctave(nextStepObj, deg || 0);
                 pitch = this.calcPitch(pat.root || 0, mode, deg || 0, octave) + pageTranspose;
               }
               const durMs = this.gateDurationMs(baseDur);
-              const noteVel = (seqTypePlay === "poly" || seqTypePlay === "drum")
-                ? (Array.isArray(nextStepObj.accented) && nextStepObj.accented.includes(deg) ? 120 : 96)
-                : (nextStepObj.accent ? 120 : 96);
-              const isAccent = noteVel >= 120;
-              midiEvents.push({
+              const noteVel = Array.isArray(nextStepObj.accented) && nextStepObj.accented.includes(deg) ? 120 : 96;
+              this.pushMidiNote(midiEvents, {
                 type: "midi_note",
                 page: p,
                 tick: eventTick,
@@ -2893,7 +3407,7 @@ export class SGridState {
                 durMs,
                 delayMs: 0,
                 chan,
-                accent: isAccent,
+                accent: noteVel >= 120,
                 td3Slide: false
               });
             });
@@ -3024,19 +3538,107 @@ export class SGridState {
     return next;
   }
 
-  slideChainLength(pat, startIdx) {
+  hasPolyNoteSlide(step, degree) {
+    if (!step) return false;
+    if (step.noteSlides && Object.prototype.hasOwnProperty.call(step.noteSlides, degree)) {
+      return !!step.noteSlides[degree];
+    }
+    return !!(step.slide && (step.degree || 0) === degree);
+  }
+
+  polyChainEnd(pat, startIdx, degree) {
+    if (!pat || !Array.isArray(pat.steps)) return startIdx;
+    const len = Math.max(1, Math.min(pat.length_steps || 16, pat.steps.length));
+    let idx = startIdx;
+    while (idx < len - 1) {
+      const cur = pat.steps[idx];
+      const next = pat.steps[idx + 1];
+      if (!this.hasPolyNoteSlide(cur, degree)) break;
+      if (!next?.on || !Array.isArray(next.notes) || !next.notes.includes(degree)) break;
+      if (this.getNoteOctave(cur, degree) !== this.getNoteOctave(next, degree)) break;
+      idx += 1;
+    }
+    return idx;
+  }
+
+  removePolyNoteFromStep(pat, abs, degree, pageIdx = this.currentPage) {
+    const step = pat?.steps?.[abs];
+    if (!step || !Array.isArray(step.notes)) return;
+    const idx = step.notes.indexOf(degree);
+    if (idx === -1) return;
+    const prevOct = this.getNoteOctave(step, degree);
+    step.notes.splice(idx, 1);
+    if (Array.isArray(step.accented)) step.accented = step.accented.filter((n) => n !== degree);
+    if (step.noteOctaves && typeof step.noteOctaves === "object") {
+      delete step.noteOctaves[degree];
+    }
+    if (step.noteMicros && typeof step.noteMicros === "object") {
+      delete step.noteMicros[degree];
+    }
+    if (step.noteSlides && typeof step.noteSlides === "object") {
+      delete step.noteSlides[degree];
+    }
+    if (prevOct) {
+      const x = abs % 16;
+      const clearY = clamp(6 - degree, 0, 6);
+      this.enqueueOctaveOverlay({ page: pageIdx, x, y: clearY, clear: true });
+    }
+    if (!step.notes.length) {
+      this.clearStep(pat, abs, pageIdx, { skipChainClear: true, skipAutoClear: true });
+    } else {
+      step.degree = step.notes[0];
+      step.accent = false;
+    }
+  }
+
+  clearPolyChainTail(pat, abs, degree, pageIdx = this.currentPage) {
+    const endAbs = this.polyChainEnd(pat, abs, degree);
+    for (let idx = abs + 1; idx <= endAbs; idx++) {
+      this.removePolyNoteFromStep(pat, idx, degree, pageIdx);
+    }
+  }
+
+  slideChainLength(pat, startIdx, opts = {}) {
     if (!pat || !Array.isArray(pat.steps)) return 1;
+    const seqType = opts.seqType || "mono";
+    const degree = opts.degree;
     const len = Math.max(1, Math.min(pat.length_steps || 16, pat.steps.length));
     let span = 1;
     let idx = startIdx;
     while (span < len) {
       const cur = pat.steps[idx];
-      if (!cur?.slide) break;
-      const nextIdx = (idx + 1) % len;
+      if (seqType === "mono") {
+        if (!cur?.chain) break;
+        const nextIdx = idx + 1;
+        if (nextIdx >= len) break;
+        const nextStep = pat.steps[nextIdx];
+        if (!nextStep?.on) break;
+        if ((cur.octave || 0) !== (nextStep.octave || 0)) break;
+        span += 1;
+        if (!nextStep.chain) break;
+        idx = nextIdx;
+        continue;
+      }
+      if (seqType === "poly") {
+        if (!this.hasPolyNoteSlide(cur, degree)) break;
+        const nextIdx = idx + 1;
+        if (nextIdx >= len) break;
+        const nextStep = pat.steps[nextIdx];
+        if (!nextStep?.on || !Array.isArray(nextStep.notes) || !nextStep.notes.includes(degree)) break;
+        if (this.getNoteOctave(cur, degree) !== this.getNoteOctave(nextStep, degree)) break;
+        span += 1;
+        if (!this.hasPolyNoteSlide(nextStep, degree)) break;
+        idx = nextIdx;
+        continue;
+      }
+      const slideProp = seqType === "mdtonal" ? "mdSlide" : "slide";
+      if (!cur?.[slideProp]) break;
+      const nextIdx = idx + 1;
+      if (nextIdx >= len) break;
       const nextStep = pat.steps[nextIdx];
-      span += 1; // include the next slot even if empty to allow slide hold over a rest
       if (!nextStep?.on) break;
-      if (!nextStep.slide) break; // stop after adding target if chain ends there
+      span += 1;
+      if (!nextStep[slideProp]) break; // stop after adding target if chain ends there
       idx = nextIdx;
     }
     return span;
@@ -3054,8 +3656,38 @@ export class SGridState {
       const step = pat.steps[abs];
       if (!step?.on) continue;
       const nextStep = pat.steps[abs + 1];
-      if (seqType === "mono" && (step.slide || step.tie)) return true;
+      if (seqType === "mono" && (step.slide || step.chain || step.tie)) return true;
       if (seqType === "mdtonal" && step.mdSlide) return true;
+    }
+    return false;
+  }
+
+  hasWaveChains() {
+    const page = this.pages[this.currentPage];
+    const pat = page?.patterns?.[page.active_pattern];
+    if (!pat) return false;
+    const bar = pat.barView || 0;
+    const seqType = page?.sequencerType || "mono";
+    if (!(seqType === "mono" || seqType === "poly" || seqType === "mdtonal")) return false;
+    const len = Math.max(1, pat.length_steps || 16);
+    for (let x = 0; x < 16; x++) {
+      const abs = x + bar * 16;
+      if (abs >= len) break;
+      const step = pat.steps[abs];
+      if (seqType === "poly") {
+        if (!step?.on) continue;
+        const degrees = Array.isArray(step.notes) ? step.notes : [];
+        for (const degree of degrees) {
+          if (!this.hasPolyNoteSlide(step, degree)) continue;
+          const chainLen = this.slideChainLength(pat, abs, { seqType: "poly", degree });
+          if (chainLen > 1) return true;
+        }
+      } else {
+        const slideProp = seqType === "mdtonal" ? "mdSlide" : "slide";
+        if (!step?.on || !step[slideProp]) continue;
+        const chainLen = this.slideChainLength(pat, abs, { seqType });
+        if (chainLen > 1) return true;
+      }
     }
     return false;
   }
@@ -3097,6 +3729,7 @@ export class SGridState {
     const WIDTH = 16;
     const HEIGHT = 8;
     const OFF = 0;
+    const tMs = Date.now();
     const PATTERN_ACTIVE = this.ledLevels.pattern_active;
     const PATTERN_INACTIVE = this.ledLevels.pattern_inactive;
     const PATTERN_PENDING = this.ledLevels.pattern_pending;
@@ -3104,6 +3737,7 @@ export class SGridState {
     const PATTERN_HAS_DATA = Math.max(PATTERN_INACTIVE + 2, Math.min(15, Math.round(PATTERN_ACTIVE * 0.75)));
     const DEVICE_PRESENT = this.ledLevels.device_present;
     const DEVICE_ACTIVE = this.ledLevels.device_active;
+    const GATE_LED_BUMP = 4;
     const DEVICE_HAS_DATA = Math.max(DEVICE_PRESENT - 2, PATTERN_HAS_DATA);
     const PLAYHEAD = this.ledLevels.playhead;
     const frame = new Array(WIDTH * HEIGHT).fill(OFF);
@@ -3143,6 +3777,9 @@ export class SGridState {
         stopLevel = this.pulse ? PATTERN_ACTIVE : PATTERN_PENDING;
       } else if (!page.sequencerStopped) {
         stopLevel = devHasData ? DEVICE_HAS_DATA : DEVICE_PRESENT;
+      }
+      if (this.isDeviceGateActive(pageIdx, tMs)) {
+        stopLevel = Math.min(15, stopLevel + GATE_LED_BUMP);
       }
       frame[7 * WIDTH + col] = stopLevel;
     }
@@ -3191,6 +3828,9 @@ export class SGridState {
         stopLevel = blinkFast ? 1 : 0;
       } else if (page.sequencerStopped) {
         stopLevel = 0; // turn off bottom row when stopped
+      }
+      if (this.isDeviceGateActive(pageIdx, tMs)) {
+        stopLevel = 1;
       }
       frame[7 * WIDTH + col] = stopLevel;
     }
@@ -3289,6 +3929,7 @@ export class SGridState {
     const PATTERN_HAS_DATA = Math.max(PATTERN_INACTIVE + 2, Math.min(15, Math.round(PATTERN_ACTIVE * 0.75)));
     const DEVICE_PRESENT = this.ledLevels.device_present;
     const DEVICE_ACTIVE = this.ledLevels.device_active;
+    const GATE_LED_BUMP = 2;
     const DEVICE_HAS_DATA = Math.max(DEVICE_PRESENT - 2, PATTERN_HAS_DATA);
     const tMs = Date.now();
     const OCT_LOOP_MS = 1200;
@@ -3366,7 +4007,7 @@ export class SGridState {
               }
             });
             const seq = page?.sequencerType || "mono";
-            if ((seq === "mono" && (step.slide || step.tie)) || (seq === "mdtonal" && step.mdSlide)) {
+            if ((seq === "mono" && (step.slide || step.chain || step.tie)) || (seq === "mdtonal" && step.mdSlide)) {
               slideStarts.push({
                 x1: x,
                 y1: clamp(6 - step.degree, 0, 6),
@@ -3445,6 +4086,83 @@ export class SGridState {
           }
         }
       }
+      const slideChains = [];
+      const chainCells = new Set();
+      {
+        const seqType = page?.sequencerType || "mono";
+        if (seqType === "mono" || seqType === "poly" || seqType === "mdtonal") {
+          const len = Math.max(1, pat.length_steps || 16);
+          for (let x = 0; x < 16; x++) {
+            const abs = x + bar * 16;
+            if (abs >= len) break;
+            const step = pat.steps[abs];
+            if (!step?.on) continue;
+            if (seqType === "poly") {
+              const degrees = Array.isArray(step.notes) ? step.notes : [];
+              for (const degree of degrees) {
+                if (!this.hasPolyNoteSlide(step, degree)) continue;
+                if (abs > 0) {
+                  const prev = pat.steps[abs - 1];
+                  if (this.hasPolyNoteSlide(prev, degree)) continue;
+                }
+                const chainLen = this.slideChainLength(pat, abs, { seqType: "poly", degree });
+                if (chainLen <= 1) continue;
+                const endX = x + chainLen - 1;
+                if (endX >= 16) continue;
+                const y = clamp(6 - degree, 0, 6);
+                const bright = Array.isArray(step.accented) && step.accented.includes(degree) ? STEP_ACCENT : STEP_ON;
+                slideChains.push({ x1: x, x2: endX, y, bright });
+                for (let cx = x; cx <= endX; cx++) {
+                  chainCells.add(`${cx},${y}`);
+                }
+              }
+              continue;
+            }
+            const slideProp = seqType === "mdtonal" ? "mdSlide" : "slide";
+            if (seqType === "mono") {
+              if (!step.chain) continue;
+            } else if (!step[slideProp]) {
+              continue;
+            }
+            if (abs > 0) {
+              const prev = pat.steps[abs - 1];
+              if (seqType === "mono") {
+                if (prev?.on && prev.chain) continue;
+              } else if (prev?.on && prev[slideProp]) {
+                continue;
+              }
+            }
+            const chainLen = this.slideChainLength(pat, abs, { seqType });
+            if (chainLen <= 1) continue;
+            const endX = x + chainLen - 1;
+            if (endX >= 16) continue;
+            const degree = step.degree || 0;
+            const y = clamp(6 - degree, 0, 6);
+            const bright = step.accent ? STEP_ACCENT : STEP_ON;
+            slideChains.push({ x1: x, x2: endX, y, bright });
+            for (let cx = x; cx <= endX; cx++) {
+              chainCells.add(`${cx},${y}`);
+            }
+          }
+        }
+      }
+      if (slideChains.length) {
+        const loopMs = 1400;
+        const t = slideTimeMs !== undefined ? slideTimeMs : Date.now();
+        const travel = (t % loopMs) / loopMs;
+        slideChains.forEach((chain) => {
+          const span = Math.max(1, chain.x2 - chain.x1);
+          const dim = Math.max(1, Math.round(chain.bright * 0.25));
+          for (let x = chain.x1; x <= chain.x2; x++) {
+            const pos = span ? (x - chain.x1) / span : 0;
+            const phase = (pos - travel) * Math.PI * 2;
+            const strength = (Math.sin(phase) + 1) * 0.5;
+            const level = Math.round(dim + (chain.bright - dim) * strength);
+            const idx = chain.y * WIDTH + x;
+            frame[idx] = frame[idx] >= PLAYHEAD ? frame[idx] : level;
+          }
+        });
+      }
       // slide/tie indication: pulse only the originating step
       if (slideStarts.length) {
         const loopMs = 900; // ~0.9s pulse
@@ -3452,6 +4170,7 @@ export class SGridState {
         const phase = (t % loopMs) / loopMs; // 0..1
         const pulse = (1 - Math.cos(phase * Math.PI * 2)) * 0.5; // cosine ease 0..1..0
         slideStarts.forEach((sp) => {
+          if (chainCells.has(`${sp.x1},${sp.y1}`)) return;
           const bright = sp.accent1 ? STEP_ACCENT : STEP_ON;
           const dim = Math.max(1, Math.round(bright * 0.4));
           const level = Math.round(dim + (bright - dim) * pulse);
@@ -3540,15 +4259,20 @@ export class SGridState {
         const hasData = dev?.patterns?.some((pat, idx) => idx > 0 && pat?.steps?.some((s) => s.on));
         const pendingStop = dev?.pendingStop;
         // const pendingMute = dev?.pendingMute;
+        let level;
         if (pendingStop != null) {
-          frame[7 * WIDTH + i] = this.pulse ? PATTERN_ACTIVE : PATTERN_PENDING;
+          level = this.pulse ? PATTERN_ACTIVE : PATTERN_PENDING;
         } else if (isCurrent) {
-          frame[7 * WIDTH + i] = isDevStopped ? PATTERN_MUTED : DEVICE_ACTIVE;
+          level = isDevStopped ? PATTERN_MUTED : DEVICE_ACTIVE;
         } else if (isDevStopped) {
-          frame[7 * WIDTH + i] = PATTERN_INACTIVE;
+          level = PATTERN_INACTIVE;
         } else {
-          frame[7 * WIDTH + i] = hasData ? DEVICE_HAS_DATA : DEVICE_PRESENT;
+          level = hasData ? DEVICE_HAS_DATA : DEVICE_PRESENT;
         }
+        if (this.isDeviceGateActive(pageIdx, tMs)) {
+          level = Math.min(15, level + GATE_LED_BUMP);
+        }
+        frame[7 * WIDTH + i] = level;
       }
       // const isPending = page && page.pending_pattern;
       // const isMuted = page?.muted;

@@ -7,7 +7,7 @@ Leave your gear bias at the door, focus on the music and have fun :)
 
 Overview
 --------
-studio:grid is a grid-based multi-sequencer and composer for monome grids (or without). Each project (set) holds up to eight devices/pages, and every page contains eight patterns with lengths up to 128 steps. The app drives MIDI notes/CC, can follow internal or external clock, and exports/imports complete sets (.sgridset) plus TD-3 .seq files.
+studio:grid is a grid-based multi-sequencer and composer for monome grids (or without). Each project (set) holds up to eight devices/pages, and every page contains eight patterns with lengths up to 128 steps. The app drives MIDI notes/CC, can follow internal or external clock, and exports/imports complete projects (.studiogrid, .sgridset) plus TD-3 .seq files.
 
 It can be used with or without a grid controller.
 
@@ -44,6 +44,8 @@ Editing the grid
   - Accent toggle (where supported).
   - Slide toggle (mono/mdtonal). Slides shorten gates by the configured mono slide pad.
 - Hold active note and press step to the right to activate slide on active note.
+- Extended note (slide chain): while holding an active note long enough to enter note edit mode, press the last cell in a consecutive run of active notes on the same row to create a continuous chain (mono, poly, mdtonal only). The chain shows a subtle left-to-right wave and plays as one extended note. In Poly, chains are per-note (other notes on the same step are unaffected).
+- Chain rules: removing any note inside a chain deletes the downstream notes; removing the first note deletes the whole chain; octave-shifting a chained note stops the chain and deletes following notes.
 - Keyboard -  Shift + Arrow keys: nudge the current pattern left/right (steps) or up/down (rows).
 - Pattern copy/paste: copy/paste entire pattern; copy/paste bar affects current 16-step bar.
 - Clear: clears pattern immediately if empty; otherwise choose pattern vs current bar.
@@ -55,7 +57,7 @@ Editing the grid
 Sequencer types
 ---------------
 - Mono: single note per step; accent and slide available; octave per step.
-- Poly: multiple notes per step; per-note accents; per-note octave switching
+- Poly: multiple notes per step; per-note accents; per-note octave switching; per-note slide chains
 - Drum: seven rows map to per-row MIDI notes (editable in the drum note inputs).
 - CC: each step stores a CC value; set CC number per page.
 - MDTonal: Sequence Elektron Machinedrum tonal tracks with slide handling; select MD track per page. TM-1 is auto-picked unless “Allow non-TM-1 output” is enabled in Settings. Slide is done by basic interpolation. Also sends velocity!
@@ -88,13 +90,13 @@ TD-3 import/export
 - Export: choose Group/Pattern numbers; downloads `sgrid_td3_pattern.seq`.
 - Import: choose a .seq file. If the current pattern has data, you’ll be asked to replace it. The app previews the scale; choose to fit to the current scale or switch the project scale to the detected one, then apply.
 
-Saving, loading, and sets
--------------------------
-- Export set: top-bar download saves the full snapshot as `.sgridset` (JSON) via /api/export.
-- Import set: top-bar upload accepts `.json` or `.sgridset` and replaces the current state.
-- Sets include musical data plus per-page MIDI routing; UI/config settings (LED levels, clock, base note length, gate length, mono slide pad, pattern-control latch) are saved separately in config.
-- New set: clears all patterns; optional “Keep device names” and “Keep MIDI settings”; default device color can be preserved.
-- Auto-load last set: toggle in Settings to reload the previous snapshot on startup.
+Saving, loading, and projects
+-----------------------------
+- Export project: top-bar download saves the full snapshot as `.studiogrid` (JSON) via /api/export.
+- Import project: top-bar upload accepts `.json`, `.studiogrid`, or `.sgridset` and replaces the current state.
+- Projects include musical data plus per-page MIDI routing; UI/config settings (LED levels, clock, base note length, gate length, mono slide pad, pattern-control latch) are saved separately in config.
+- New project: clears all patterns; optional “Keep device names” and “Keep MIDI settings”; default device color can be preserved.
+- Auto-load last project: toggle in Settings to reload the previous snapshot on startup.
 - Config save/restore: Settings → Save config writes LED levels, clock mode, MIDI selections, UI scale, default colors, and toggles to localStorage; Restore defaults clears localStorage and reverts to factory defaults.
 - Seamless import allows set switching whilst sequencer continues.
 
@@ -126,16 +128,16 @@ Troubleshooting
 - No grid LEDs or input: confirm serialosc is running; replug the grid; the bridge will rediscover every few seconds.
 - No MIDI: confirm WebMIDI permission, select an output per page, and verify OS-level MIDI routing. MDTonal locks to TM-1 unless “Allow non-TM-1 output” is enabled.
 - External clock not advancing: ensure clock source is set to External and a valid input is selected; the app ignores UI start/stop when external clock is active.
-- Browser reload lost patterns: export sets regularly or enable “Auto-load last set.” (Don't worry - this is unlikely!)
+- Browser reload lost patterns: export projects regularly or enable “Auto-load last project.” (Don't worry - this is unlikely!)
 
 API endpoints
 -------------
-- `GET /api/export` → downloads the current set as `.sgridset`.
+- `GET /api/export` → downloads the current project as `.studiogrid`.
 - `GET /api/export-td3?group=G&pattern=P` → downloads TD-3 `.seq`.
 
 Data files
 ----------
-- Sets: `.sgridset` (export/import).
+- Projects: `.studiogrid` (export/import), `.sgridset` (legacy import/export).
 - TD-3: `.seq` files for import/export to/from SynthTribe
 
 Extras & caveats

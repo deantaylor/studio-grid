@@ -2,7 +2,7 @@
 // - launches the existing Node server (server/index.js)
 // - opens a BrowserWindow pointed at the local app
 
-import { app, BrowserWindow, dialog, screen, ipcMain } from "electron";
+import { app, BrowserWindow, dialog, screen, ipcMain, Menu } from "electron";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { promises as fs } from "node:fs";
@@ -23,6 +23,107 @@ let rendererDirty = false;
 const BASE_WIDTH = 1080;
 const BASE_HEIGHT = 690;
 const SETS_DIR_PARTS = ["studio-grid", "sets"];
+
+function buildAppMenu() {
+  const isMac = process.platform === "darwin";
+  const template = [
+    ...(isMac ? [{
+      label: app.name,
+      submenu: [
+        { role: "about" },
+        { type: "separator" },
+        { role: "services" },
+        { type: "separator" },
+        { role: "hide" },
+        { role: "hideOthers" },
+        { role: "unhide" },
+        { type: "separator" },
+        { role: "quit" }
+      ]
+    }] : []),
+    {
+      label: "File",
+      submenu: [
+        {
+          label: "New Project",
+          accelerator: "CommandOrControl+N",
+          click: (_item, win) => win?.webContents.send("app-menu-action", { action: "new-project" })
+        },
+        {
+          label: "Open Project...",
+          accelerator: "CommandOrControl+O",
+          click: (_item, win) => win?.webContents.send("app-menu-action", { action: "load-project" })
+        },
+        {
+          label: "Save Project...",
+          accelerator: "CommandOrControl+S",
+          click: (_item, win) => win?.webContents.send("app-menu-action", { action: "save-project" })
+        },
+        {
+          label: "Save New Project As...",
+          accelerator: "CommandOrControl+Shift+S",
+          click: (_item, win) => win?.webContents.send("app-menu-action", { action: "save-project-as" })
+        },
+        { type: "separator" },
+        {
+          label: "Settings...",
+          accelerator: "CommandOrControl+,",
+          click: (_item, win) => win?.webContents.send("app-menu-action", { action: "settings" })
+        }
+      ]
+    },
+    {
+      label: "Edit",
+      submenu: [
+        {
+          label: "Undo",
+          accelerator: "CommandOrControl+Z",
+          click: (_item, win) => win?.webContents.send("app-undo-redo", { action: "undo" })
+        },
+        {
+          label: "Redo",
+          accelerator: isMac ? "Shift+CommandOrControl+Z" : "CommandOrControl+Y",
+          click: (_item, win) => win?.webContents.send("app-undo-redo", { action: "redo" })
+        },
+        { type: "separator" },
+        { role: "cut" },
+        { role: "copy" },
+        { role: "paste" },
+        ...(isMac ? [{ role: "pasteAndMatchStyle" }] : []),
+        { role: "delete" },
+        { role: "selectAll" }
+      ]
+    },
+    {
+      label: "View",
+      submenu: [
+        { role: "reload" },
+        { role: "forceReload" },
+        { role: "toggleDevTools" },
+        { type: "separator" },
+        { role: "resetZoom" },
+        { role: "zoomIn" },
+        { role: "zoomOut" },
+        { type: "separator" },
+        { role: "togglefullscreen" }
+      ]
+    },
+    {
+      label: "Window",
+      submenu: [
+        { role: "minimize" },
+        { role: "zoom" },
+        ...(isMac ? [
+          { type: "separator" },
+          { role: "front" },
+          { type: "separator" },
+          { role: "window" }
+        ] : [{ role: "close" }])
+      ]
+    }
+  ];
+  return Menu.buildFromTemplate(template);
+}
 
 function clampWindowSize(scale = 1, widthOverride = null, heightOverride = null) {
   const { width: maxW, height: maxH } = screen.getPrimaryDisplay().workAreaSize;
@@ -69,9 +170,9 @@ async function fileExists(filePath) {
 }
 
 async function uniqueFilename(dir, desired) {
-  const clean = path.basename(desired || "Untitled.sgridset");
+  const clean = path.basename(desired || "Untitled.studiogrid");
   const parsed = path.parse(clean);
-  const ext = parsed.ext || ".sgridset";
+  const ext = parsed.ext || ".studiogrid";
   const base = parsed.name || "Untitled";
   let candidate = `${base}${ext}`;
   let idx = 1;
@@ -176,6 +277,7 @@ function createWindow() {
 
 app.whenReady().then(async () => {
   await ensureServer();
+  Menu.setApplicationMenu(buildAppMenu());
   createWindow();
 
   app.on("activate", () => {
@@ -210,7 +312,7 @@ ipcMain.handle("save-set", async (_event, payload) => {
   if (!data || typeof data !== "object") {
     throw new Error("Invalid set data");
   }
-  const requested = typeof payload?.name === "string" ? payload.name : "Untitled.sgridset";
+  const requested = typeof payload?.name === "string" ? payload.name : "Untitled.studiogrid";
   const overwrite = !!payload?.overwrite;
   const setsDir = await ensureSetsDir();
   const name = overwrite ? path.basename(requested) : await uniqueFilename(setsDir, requested);

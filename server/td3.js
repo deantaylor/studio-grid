@@ -516,6 +516,7 @@ function applyTd3PatternParsed(state, parsed, { page, applyMode = "fit_current" 
     micro: 0,
     accent: false,
     slide: false,
+    chain: false,
     tie: false,
     mdSlide: false,
     cc: 0,
@@ -554,13 +555,17 @@ function applyTd3PatternParsed(state, parsed, { page, applyMode = "fit_current" 
     }
     const mapping = mapNoteToScale(src.midiNote, targetScale, pg.transpose);
     lastGateMapping = mapping;
+    const nextSrc = parsedSteps[i + 1];
+    const isLast = i === maxSrc - 1;
+    const slideAllowed = !!src.slide && (isLast || (!!nextSrc && !nextSrc.rest));
     newSteps.push({
       on: true,
       degree: mapping.degree,
       octave: 0,
       micro: 0,
       accent: !!src.accent,
-      slide: !!src.slide,
+      slide: slideAllowed,
+      chain: false,
       tie: false,
       mdSlide: false,
       cc: 0,
@@ -582,7 +587,7 @@ function applyTd3PatternParsed(state, parsed, { page, applyMode = "fit_current" 
     const delta = octaveDeltas[idx];
     if (!delta || !st?.on) return;
     const y = clamp(6 - (st.degree || 0), 0, 6);
-    state.setStepOctave(idx, y, delta, { uiMode: false });
+    state.setStepOctave(idx, y, delta, { uiMode: false, skipChainClear: true });
   });
   state.currentPage = prevPage;
 

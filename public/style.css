@@ -246,7 +246,7 @@ body {
   align-items: center;
   padding: 0;
   gap: var(--spacing-16);
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   background: transparent;
   box-shadow: none;
   top: 0;
@@ -272,16 +272,33 @@ body {
 .top-controls {
   display: flex;
   align-items: center;
-  gap: var(--spacing-16);
-  flex-wrap: wrap;
+  gap: var(--spacing-8);
+  flex: 1;
+  justify-content: flex-start;
+  margin-left: var(--spacing-24);
   font-size: 12px;
+}
+.top-controls .tempo-block,
+.top-controls .swing-block,
+.top-controls .scale-inline {
+  gap: var(--spacing-4);
 }
 
 .scale-inline {
   display: inline-flex;
   align-items: center;
   gap: var(--spacing-4);
-  margin-left: auto;
+  margin-left: 0;
+}
+
+@media (max-width: 900px) {
+  .top-bar {
+    flex-wrap: wrap;
+  }
+  .top-controls {
+    justify-content: flex-start;
+    margin-left: 0;
+  }
 }
 
 .tempo-block.hidden,
@@ -305,7 +322,6 @@ body {
 
 
 .icon-btn,
-.transport button,
 .follow-btn {
   --base: var(--panel);
   border: none;
@@ -319,13 +335,9 @@ body {
   transition: background 0.15s ease, filter 0.15s ease, border-color 0.15s ease;
 }
 .icon-btn {
-  width: 24px;
-  height: 24px;
+  width: 32px;
+  height: 32px;
   padding: var(--spacing-8);
-}
-.transport button {
-  position: relative;
-  padding: var(--spacing-8) var(--spacing-16);
 }
 .follow-btn {
   width: 32px;
@@ -333,6 +345,34 @@ body {
   padding: var(--spacing-8);
   background: transparent;
   color: var(--muted);
+}
+.transport-btn {
+  --base: var(--panel-strong);
+  background: var(--base);
+  border-radius: var(--radius-sm);
+  color: var(--fg);
+  display: inline-flex;
+  align-items: center;
+  gap: var(--spacing-8);
+  height: 32px;
+  padding: 0 var(--spacing-8);
+  position: relative;
+}
+.transport-btn:hover {
+  background: var(--hover);
+}
+.transport-btn.active {
+  --base: var(--fg);
+  color: var(--bg);
+  border-color: var(--border-strong);
+}
+.transport-btn.active:hover {
+  background: var(--fg);
+}
+.transport-label {
+   font-size: 12px;
+  font-weight: 400;
+  line-height: 12px;
 }
 .icon-btn.square { width: 32px; height: 32px; }
 [title="Clear"] { color: var(--danger); }
@@ -365,17 +405,22 @@ body {
   stroke-width: calc(var(--iconoir-stroke-width, 1.8) * 1px) !important;
 }
 .icon-btn i,
-.transport button i,
+.transport-btn i,
 .follow-btn i {
   display: block;
   line-height: 1;
   transform: translateY(1px);
 }
 .icon-btn:hover,
-.transport button:hover,
 .follow-btn:hover,
 .icon-btn i:hover {
   background: var(--hover);
+}
+.transport-btn:hover {
+  background: var(--hover);
+}
+.transport-btn.active:hover {
+  background: var(--fg);
 }
 #export-td3 .iconoir-emoji-blink-left {
   display: none;
@@ -432,7 +477,7 @@ body {
 
 .toggle-btn {
   --base: transparent;
-  height: 24px;
+  height: 32px;
   padding: 0 var(--spacing-8);
   border-radius: var(--radius-sm);
   font-size: 12px;
@@ -455,6 +500,36 @@ body {
   display: flex;
   align-items: center;
   gap: var(--spacing-8);
+}
+.tempo-block {
+  position: relative;
+}
+.tempo-clock-select {
+  position: absolute;
+  top: calc(100% + var(--spacing-4));
+  left: 0;
+  z-index: 20;
+}
+.tempo-clock-select select {
+  width: 96px;
+}
+.transport {
+  margin-left: auto;
+}
+
+.top-controls .label-text {
+  font-size: 9px;
+  letter-spacing: 0.4px;
+  text-transform: uppercase;
+  color: var(--label);
+  background: var(--panel-strong);
+}
+.top-controls input[type="number"],
+.top-controls select {
+  background: var(--input-bg);
+}
+.top-controls input[type="number"] {
+  font-weight: 600;
 }
 
 .tempo-block input {
@@ -670,7 +745,7 @@ label {
   padding: 0;
   background: transparent;
   border-radius: 0;
-  min-height: 24px;
+  min-height: 32px;
   font-size: 8px;
   line-height: 10px;
   font-weight: 400;
@@ -683,7 +758,7 @@ label {
 .label-text {
   display: inline-flex;
   align-items: center;
-  height: 24px;
+  height: 32px;
   padding: 0 var(--spacing-8);
   background: var(--input-bg);
   border-radius: var(--radius-sm);
@@ -692,7 +767,7 @@ label .select-wrap,
 label input:not([type="checkbox"]),
 label select,
 label textarea {
-  height: 24px;
+  height: 32px;
 }
 .device-toolbar label input,
 .device-toolbar label select,
@@ -712,7 +787,7 @@ label .select-wrap {
   width: auto;
 }
 .custom-select-trigger {
-  height: 24px;
+  height: 32px;
   width: 100%;
   padding: 0 var(--spacing-24) 0 var(--spacing-8);
   border: none;
@@ -808,11 +883,15 @@ button {
 }
 
 button { --base: var(--panel); }
+.transport-btn {
+  height: 32px;
+  min-height: 32px;
+}
 input,
 select,
 textarea {
   --base: var(--input-bg);
-  height: 20px;
+  height: 32px;
 
 }
 
@@ -851,7 +930,7 @@ input[type="text"],
 input[type="number"],
 select,
 textarea {
-  height: 24px;
+  height: 32px;
   padding: 0 var(--spacing-8) 0 var(--spacing-8);
   border: none;
   border-radius: var(--radius-sm);
@@ -968,7 +1047,7 @@ textarea { resize: vertical; }
 }
 .transpose-step {
   --base: var(--panel);
-  height: 24px;
+  height: 32px;
   padding: var(--spacing-8);
   background: transparent;
   border: none;
@@ -982,7 +1061,7 @@ textarea { resize: vertical; }
   transition: background 0.15s ease;
 }
 .transpose-value {
-  min-width: 24px;
+  min-width: 32px;
   text-align: center;
   font-weight: 600;
   color: var(--fg);
@@ -1205,8 +1284,8 @@ canvas#grid {
   justify-content: center;
 }
 .bar-row .bar-btn {
-  min-width: 24px;
-  height: 24px;
+  min-width: 32px;
+  height: 32px;
   padding: 0 var(--spacing-8);
   border-radius: var(--radius-sm);
   border: none;
@@ -1249,7 +1328,7 @@ canvas#grid {
   gap: var(--spacing-2);
 }
 .pattern-scale-buttons { display: flex; gap: var(--spacing-4); }
-.pattern-scale-buttons .single { width: 24px; height: 24px; }
+.pattern-scale-buttons .single { width: 32px; height: 32px; }
 .pattern-scale-btn,
 .pattern-length-btn {
   --base: var(--panel-strong);
@@ -1533,8 +1612,8 @@ button.color-swatch:active {
 }
 .note-octave-controls button {
   --base: var(--panel-strong);
-  width: 24px;
-  height: 24px;
+  width: 32px;
+  height: 32px;
   border: none;
   border-radius: var(--radius-sm);
   background: var(--base);
@@ -1547,8 +1626,8 @@ button.color-swatch:active {
 }
 .note-micro-controls button {
   --base: var(--panel-strong);
-  width: 24px;
-  height: 24px;
+  width: 32px;
+  height: 32px;
   border: none;
   border-radius: var(--radius-sm);
   background: var(--base);

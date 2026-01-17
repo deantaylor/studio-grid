@@ -173,6 +173,8 @@ const tabs = document.getElementById("page-tabs");
 const deviceTabProgressCanvas = document.getElementById("device-tab-progress");
 const deviceTabProgressCtx = deviceTabProgressCanvas?.getContext("2d") || null;
 const clockSourceSel = document.getElementById("clock-source");
+const clockSourceTopSel = document.getElementById("clock-source-top");
+const clockSourceTopWrap = document.getElementById("clock-source-top-wrap");
 const clockInputSel = document.getElementById("clock-input");
 const clockToggleBtn = document.getElementById("clock-toggle-btn");
 const clockOutToggle = document.getElementById("clock-out-enable");
@@ -206,6 +208,7 @@ const autoFillToggle = document.getElementById("auto-fill");
 const autoLoadToggle = document.getElementById("auto-load-set");
 const patternControlLatchToggle = document.getElementById("pattern-control-latch");
 const showMonomeControlsToggle = document.getElementById("show-monome-controls");
+const gateLedBoostToggle = document.getElementById("gate-led-boost");
 const monomeControlsWrap = document.getElementById("monome-controls-wrap");
 const mdBaseSweepInput = document.getElementById("md-base-sweep");
 const monoSlidePadInput = document.getElementById("mono-slide-pad");
@@ -914,6 +917,7 @@ const NON_DIRTY_WS_TYPES = new Set([
   "set_auto_fill",
   "set_base_division",
   "set_gate_length",
+  "set_gate_led_boost",
   "set_led_levels",
   "set_pattern_control_latch",
   "set_midi",
@@ -1005,6 +1009,7 @@ let sequencerTypes = Array.from({ length: 9 }, () => "mono");
 let gridConnected = false;
 let fullScaleMode = false;
 let showMonomeControls = true;
+let gateLedBoost = false;
 let gridDevices = [];
 let monomeControlsAvailable = false;
 const LOCAL_CONFIG_KEY = "studio_grid_config";
@@ -1050,6 +1055,7 @@ const lastSentState = {
   autoFillBars: null,
   patternControlLatch: null,
   showMonomeControls: null,
+  gateLedBoost: null,
   baseDivision: null,
   gateLength: null,
   mdSlideParams: { factor: null, curve: null, baseMs: null },
@@ -1066,6 +1072,7 @@ function resetLastSentState() {
   lastSentState.autoFillBars = null;
   lastSentState.patternControlLatch = null;
   lastSentState.showMonomeControls = null;
+  lastSentState.gateLedBoost = null;
   lastSentState.baseDivision = null;
   lastSentState.gateLength = null;
   lastSentState.mdSlideParams = { factor: null, curve: null, baseMs: null };
@@ -1098,6 +1105,10 @@ function updateMonomeControlsAvailability(devices = null) {
 
 function applyMonomeControlsUI() {
   if (showMonomeControlsToggle) showMonomeControlsToggle.checked = !!showMonomeControls;
+}
+
+function applyGateLedBoostUI() {
+  if (gateLedBoostToggle) gateLedBoostToggle.checked = !!gateLedBoost;
 }
 
 function resolveClockInputId(value) {
@@ -1154,6 +1165,13 @@ function sendMonomeControlsIfChanged(enabled) {
   if (lastSentState.showMonomeControls === enabled) return;
   lastSentState.showMonomeControls = enabled;
   ws.send(JSON.stringify({ type: "set_monome_controls", enabled }));
+}
+
+function sendGateLedBoostIfChanged(enabled) {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  if (lastSentState.gateLedBoost === enabled) return;
+  lastSentState.gateLedBoost = enabled;
+  ws.send(JSON.stringify({ type: "set_gate_led_boost", enabled }));
 }
 
 function sendPatternControlToggleFromUI(action) {
@@ -1293,10 +1311,10 @@ function connectWS() {
           const snap = JSON.parse(raw);
           ws.send(JSON.stringify({ type: "import_state", snapshot: snap }));
           appliedLocalSnapshot = true;
-          log("Restoring last saved set");
+          log("Restoring last saved project");
         }
       } catch (e) {
-        console.warn("Failed to load last set", e);
+        console.warn("Failed to load last project", e);
       }
     }
   };
@@ -1413,6 +1431,10 @@ function connectWS() {
       if (typeof msg.follow === "boolean") followEnabled = msg.follow;
       if (typeof msg.autoFill === "boolean") autoFillBars = msg.autoFill;
       if (typeof msg.patternControlLatch === "boolean") patternControlLatch = msg.patternControlLatch;
+      if (typeof msg.gateLedBoost === "boolean") {
+        gateLedBoost = msg.gateLedBoost;
+        applyGateLedBoostUI();
+      }
       if (msg.clockSource) clockSource = msg.clockSource;
       if (typeof msg.clockOut === "boolean") clockOutEnabled = msg.clockOut;
       if (msg.clockOutDevice) clockOutPortId = msg.clockOutDevice;
@@ -1678,7 +1700,7 @@ function connectWS() {
       showToast("Bar copied");
     } else if (msg.type === "export_state") {
       const payload = msg.data || {};
-      const targetName = ensureSetFilename(pendingExportFilename || "Untitled.sgridset");
+      const targetName = ensureSetFilename(pendingExportFilename || "Untitled.studiogrid");
       downloadJSON(payload, targetName);
       currentSetFilename = targetName;
       setName = displaySetName(targetName || setName);
@@ -1747,6 +1769,11 @@ function connectWS() {
       if (typeof msg.length === "number") {
         gateLength = normalizeGateLength(msg.length);
         applyGateLengthUI();
+      }
+    } else if (msg.type === "gate_led_boost") {
+      if (typeof msg.enabled === "boolean") {
+        gateLedBoost = msg.enabled;
+        applyGateLedBoostUI();
       }
     }
   };
@@ -1897,10 +1924,12 @@ function setRunningState(isRunning) {
   const transportBtn = document.getElementById("transport-toggle");
   if (transportBtn) {
     const icon = transportBtn.querySelector("i");
+    const label = transportBtn.querySelector(".transport-label");
     transportBtn.title = running ? "Stop" : "Play";
     transportBtn.setAttribute("aria-pressed", running);
     transportBtn.classList.toggle("active", running);
     if (icon) icon.className = running ? "iconoir-pause-solid" : "iconoir-play-solid";
+    if (label) label.textContent = running ? "Stop" : "Play";
   }
   if (running) {
     startDeviceTabProgressLoop();
@@ -2542,11 +2571,13 @@ if (tempoInput) {
   };
 }
 if (tempoLabelTop) {
-  tempoLabelTop.onclick = () => {
-    if (!swingBlock || !tempoBlock) return;
-    tempoBlock.classList.add("hidden");
-    swingBlock.classList.remove("hidden");
-    if (swingInput) swingInput.focus();
+  tempoLabelTop.onclick = (event) => {
+    if (!clockSourceTopWrap) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const isHidden = clockSourceTopWrap.classList.contains("hidden");
+    clockSourceTopWrap.classList.toggle("hidden", !isHidden);
+    if (isHidden && clockSourceTopSel) clockSourceTopSel.focus();
   };
 }
 
@@ -2579,18 +2610,21 @@ if (settingsTempoInput) {
   };
 }
 if (swingLabelTop) {
-  swingLabelTop.onclick = () => {
-    if (!swingBlock || !tempoBlock) return;
-    swingBlock.classList.add("hidden");
-    tempoBlock.classList.remove("hidden");
-    if (tempoInput) tempoInput.focus();
-  };
+  swingLabelTop.onclick = null;
 }
 const transportToggle = document.getElementById("transport-toggle");
 if (transportToggle) {
   transportToggle.onclick = toggleTransport;
   setRunningState(running);
 }
+
+document.addEventListener("click", (event) => {
+  if (!clockSourceTopWrap || clockSourceTopWrap.classList.contains("hidden")) return;
+  if (clockSourceTopWrap.contains(event.target) || tempoLabelTop?.contains(event.target)) {
+    return;
+  }
+  clockSourceTopWrap.classList.add("hidden");
+});
 
 function handleClockSourceChange(prev, next) {
   if (prev === next) return;
@@ -2618,53 +2652,45 @@ function handleClockSourceChange(prev, next) {
   panicAll();
 }
 
+function updateClockSource(next) {
+  const prev = clockSource;
+  if (prev === next) return;
+  clockSource = next;
+  handleClockSourceChange(prev, next);
+  sendClockSourceIfChanged(next);
+  if (prev === "external" && next === "internal") {
+    lockTempoPrecision({ broadcast: true });
+  }
+  applyClockSourceUI();
+  if (clockSource === "external" && clockInputSel && clockInputSel.value) {
+    const resolved = resolveClockInputId(clockInputSel.value);
+    if (resolved) {
+      clockInputId = resolved;
+      sendClockInputIfChanged(clockInputId);
+      attachClockInput(clockInputId);
+    }
+  }
+  if (clockSource !== "external") {
+    externalArmed = false;
+    ws?.readyState === WebSocket.OPEN && ws.send(JSON.stringify({ type: "set_external_arm", enabled: false }));
+  }
+}
+
 if (clockToggleBtn) {
   clockToggleBtn.onclick = () => {
-    const prev = clockSource;
-    const next = prev === "external" ? "internal" : "external";
-    clockSource = next;
-    handleClockSourceChange(prev, next);
-    sendClockSourceIfChanged(next);
-    if (prev === "external" && next === "internal") {
-      lockTempoPrecision({ broadcast: true });
-    }
-    applyClockSourceUI();
-    if (clockSource === "external" && clockInputSel && clockInputSel.value) {
-      const resolved = resolveClockInputId(clockInputSel.value);
-      if (resolved) {
-        clockInputId = resolved;
-        sendClockInputIfChanged(clockInputId);
-        attachClockInput(clockInputId);
-      }
-    }
-    if (clockSource !== "external") {
-      externalArmed = false;
-      ws?.readyState === WebSocket.OPEN && ws.send(JSON.stringify({ type: "set_external_arm", enabled: false }));
-    }
+    const next = clockSource === "external" ? "internal" : "external";
+    updateClockSource(next);
   };
 }
 if (clockSourceSel) {
   clockSourceSel.onchange = () => {
-    const prev = clockSource;
-    clockSource = clockSourceSel.value;
-    handleClockSourceChange(prev, clockSource);
-    sendClockSourceIfChanged(clockSource);
-    if (prev === "external" && clockSource === "internal") {
-      lockTempoPrecision({ broadcast: true });
-    }
-    applyClockSourceUI();
-    if (clockSource === "external" && clockInputSel && clockInputSel.value) {
-      const resolved = resolveClockInputId(clockInputSel.value);
-      if (resolved) {
-        clockInputId = resolved;
-        sendClockInputIfChanged(clockInputId);
-        attachClockInput(clockInputId);
-      }
-    }
-    if (clockSource !== "external") {
-      externalArmed = false;
-      ws?.readyState === WebSocket.OPEN && ws.send(JSON.stringify({ type: "set_external_arm", enabled: false }));
-    }
+    updateClockSource(clockSourceSel.value);
+  };
+}
+if (clockSourceTopSel) {
+  clockSourceTopSel.onchange = () => {
+    updateClockSource(clockSourceTopSel.value);
+    if (clockSourceTopWrap) clockSourceTopWrap.classList.add("hidden");
   };
 }
 
@@ -2680,6 +2706,7 @@ if (clockInputSel) {
 
 function applyClockSourceUI() {
   if (clockSourceSel) clockSourceSel.value = clockSource || "internal";
+  if (clockSourceTopSel) clockSourceTopSel.value = clockSource || "internal";
   const wrap = document.getElementById("clock-source-wrap");
   if (wrap) wrap.classList.remove("hidden"); // keep clock input visible for both sources
   if (clockToggleBtn) {
@@ -3307,7 +3334,7 @@ if (td3ReplaceConfirm) {
 document.getElementById("import").onclick = () => {
   const picker = document.createElement("input");
   picker.type = "file";
-  picker.accept = "application/json,.json,.sgridset";
+  picker.accept = "application/json,.json,.sgridset,.studiogrid";
   picker.onchange = () => {
     const file = picker.files?.[0];
     if (!file) return;
@@ -3363,6 +3390,7 @@ function syncSettingsInputs() {
   if (autoLoadToggle) autoLoadToggle.checked = !!autoLoadSet;
   if (patternControlLatchToggle) patternControlLatchToggle.checked = !!patternControlLatch;
   if (showMonomeControlsToggle) showMonomeControlsToggle.checked = !!showMonomeControls;
+  if (gateLedBoostToggle) gateLedBoostToggle.checked = !!gateLedBoost;
   if (mdBaseSweepInput) mdBaseSweepInput.value = mdBaseSweep;
   if (monoSlidePadInput) monoSlidePadInput.value = Math.round((monoSlidePad || 0) * 100);
   if (baseNoteLenSel) applyBaseNoteLenUI();
@@ -3443,6 +3471,13 @@ function applySettingsFromInputs() {
     if (showMonomeControls !== next) {
       showMonomeControls = next;
       sendMonomeControlsIfChanged(showMonomeControls);
+    }
+  }
+  if (gateLedBoostToggle) {
+    const next = !!gateLedBoostToggle.checked;
+    if (gateLedBoost !== next) {
+      gateLedBoost = next;
+      sendGateLedBoostIfChanged(gateLedBoost);
     }
   }
   if (baseNoteLenSel) {
@@ -3571,6 +3606,12 @@ function setSettingsTab(panelId) {
       sendMonomeControlsIfChanged(showMonomeControls);
     };
   }
+  if (gateLedBoostToggle) {
+    gateLedBoostToggle.onchange = () => {
+      gateLedBoost = !!gateLedBoostToggle.checked;
+      sendGateLedBoostIfChanged(gateLedBoost);
+    };
+  }
   if (mdBaseSweepInput) {
     const commitBaseSweep = () => {
       const val = Math.max(20, Math.min(200, Math.round(Number(mdBaseSweepInput.value) || mdBaseSweep)));
@@ -3629,6 +3670,7 @@ if (settingsSaveCfg) {
         midiSettings,
         patternControlLatch,
         showMonomeControls,
+        gateLedBoost,
         defaultDeviceColor,
         multiColorDefault,
         defaultUsesMainWhite,
@@ -3667,6 +3709,9 @@ if (settingsRestoreCfg) {
     showMonomeControls = true;
     applyMonomeControlsUI();
     sendMonomeControlsIfChanged(showMonomeControls);
+    gateLedBoost = false;
+    applyGateLedBoostUI();
+    sendGateLedBoostIfChanged(gateLedBoost);
     ledLevels = { ...DEFAULT_LED_LEVELS };
     applyLedSettingsUI();
     sendLedLevelsIfChanged(ledLevels);
@@ -3738,16 +3783,16 @@ function deriveSetNameFromFilename(filename) {
 
 function ensureSetFilename(name) {
   const raw = String(name || "").trim();
-  if (!raw) return "Untitled.sgridset";
+  if (!raw) return "Untitled.studiogrid";
   const cleaned = raw.replace(/[\\/:*?"<>|]+/g, "-");
-  if (/\.(sgridset|json)$/i.test(cleaned)) return cleaned;
-  return `${cleaned}.sgridset`;
+  if (/\.(studiogrid|sgridset|json)$/i.test(cleaned)) return cleaned;
+  return `${cleaned}.studiogrid`;
 }
 
 function displaySetName(name) {
   const raw = String(name || "").trim();
   if (!raw) return "Untitled";
-  return raw.replace(/\.(sgridset|json)$/i, "") || "Untitled";
+  return raw.replace(/\.(studiogrid|sgridset|json)$/i, "") || "Untitled";
 }
 
 function setDirty(next) {
@@ -3843,6 +3888,31 @@ function performRedo() {
   applySnapshotFromHistory(next);
 }
 
+if (window.electronAPI?.onAppUndoRedo) {
+  window.electronAPI.onAppUndoRedo((payload) => {
+    if (isTypingTarget(document.activeElement)) return;
+    if (payload?.action === "undo") performUndo();
+    if (payload?.action === "redo") performRedo();
+  });
+}
+
+if (window.electronAPI?.onAppMenuAction) {
+  window.electronAPI.onAppMenuAction((payload) => {
+    const action = payload?.action;
+    if (action === "new-project") {
+      newSetBtn?.click();
+    } else if (action === "load-project") {
+      document.getElementById("import")?.click();
+    } else if (action === "save-project") {
+      openSaveSetModal();
+    } else if (action === "save-project-as") {
+      saveProjectAsNew();
+    } else if (action === "settings") {
+      settingsBtn?.click();
+    }
+  });
+}
+
 function shouldMarkDirty(msg) {
   if (!msg || typeof msg !== "object") return false;
   const type = msg.type;
@@ -3918,8 +3988,8 @@ async function saveSnapshotToHandle(handle) {
   currentSetFilename = handle.name || currentSetFilename;
   setName = displaySetName(currentSetFilename || setName);
   updateSetTitle(setName);
-  showToast("Set saved");
-  log("Saved current set");
+  showToast("Project saved");
+  log("Saved current project");
   setDirty(false);
   return true;
 }
@@ -3930,7 +4000,7 @@ async function saveSnapshotToElectron(name, { overwrite = false } = {}) {
   if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
   const data = await resp.json();
   const payload = data.data || data;
-  const targetName = ensureSetFilename(name || "Untitled.sgridset");
+  const targetName = ensureSetFilename(name || "Untitled.studiogrid");
   const result = await window.electronAPI.saveSet({ name: targetName, data: payload, overwrite });
   if (result?.filename) {
     currentSetFilename = result.filename;
@@ -3938,22 +4008,22 @@ async function saveSnapshotToElectron(name, { overwrite = false } = {}) {
     setName = displaySetName(result.filename || setName);
     updateSetTitle(setName);
   }
-  showToast("Set saved");
-  log("Saved current set");
+  showToast("Project saved");
+  log("Saved current project");
   setDirty(false);
   return true;
 }
 
 async function requestSaveHandle(defaultName) {
   if (!window.showSaveFilePicker) return null;
-  const suggested = ensureSetFilename(defaultName || "Untitled.sgridset");
+  const suggested = ensureSetFilename(defaultName || "Untitled.studiogrid");
   return window.showSaveFilePicker({
     suggestedName: suggested,
     types: [
       {
-        description: "studio grid Set",
+        description: "studio grid Project",
         accept: {
-          "application/json": [".sgridset"]
+          "application/json": [".studiogrid", ".sgridset"]
         }
       }
     ],
@@ -3962,7 +4032,7 @@ async function requestSaveHandle(defaultName) {
 }
 
 function startExport(name) {
-  const targetName = ensureSetFilename(name || "Untitled.sgridset");
+  const targetName = ensureSetFilename(name || "Untitled.studiogrid");
   setName = displaySetName(targetName || setName);
   updateSetTitle(setName);
   pendingExportFilename = targetName;
@@ -3980,7 +4050,7 @@ function startExport(name) {
       updateSetTitle(setName);
       pendingExportFilename = null;
       setDirty(false);
-      log("Exported set");
+      log("Exported project");
     })
     .catch(() => {
       if (ws?.readyState === WebSocket.OPEN) {
@@ -4008,30 +4078,60 @@ function openConfirmDialog(message, onConfirm) {
   dialogModal.classList.remove("hidden");
 }
 
+function saveProjectAsNew() {
+  const suggested = setName && setName.toLowerCase() !== "default" ? setName : "Untitled";
+  if (hasElectronSave) {
+    openSaveNameModal(suggested).then((name) => {
+      if (!name) return;
+      saveSnapshotToElectron(name, { overwrite: false }).catch(() => {
+        showToast("Save failed");
+        log("Save failed");
+      });
+    });
+    return;
+  }
+  if (window.showSaveFilePicker) {
+    requestSaveHandle(suggested)
+      .then((handle) => {
+        if (handle?.name) {
+          currentSetFilename = handle.name;
+          setName = displaySetName(handle.name || setName);
+          updateSetTitle(setName);
+        }
+        return saveSnapshotToHandle(handle);
+      })
+      .catch(() => {
+        log("Save canceled");
+      });
+    return;
+  }
+  startExport(suggested);
+}
+
 function openSaveSetModal() {
   if (!saveSetModal) {
     if (hasElectronSave) {
-      saveSnapshotToElectron(currentSetFilename || "Untitled.sgridset", { overwrite: true }).catch(() => {
+      saveSnapshotToElectron(currentSetFilename || "Untitled.studiogrid", { overwrite: true }).catch(() => {
         showToast("Save failed");
         log("Save failed");
       });
       return;
     }
-    startExport(currentSetFilename || "Untitled.sgridset");
+    startExport(currentSetFilename || "Untitled.studiogrid");
     return;
   }
-  const display = displaySetName(currentSetFilename || "Untitled.sgridset");
+  const display = displaySetName(currentSetFilename || "Untitled.studiogrid");
   if (saveSetMessage) {
-    saveSetMessage.textContent = `Save current set as "${display}"?`;
+    saveSetMessage.textContent = `Save current project as "${display}"?`;
   }
   saveSetModal.classList.remove("hidden");
   if (saveSetCurrent) {
     saveSetCurrent.onclick = () => {
       saveSetModal.classList.add("hidden");
-      const target = displaySetName(currentSetFilename || "Untitled.sgridset");
+      const target = displaySetName(currentSetFilename || "Untitled.studiogrid");
       openConfirmDialog(`Are you sure you want to save over "${target}"?`, () => {
         if (hasElectronSave) {
-          saveSnapshotToElectron(currentSetFilename || `${target}.sgridset`, { overwrite: true }).catch(() => {
+          saveSnapshotToElectron(currentSetFilename || `${target}.studiogrid`, { overwrite: true }).catch(() => {
             showToast("Save failed");
             log("Save failed");
           });
@@ -4043,7 +4143,7 @@ function openSaveSetModal() {
             log("Save failed");
           });
         } else if (window.showSaveFilePicker) {
-          requestSaveHandle(currentSetFilename || `${target}.sgridset`)
+          requestSaveHandle(currentSetFilename || `${target}.studiogrid`)
             .then((handle) => {
               if (handle?.name) {
                 currentSetFilename = handle.name;
@@ -4056,7 +4156,7 @@ function openSaveSetModal() {
               log("Save canceled");
             });
         } else {
-          startExport(currentSetFilename || "Untitled.sgridset");
+          startExport(currentSetFilename || "Untitled.studiogrid");
         }
       });
     };
@@ -4064,33 +4164,7 @@ function openSaveSetModal() {
   if (saveSetNew) {
     saveSetNew.onclick = () => {
       saveSetModal.classList.add("hidden");
-      const suggested = setName && setName.toLowerCase() !== "default" ? setName : "Untitled";
-      if (hasElectronSave) {
-        openSaveNameModal(suggested).then((name) => {
-          if (!name) return;
-          saveSnapshotToElectron(name, { overwrite: false }).catch(() => {
-            showToast("Save failed");
-            log("Save failed");
-          });
-        });
-        return;
-      }
-      if (window.showSaveFilePicker) {
-        requestSaveHandle(suggested)
-          .then((handle) => {
-            if (handle?.name) {
-              currentSetFilename = handle.name;
-              setName = displaySetName(handle.name || setName);
-              updateSetTitle(setName);
-            }
-            return saveSnapshotToHandle(handle);
-          })
-          .catch(() => {
-            log("Save canceled");
-          });
-      } else {
-        startExport(suggested);
-      }
+      saveProjectAsNew();
     };
   }
   if (saveSetCancel) {
@@ -4646,17 +4720,16 @@ function applySeqTypeUI({ deferFrame = false } = {}) {
 function applyPatternLauncherTypeUI() {
   if (!seqTypeWrap || !patternLauncherType) return;
   const showLauncher = activeUiPage === 0;
+  const type = sequencerTypes[currentPage] || "mono";
   seqTypeWrap.classList.toggle("hidden", showLauncher);
   patternLauncherType.classList.toggle("hidden", !showLauncher);
   if (patternToolbar) patternToolbar.classList.toggle("hidden", showLauncher);
   if (scaleNotesWrap) {
-    const type = sequencerTypes[currentPage] || "mono";
     const showScaleNotes = type === "mono" || type === "poly" || type === "mdtonal" || type === "cc";
     scaleNotesWrap.classList.toggle("hidden", showLauncher || !showScaleNotes);
   }
   const transposeWrap = document.querySelector(".transpose-switch");
   if (transposeWrap) {
-    const type = sequencerTypes[currentPage] || "mono";
     transposeWrap.classList.toggle("hidden", showLauncher || type === "cc");
   }
   if (midiSel) {
@@ -4666,6 +4739,14 @@ function applyPatternLauncherTypeUI() {
   if (midiChan) {
     const chanLabel = midiChan.closest("label");
     if (chanLabel) chanLabel.classList.toggle("hidden", showLauncher);
+  }
+  const mdWrap = document.getElementById("md-config");
+  if (mdWrap) mdWrap.classList.toggle("hidden", showLauncher || type !== "mdtonal");
+  const ccWrap = document.getElementById("cc-config");
+  if (ccWrap) ccWrap.classList.toggle("hidden", showLauncher || type !== "cc");
+  if (exportTd3Btn) {
+    if (showLauncher) exportTd3Btn.classList.add("hidden");
+    else updateTd3ExportVisibility();
   }
   const disableControls = (el) => {
     if (!el) return;
@@ -6663,6 +6744,10 @@ function loadSavedConfig() {
     showMonomeControls = parsed.showMonomeControls;
     applyMonomeControlsUI();
   }
+  if (typeof parsed.gateLedBoost === "boolean") {
+    gateLedBoost = parsed.gateLedBoost;
+    applyGateLedBoostUI();
+  }
   if (typeof parsed.autoLoadSet === "boolean" && autoLoadToggle) {
     autoLoadToggle.checked = parsed.autoLoadSet;
     autoLoadSet = parsed.autoLoadSet;
@@ -6780,6 +6865,11 @@ function pushSavedConfigToServer(opts = {}) {
     showMonomeControls = !!cachedConfig.showMonomeControls;
     applyMonomeControlsUI();
     sendMonomeControlsIfChanged(showMonomeControls);
+  }
+  if (typeof cachedConfig.gateLedBoost === "boolean") {
+    gateLedBoost = !!cachedConfig.gateLedBoost;
+    applyGateLedBoostUI();
+    sendGateLedBoostIfChanged(gateLedBoost);
   }
   if (Array.isArray(cachedConfig.midiSettings)) {
     cachedConfig.midiSettings.forEach((m, idx) => {
@@ -7013,7 +7103,7 @@ if (newSetBtn && newSetModal) {
         resetMidiSettings();
       }
       closeNewSetModal();
-      showToast("Started new set");
+      showToast("Started new project");
     };
   }
 }
@@ -7142,8 +7232,8 @@ function openSaveNameModal(defaultName) {
     renameMode = "set_name";
     const display = displaySetName(defaultName || "Untitled");
     configureRenameModal({
-      title: "Save Set As",
-      label: "Set name",
+      title: "Save Project As",
+      label: "Project name",
       maxLength: 40,
       inputMode: "",
       value: display

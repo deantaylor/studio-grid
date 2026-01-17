@@ -25,7 +25,7 @@ const server = http.createServer(async (req, res) => {
   if (url.pathname === "/api/export") {
     const payload = buildExportPayload();
     const json = JSON.stringify(payload, null, 2);
-    res.writeHead(200, { "Content-Type": "application/x-sgridset" });
+    res.writeHead(200, { "Content-Type": "application/x-studiogrid" });
     res.end(json);
     return;
   }
@@ -98,7 +98,7 @@ let clockOutDevice = ""; // MIDI clock out target (id/name hint)
 let lastGridDevices = serial.deviceList?.() || [];
 updateFullScaleMode(lastGridDevices);
 // LED throttling to avoid flooding monome / browser
-const LED_MIN_INTERVAL = 40; // ~25fps
+const LED_MIN_INTERVAL = 16; // ~60fps
 const SLIDE_ANIM_INTERVAL = LED_MIN_INTERVAL; // reuse LED cadence for slide animation
 let pendingLedFrame = null;
 let ledTimer = null;
@@ -338,6 +338,7 @@ function broadcastState(ws = null) {
     swing: state.swing,
     baseDivision: state.baseDivision,
     gateLength: state.gateLength,
+    gateLedBoost: !!state.gateLedBoost,
     midi: state.midi,
     currentPage: state.currentPage,
     scale: state.scale,
@@ -498,6 +499,13 @@ function handleClientMessage(ws, data) {
       {
         state.setGateLength(data.length);
         broadcast({ type: "gate_length", length: state.gateLength });
+      }
+      break;
+    case "set_gate_led_boost":
+      {
+        state.gateLedBoost = !!data.enabled;
+        broadcast({ type: "gate_led_boost", enabled: state.gateLedBoost });
+        renderAndPush();
       }
       break;
     case "set_pattern_control_latch":
@@ -1215,11 +1223,11 @@ function broadcastBarPlayhead(page, pattern, bar) {
 
 // DO NOT CHANGE LOGIC: monome LED frame generation + serialosc output pipeline.
 function manageLedAnimation(forceStop = false) {
-  const shouldRun = !forceStop && (state.hasSlidePairs() || state.hasOctaveShifts());
+  const shouldRun = !forceStop && (state.hasSlidePairs() || state.hasWaveChains() || state.hasOctaveShifts());
   if (shouldRun) {
     if (slideAnimTimer) return;
     slideAnimTimer = setInterval(() => {
-      if (!(state.hasSlidePairs() || state.hasOctaveShifts())) {
+      if (!(state.hasSlidePairs() || state.hasWaveChains() || state.hasOctaveShifts())) {
         manageLedAnimation(true);
         return;
       }
