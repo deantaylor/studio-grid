@@ -993,6 +993,91 @@ export class SGridState {
     return events.length ? events : null;
   }
 
+  createChainFromSelection(steps = [], opts = {}) {
+    const pat = this.getPattern();
+    const page = this.pages[this.currentPage];
+    const seqType = page?.sequencerType || "mono";
+    const uiMode = !!opts.uiMode;
+    if (!pat) return { ok: false, reason: "no_pattern" };
+    if (!(seqType === "mono" || seqType === "poly")) return { ok: false, reason: "seq_type" };
+    if (!Array.isArray(steps) || steps.length < 2) return { ok: false, reason: "steps" };
+    const bar = pat.barView || 0;
+    const len = Math.max(1, pat.length_steps || 16);
+    const seen = new Set();
+    let degree = null;
+    let octave = null;
+    let startX = Infinity;
+    let endX = -Infinity;
+    for (const item of steps) {
+      const x = Number(item?.x);
+      const y = Number(item?.y);
+      if (!Number.isFinite(x) || !Number.isFinite(y)) return { ok: false, reason: "steps" };
+      const key = `${x}:${y}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const rowInfo = this.getRowInfo(y, { uiMode });
+      if (!rowInfo?.stepRow) return { ok: false, reason: "row" };
+      if (degree == null) degree = rowInfo.degree;
+      if (degree !== rowInfo.degree) return { ok: false, reason: "degree" };
+      const abs = x + bar * 16;
+      if (abs < 0 || abs >= len) return { ok: false, reason: "range" };
+      const step = pat.steps[abs];
+      if (!step?.on) return { ok: false, reason: "off" };
+      if (!this.noteMatchesRow(step, rowInfo.degree, seqType, rowInfo)) return { ok: false, reason: "note" };
+      const stepOct = seqType === "poly" ? this.getNoteOctave(step, rowInfo.degree) : (step.octave || 0);
+      if (octave == null) octave = stepOct;
+      if (octave !== stepOct) return { ok: false, reason: "octave" };
+      startX = Math.min(startX, x);
+      endX = Math.max(endX, x);
+    }
+    if (!Number.isFinite(startX) || !Number.isFinite(endX)) return { ok: false, reason: "steps" };
+    const expected = endX - startX + 1;
+    if (seen.size !== expected) return { ok: false, reason: "gap" };
+    for (let cx = startX; cx < endX; cx++) {
+      const abs = cx + bar * 16;
+      const step = pat.steps[abs];
+      if (!step) continue;
+      if (seqType === "poly") {
+        if (!step.noteSlides || typeof step.noteSlides !== "object") step.noteSlides = {};
+        step.noteSlides[degree] = true;
+        step.slide = false;
+        if (Array.isArray(step.accented)) {
+          step.accented = step.accented.filter((n) => n !== degree);
+        }
+      } else {
+        step.chain = true;
+        step.slide = false;
+        step.tie = false;
+        step.accent = false;
+      }
+    }
+    const endAbs = endX + bar * 16;
+    const endStep = pat.steps[endAbs];
+    if (seqType === "poly") {
+      if (endStep?.noteSlides && Object.prototype.hasOwnProperty.call(endStep.noteSlides, degree)) {
+        delete endStep.noteSlides[degree];
+      }
+      if (endStep) {
+        endStep.slide = false;
+        if (Array.isArray(endStep.accented)) {
+          endStep.accented = endStep.accented.filter((n) => n !== degree);
+        }
+      }
+      for (let idx = endAbs + 1; idx < len; idx++) {
+        const tailStep = pat.steps[idx];
+        if (!tailStep?.on || !Array.isArray(tailStep.notes) || !tailStep.notes.includes(degree)) break;
+        if (!tailStep.noteSlides || !Object.prototype.hasOwnProperty.call(tailStep.noteSlides, degree)) break;
+        delete tailStep.noteSlides[degree];
+      }
+    } else if (endStep) {
+      if (endStep.chain) endStep.chain = false;
+      endStep.slide = false;
+      endStep.tie = false;
+      endStep.accent = false;
+    }
+    return { ok: true };
+  }
+
   handleGridKey(x, y, s, opts = {}) {
     const forcePatternControl = !!opts.forcePatternControl;
     const uiMode = !!opts.uiMode;

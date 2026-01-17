@@ -689,6 +689,7 @@ let menuTargetPage = null;
 const noteMenu = document.getElementById("note-menu");
 const noteMenuAccent = document.getElementById("note-menu-accent");
 const noteMenuSlide = document.getElementById("note-menu-slide");
+const noteMenuChain = document.getElementById("note-menu-chain");
 const selectionRect = document.getElementById("selection-rect");
 const gridWrap = document.querySelector(".grid-wrap");
 const gridPanel = document.querySelector(".grid-panel");
@@ -5029,6 +5030,40 @@ function applySelectionToggle(target, kind, nextVal) {
   renderFrameIfReady();
 }
 
+function getChainSelectionForMenu(target) {
+  const selection = selectionByPage[currentPage];
+  const infoMap = selectionInfoByPage[currentPage];
+  if (!selection || !infoMap || selection.size < 2) return null;
+  if (target && !selection.has(cellKey(target.x, target.y))) return null;
+  const seqType = sequencerTypes[currentPage] || "mono";
+  if (!(seqType === "mono" || seqType === "poly")) return null;
+  const items = [];
+  selection.forEach((key) => {
+    const info = infoMap.get(key);
+    if (!info?.on) return;
+    const { x, y } = parseCellKey(key);
+    items.push({ x, y, info });
+  });
+  if (items.length !== selection.size) return null;
+  const first = items[0];
+  const degree = first?.info?.degree;
+  const octave = Number.isFinite(first?.info?.octave) ? first.info.octave : 0;
+  if (degree == null) return null;
+  for (const item of items) {
+    if (item.info.seqType !== seqType) return null;
+    if (item.info.degree !== degree) return null;
+    const itemOct = Number.isFinite(item.info.octave) ? item.info.octave : 0;
+    if (itemOct !== octave) return null;
+  }
+  const xs = items.map((item) => item.x);
+  const uniqueX = new Set(xs);
+  if (uniqueX.size !== items.length) return null;
+  const minX = Math.min(...xs);
+  const maxX = Math.max(...xs);
+  if (items.length !== (maxX - minX + 1)) return null;
+  return { steps: items.map(({ x, y }) => ({ x, y })) };
+}
+
 function isPlayableCell(hit) {
   return hit?.inBounds && hit.inCell && hit.y >= 0 && hit.y < getStepRows();
 }
@@ -6030,15 +6065,18 @@ function handleStepStateMessage(msg) {
     if (!msg.on) {
       closeNoteMenu();
     } else {
+      const chainRequest = getChainSelectionForMenu({ x: msg.x, y: msg.y });
       noteMenuTarget = {
         x: msg.x,
         y: msg.y,
         accent: !!msg.accent,
         slide: !!msg.slide,
         canSlide: !!msg.canSlide,
-        canAccent: !!msg.canAccent
+        canAccent: !!msg.canAccent,
+        canChain: !!chainRequest,
+        chainSteps: chainRequest?.steps || null
       };
-      openNoteMenu(clientX, clientY, msg);
+      openNoteMenu(clientX, clientY, { ...msg, canChain: !!chainRequest });
     }
     return;
   }
@@ -7436,6 +7474,11 @@ function openNoteMenu(x, y, info = {}) {
       noteMenuSlide.textContent = info.slide ? "Turn off Slide" : "Slide";
     }
   }
+  if (noteMenuChain) {
+    const showChain = !!info.canChain;
+    noteMenuChain.classList.toggle("hidden", !showChain);
+    noteMenuChain.disabled = !showChain;
+  }
   noteMenu.style.left = `${left}px`;
   noteMenu.style.top = `${top}px`;
   noteMenu.classList.remove("hidden");
@@ -7524,6 +7567,17 @@ if (noteMenuSlide) {
     if (!noteMenuTarget || !noteMenuTarget.canSlide) return closeNoteMenu();
     const next = !noteMenuTarget.slide;
     applySelectionToggle(noteMenuTarget, "slide", next);
+    closeNoteMenu();
+  };
+}
+if (noteMenuChain) {
+  noteMenuChain.onclick = () => {
+    if (!noteMenuTarget || !noteMenuTarget.canChain || !noteMenuTarget.chainSteps?.length) {
+      return closeNoteMenu();
+    }
+    if (ws?.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: "create_chain", steps: noteMenuTarget.chainSteps }));
+    }
     closeNoteMenu();
   };
 }

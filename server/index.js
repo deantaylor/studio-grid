@@ -452,6 +452,14 @@ function handleClientMessage(ws, data) {
         }
       }
       break;
+    case "create_chain":
+      {
+        const res = state.createChainFromSelection(data.steps, { uiMode: fullScaleMode });
+        if (res?.ok) {
+          renderAndPush();
+        }
+      }
+      break;
     case "set_step_octave":
       {
         const res = state.setStepOctave(data.x, data.y, data.delta, { uiMode: fullScaleMode });
