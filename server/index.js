@@ -217,6 +217,8 @@ function dispatchGridEvents(events) {
       broadcastPatternLength(ev.page, ev.pattern);
     } else if (ev.type === "pattern_status") {
       broadcastPatternStatus(ev.page || state.currentPage);
+    } else if (ev.type === "isomorphic_mode") {
+      broadcast({ type: "isomorphic_mode", page: ev.page, enabled: !!ev.enabled });
     }
   });
 }
@@ -373,7 +375,9 @@ function broadcastState(ws = null) {
     gridConnected,
     fullScaleMode,
     showMonomeControls,
-    devices: lastGridDevices
+    devices: lastGridDevices,
+    isomorphicModes: state.isomorphicModes,
+    isomorphicLayout: state.isomorphicLayout
   });
   if (ws) {
     ws.send(msg);
@@ -399,6 +403,25 @@ function handleClientMessage(ws, data) {
         dispatchGridEvents(events);
       }
       maybeBroadcastPage();
+      renderAndPush();
+      break;
+    case "set_isomorphic_mode":
+      {
+        const page = Number.isFinite(data.page) ? data.page : state.currentPage;
+        const res = state.setIsomorphicMode(page, !!data.enabled);
+        if (res !== false) {
+          dispatchGridEvents([{ type: "isomorphic_mode", page, enabled: state.isIsomorphicMode(page) }]);
+        }
+      }
+      renderAndPush();
+      break;
+    case "set_isomorphic_layout":
+      {
+        const res = state.setIsomorphicLayout(data.layout || data);
+        if (res !== false) {
+          broadcast({ type: "isomorphic_layout", layout: state.isomorphicLayout });
+        }
+      }
       renderAndPush();
       break;
     case "get_step_state":
@@ -535,8 +558,15 @@ function handleClientMessage(ws, data) {
       broadcastTempo();
       break;
     case "set_scale":
-      state.setScale(data.root, data.mode);
-      broadcast({ type: "scale", scale: state.scale });
+      {
+        const prevLayout = state.isomorphicLayout ? { ...state.isomorphicLayout } : null;
+        state.setScale(data.root, data.mode);
+        broadcast({ type: "scale", scale: state.scale });
+        const nextLayout = state.isomorphicLayout;
+        if (!prevLayout || prevLayout.base !== nextLayout.base || prevLayout.stepX !== nextLayout.stepX || prevLayout.stepY !== nextLayout.stepY) {
+          broadcast({ type: "isomorphic_layout", layout: nextLayout });
+        }
+      }
       break;
     case "set_swing":
       state.setSwing(data.swing);

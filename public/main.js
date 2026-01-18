@@ -213,6 +213,10 @@ const monomeControlsWrap = document.getElementById("monome-controls-wrap");
 const mdBaseSweepInput = document.getElementById("md-base-sweep");
 const monoSlidePadInput = document.getElementById("mono-slide-pad");
 const uiScaleSel = document.getElementById("ui-scale");
+const isoBaseInput = document.getElementById("iso-base-note");
+const isoBaseLabel = document.getElementById("iso-base-label");
+const isoStepXInput = document.getElementById("iso-step-x");
+const isoStepYInput = document.getElementById("iso-step-y");
 const ledInputs = {
   step_on: document.getElementById("led-step-on"),
   step_micro: document.getElementById("led-step-micro"),
@@ -517,10 +521,16 @@ const SCALE_STEPS = {
   locrian: [0, 1, 3, 5, 6, 8, 10],
   harmonic_minor: [0, 2, 3, 5, 7, 8, 11],
   melodic_minor: [0, 2, 3, 5, 7, 9, 11],
-  whole_tone: [0, 2, 4, 6, 8, 10, 12],
-  chromatic: [0, 1, 2, 3, 4, 5, 6],
+  whole_tone: [0, 2, 4, 6, 8, 10],
+  chromatic: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
 };
 const formatRoot = (root) => NOTE_NAMES[((Number(root) || 0) % 12 + 12) % 12];
+const formatMidiNote = (midi) => {
+  const safe = Math.max(0, Math.min(127, Math.round(Number(midi) || 0)));
+  const name = NOTE_NAMES[safe % 12] || "C";
+  const oct = Math.floor(safe / 12) - 1;
+  return `${name}${oct}`;
+};
 const formatScaleStr = (scale) => {
   if (!scale) return "major (C)";
   const mode = scale.mode || "major";
@@ -835,6 +845,8 @@ logMissingDom([
 
 let frames = Array.from({ length: 9 }, () => new Array(WIDTH * HEIGHT).fill(0));
 let frameReady = Array(9).fill(false);
+let isomorphicModes = Array(9).fill(false);
+let isomorphicLayout = { base: 24, stepX: 1, stepY: 3 };
 const BLANK_FRAME = new Array(WIDTH * HEIGHT).fill(0);
 let suppressFrameUntilNext = Array(9).fill(false);
 let overlays = Array.from({ length: 9 }, () => []);
@@ -989,6 +1001,9 @@ let transportTickExt = 0;
 let deviceTabProgressRaf = null;
 let deviceTabProgressCssWidth = 0;
 let deviceTabProgressCssHeight = 0;
+const deviceTabHoldTimers = new Map();
+const deviceTabHoldFired = new Set();
+const DEVICE_TAB_HOLD_MS = 300;
 let externalArmed = false;
 const activeNotes = new Map();
 const lastScheduledNoteOff = new Map();
@@ -1061,6 +1076,7 @@ const lastSentState = {
   gateLength: null,
   mdSlideParams: { factor: null, curve: null, baseMs: null },
   monoSlidePad: null,
+  isomorphicLayout: { base: null, stepX: null, stepY: null },
   ledLevels: {},
   midiSettings: Array.from({ length: 9 }, () => ({ outId: null, channel: null }))
 };
@@ -1078,6 +1094,7 @@ function resetLastSentState() {
   lastSentState.gateLength = null;
   lastSentState.mdSlideParams = { factor: null, curve: null, baseMs: null };
   lastSentState.monoSlidePad = null;
+  lastSentState.isomorphicLayout = { base: null, stepX: null, stepY: null };
   lastSentState.ledLevels = {};
   lastSentState.midiSettings = Array.from({ length: 9 }, () => ({ outId: null, channel: null }));
 }
@@ -1218,6 +1235,15 @@ function sendMonoSlidePadIfChanged(value) {
   if (lastSentState.monoSlidePad === value) return;
   lastSentState.monoSlidePad = value;
   ws.send(JSON.stringify({ type: "set_mono_slide_pad", value }));
+}
+
+function sendIsomorphicLayoutIfChanged(layout) {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  const next = sanitizeIsomorphicLayout(layout);
+  const prev = lastSentState.isomorphicLayout || {};
+  if (prev.base === next.base && prev.stepX === next.stepX && prev.stepY === next.stepY) return;
+  lastSentState.isomorphicLayout = { ...next };
+  ws.send(JSON.stringify({ type: "set_isomorphic_layout", layout: next }));
 }
 
 function sendLedLevelsIfChanged(levels) {
@@ -1424,6 +1450,13 @@ function connectWS() {
       if (msg.patternTimeScales) patternTimeScales = msg.patternTimeScales;
       if (msg.barViews) barViews = msg.barViews;
       if (msg.barPlayheads) barPlayheads = msg.barPlayheads;
+      if (Array.isArray(msg.isomorphicModes)) {
+        isomorphicModes = msg.isomorphicModes.map((v, idx) => (idx === 0 ? null : !!v));
+      }
+      if (msg.isomorphicLayout) {
+        isomorphicLayout = sanitizeIsomorphicLayout(msg.isomorphicLayout);
+        applyIsomorphicLayoutUI();
+      }
       if (msg.deviceHasData) deviceHasData = msg.deviceHasData;
       if (msg.deviceStopped) deviceStopped = msg.deviceStopped;
       if (Array.isArray(msg.deviceOrder)) {
@@ -1495,6 +1528,16 @@ function connectWS() {
         serverCurrentPage = msg.page;
       }
       updatePage(msg.page || currentPage, { fromServer: true });
+    } else if (msg.type === "isomorphic_mode") {
+      const page = Number.isFinite(msg.page) ? msg.page : currentPage;
+      if (page >= 1 && page <= 8) {
+        isomorphicModes[page] = !!msg.enabled;
+      }
+    } else if (msg.type === "isomorphic_layout") {
+      if (msg.layout) {
+        isomorphicLayout = sanitizeIsomorphicLayout(msg.layout);
+        applyIsomorphicLayoutUI();
+      }
     } else if (msg.type === "grid_status") {
       handleGridStatus(!!msg.connected, msg.fullScaleMode, msg.devices, msg.showMonomeControls);
     } else if (msg.type === "tempo") {
@@ -3376,6 +3419,20 @@ function normalizeGateLength(value) {
   return allowed.includes(val) ? val : 1;
 }
 
+function sanitizeIsomorphicLayout(layout = {}) {
+  const base = Math.max(0, Math.min(127, Math.round(Number(layout.base ?? 24) || 0)));
+  const stepX = Math.max(-24, Math.min(24, Math.round(Number(layout.stepX ?? 1) || 0)));
+  const stepY = Math.max(-24, Math.min(24, Math.round(Number(layout.stepY ?? 3) || 0)));
+  return { base, stepX, stepY };
+}
+
+function applyIsomorphicLayoutUI() {
+  if (isoBaseInput) isoBaseInput.value = String(isomorphicLayout.base ?? 24);
+  if (isoStepXInput) isoStepXInput.value = String(isomorphicLayout.stepX ?? 1);
+  if (isoStepYInput) isoStepYInput.value = String(isomorphicLayout.stepY ?? 3);
+  if (isoBaseLabel) isoBaseLabel.textContent = formatMidiNote(isomorphicLayout.base ?? 24);
+}
+
 function syncSettingsInputs() {
   if (settingsTempoInput) settingsTempoInput.value = formatTempoDisplay(tempo);
   if (uiScaleSel) uiScaleSel.value = String(uiScale || 1);
@@ -3396,6 +3453,7 @@ function syncSettingsInputs() {
   if (monoSlidePadInput) monoSlidePadInput.value = Math.round((monoSlidePad || 0) * 100);
   if (baseNoteLenSel) applyBaseNoteLenUI();
   if (gateLengthSel) applyGateLengthUI();
+  applyIsomorphicLayoutUI();
   Object.entries(ledInputs).forEach(([k, el]) => {
     if (el) el.value = ledLevels[k] ?? 0;
   });
@@ -3526,6 +3584,18 @@ function applySettingsFromInputs() {
       sendMonoSlidePadIfChanged(monoSlidePad);
     }
   }
+  if (isoBaseInput || isoStepXInput || isoStepYInput) {
+    const next = sanitizeIsomorphicLayout({
+      base: isoBaseInput ? isoBaseInput.value : isomorphicLayout.base,
+      stepX: isoStepXInput ? isoStepXInput.value : isomorphicLayout.stepX,
+      stepY: isoStepYInput ? isoStepYInput.value : isomorphicLayout.stepY
+    });
+    if (next.base !== isomorphicLayout.base || next.stepX !== isomorphicLayout.stepX || next.stepY !== isomorphicLayout.stepY) {
+      isomorphicLayout = next;
+      applyIsomorphicLayoutUI();
+      sendIsomorphicLayoutIfChanged(isomorphicLayout);
+    }
+  }
 
   updateDefaultColorTrigger();
 }
@@ -3651,6 +3721,30 @@ function setSettingsTab(panelId) {
     };
     gateLengthSel.addEventListener("change", commitGateLength);
   }
+  if (isoBaseInput || isoStepXInput || isoStepYInput) {
+    const commitIsoLayout = () => {
+      const next = sanitizeIsomorphicLayout({
+        base: isoBaseInput ? isoBaseInput.value : isomorphicLayout.base,
+        stepX: isoStepXInput ? isoStepXInput.value : isomorphicLayout.stepX,
+        stepY: isoStepYInput ? isoStepYInput.value : isomorphicLayout.stepY
+      });
+      isomorphicLayout = next;
+      applyIsomorphicLayoutUI();
+      sendIsomorphicLayoutIfChanged(isomorphicLayout);
+    };
+    if (isoBaseInput) {
+      isoBaseInput.addEventListener("change", commitIsoLayout);
+      isoBaseInput.addEventListener("blur", commitIsoLayout);
+    }
+    if (isoStepXInput) {
+      isoStepXInput.addEventListener("change", commitIsoLayout);
+      isoStepXInput.addEventListener("blur", commitIsoLayout);
+    }
+    if (isoStepYInput) {
+      isoStepYInput.addEventListener("change", commitIsoLayout);
+      isoStepYInput.addEventListener("blur", commitIsoLayout);
+    }
+  }
 }
 
 if (settingsSaveCfg) {
@@ -3677,7 +3771,8 @@ if (settingsSaveCfg) {
         defaultUsesMainWhite,
         whiteMode,
         colorMode,
-        uiScale
+        uiScale,
+        isomorphicLayout
       };
       localStorage.setItem(LOCAL_CONFIG_KEY, JSON.stringify(cfg));
       // keep old key for backward compat
@@ -3725,6 +3820,9 @@ if (settingsRestoreCfg) {
     monoSlidePad = 0.1;
     applyMdSlideSpeedUI();
     sendMonoSlidePadIfChanged(monoSlidePad);
+    isomorphicLayout = { base: 24, stepX: 1, stepY: 3 };
+    applyIsomorphicLayoutUI();
+    sendIsomorphicLayoutIfChanged(isomorphicLayout);
     applyWhiteMode("warm");
     applyColorMode("pastel");
     multiColorDefault = false;
@@ -4227,11 +4325,44 @@ function renderTabs() {
       renderDeviceTabProgressFrame();
       updatePage(page, { fromServer: false, deferFrame: !frameReady[page] });
     };
-    btn.onpointerdown = (e) => {
-      if (e.button !== 0) return;
+    const handleTap = () => {
+      if (activeUiPage === page) return;
       focusPage();
     };
-    btn.onclick = focusPage;
+    btn.onpointerdown = (e) => {
+      if (e.button !== 0) return;
+      if (activeUiPage !== page) return;
+      if (deviceTabHoldTimers.has(page)) {
+        clearTimeout(deviceTabHoldTimers.get(page));
+        deviceTabHoldTimers.delete(page);
+      }
+      deviceTabHoldFired.delete(page);
+      const timer = setTimeout(() => {
+        deviceTabHoldTimers.delete(page);
+        deviceTabHoldFired.add(page);
+        ws?.readyState === WebSocket.OPEN &&
+          ws.send(JSON.stringify({ type: "set_isomorphic_mode", page, enabled: !isomorphicModes[page] }));
+      }, DEVICE_TAB_HOLD_MS);
+      deviceTabHoldTimers.set(page, timer);
+    };
+    btn.onpointerup = (e) => {
+      if (e.button !== 0) return;
+      if (deviceTabHoldTimers.has(page)) {
+        clearTimeout(deviceTabHoldTimers.get(page));
+        deviceTabHoldTimers.delete(page);
+      }
+      const wasHold = deviceTabHoldFired.has(page);
+      deviceTabHoldFired.delete(page);
+      if (wasHold) return;
+      handleTap();
+    };
+    btn.onpointerleave = () => {
+      if (deviceTabHoldTimers.has(page)) {
+        clearTimeout(deviceTabHoldTimers.get(page));
+        deviceTabHoldTimers.delete(page);
+      }
+      deviceTabHoldFired.delete(page);
+    };
     btn.oncontextmenu = (e) => {
       e.preventDefault();
       e.stopPropagation();
@@ -6762,6 +6893,10 @@ function loadSavedConfig() {
       gateLength = normalizeGateLength(parsed.gateLength);
       applyGateLengthUI();
     }
+    if (parsed.isomorphicLayout) {
+      isomorphicLayout = sanitizeIsomorphicLayout(parsed.isomorphicLayout);
+      applyIsomorphicLayoutUI();
+    }
   if (typeof parsed.autoFill === "boolean") {
     autoFillBars = parsed.autoFill;
     if (autoFillToggle) autoFillToggle.checked = autoFillBars;
@@ -6893,6 +7028,11 @@ function pushSavedConfigToServer(opts = {}) {
   if (typeof cachedConfig.gateLength === "number") {
     gateLength = normalizeGateLength(cachedConfig.gateLength);
     sendGateLengthIfChanged(gateLength);
+  }
+  if (cachedConfig.isomorphicLayout) {
+    isomorphicLayout = sanitizeIsomorphicLayout(cachedConfig.isomorphicLayout);
+    applyIsomorphicLayoutUI();
+    sendIsomorphicLayoutIfChanged(isomorphicLayout);
   }
   if (typeof cachedConfig.patternControlLatch === "boolean") {
     patternControlLatch = !!cachedConfig.patternControlLatch;
