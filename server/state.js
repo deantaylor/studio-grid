@@ -921,7 +921,7 @@ export class SGridState {
     const page = this.pages[this.currentPage];
     const seqType = page?.sequencerType || "mono";
     if (!pat || !rowInfo?.stepRow) return null;
-    if (seqType === "drum" || seqType === "cc") return null;
+    if (seqType === "drum" || seqType === "cc" || seqType === "mdtonal") return null;
     if (!this.heldStep) return null;
     const held = this.heldStep;
     if (held.x === x && held.y === y) return null;
@@ -1521,31 +1521,6 @@ export class SGridState {
                 if (prevStep?.on && prevStep.chain) prevStep.chain = false;
               }
               step.chain = false;
-            } else if (seqTypeCur === "mdtonal") {
-              const slideProp = "mdSlide";
-              const lenSteps = Math.max(1, pat.steps.length);
-              let startAbs = abs;
-              while (startAbs > 0) {
-                const prevStep = pat.steps[startAbs - 1];
-                if (!prevStep?.on || !prevStep[slideProp]) break;
-                startAbs -= 1;
-              }
-              let endAbs = abs;
-              while (endAbs < lenSteps - 1) {
-                const curStep = pat.steps[endAbs];
-                const nextStep = pat.steps[endAbs + 1];
-                if (!curStep?.[slideProp] || !nextStep?.on) break;
-                endAbs += 1;
-              }
-              const newOctave = step.octave || 0;
-              for (let idx = startAbs; idx <= endAbs; idx++) {
-                const chainStep = pat.steps[idx];
-                if (!chainStep?.on) continue;
-                chainStep.degree = targetDegree;
-                chainStep.notes = [targetDegree];
-                chainStep.octave = newOctave;
-                chainStep.micro = 0;
-              }
             }
           }
           step.micro = 0;
@@ -2561,6 +2536,30 @@ export class SGridState {
         return;
       }
     }
+    if (!skipChainClear && step.on && seqType === "mdtonal" && step.mdSlide) {
+      const prevStep = abs > 0 ? pat.steps[abs - 1] : null;
+      const isChainStart = !(prevStep?.on && prevStep.mdSlide);
+      if (isChainStart) {
+        const len = Math.max(1, pat.length_steps || 16);
+        const chainLen = this.slideChainLength(pat, abs, { seqType: "mdtonal" });
+        const endAbs = clamp(abs + Math.max(1, chainLen) - 1, 0, len - 1);
+        for (let idx = abs; idx <= endAbs; idx++) {
+          this.clearStep(pat, idx, pageIdx, { skipAutoClear: true, skipChainClear: true, patternIdx });
+        }
+        if (!skipAutoClear) {
+          const hasDataInLength = pat.steps.slice(0, len).some((s) => s?.on);
+          if (!hasDataInLength) {
+            const hasHiddenData = pat.steps.slice(len).some((s) => s?.on);
+            if (hasHiddenData) {
+              const pg = this.pages[pageIdx];
+              const targetPattern = patternIdx || pg?.active_pattern;
+              if (targetPattern) this.clearPattern(pageIdx, targetPattern);
+            }
+          }
+        }
+        return;
+      }
+    }
     if (!skipChainClear && step.on && seqType === "mono") {
       const prevStep = abs > 0 ? pat.steps[abs - 1] : null;
       const inChain = (prevStep?.on && prevStep.chain) || !!step.chain;
@@ -2573,6 +2572,18 @@ export class SGridState {
           if (!curStep?.chain || !nextStep?.on) break;
           endAbs += 1;
         }
+        for (let idx = abs + 1; idx <= endAbs; idx++) {
+          this.clearStep(pat, idx, pageIdx, { skipAutoClear: true, skipChainClear: true, patternIdx });
+        }
+      }
+    }
+    if (!skipChainClear && step.on && seqType === "mdtonal") {
+      const prevStep = abs > 0 ? pat.steps[abs - 1] : null;
+      const inChain = (prevStep?.on && prevStep.mdSlide) || !!step.mdSlide;
+      if (inChain && prevStep?.on && prevStep.mdSlide) {
+        const len = Math.max(1, pat.length_steps || 16);
+        const chainLen = this.slideChainLength(pat, abs, { seqType: "mdtonal" });
+        const endAbs = clamp(abs + Math.max(1, chainLen) - 1, 0, len - 1);
         for (let idx = abs + 1; idx <= endAbs; idx++) {
           this.clearStep(pat, idx, pageIdx, { skipAutoClear: true, skipChainClear: true, patternIdx });
         }
@@ -4223,21 +4234,20 @@ export class SGridState {
               }
               continue;
             }
-            const slideProp = seqType === "mdtonal" ? "mdSlide" : "slide";
             if (seqType === "mono") {
               if (!step.chain) continue;
-            } else if (!step[slideProp]) {
+            } else if (seqType === "mdtonal") {
               continue;
             }
             if (abs > 0) {
               const prev = pat.steps[abs - 1];
               if (seqType === "mono") {
                 if (prev?.on && prev.chain) continue;
-              } else if (prev?.on && prev[slideProp]) {
-                continue;
               }
             }
-            const chainLen = this.slideChainLength(pat, abs, { seqType });
+            const chainLen = seqType === "mono"
+              ? this.slideChainLength(pat, abs, { seqType: "mono" })
+              : this.slideChainLength(pat, abs, { seqType });
             if (chainLen <= 1) continue;
             const endX = x + chainLen - 1;
             if (endX >= 16) continue;
