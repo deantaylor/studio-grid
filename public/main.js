@@ -1804,8 +1804,6 @@ function connectWS() {
       ensureScheduler();
       scheduler?.enqueue(msg.events || []);
       scheduler?.tick();
-    } else if (msg.type === "audition") {
-      handleAuditionMessage(msg);
     } else if (msg.type === "base_division") {
       baseDivision = msg.division || baseDivision;
       applyBaseNoteLenUI();
@@ -2146,34 +2144,6 @@ function getMidiChannelForPage(page, fallbackChan) {
   const cfg = midiSettings[page] || midiSettings[currentPage] || {};
   if (Number.isFinite(fallbackChan)) return fallbackChan;
   return cfg.channel || 1;
-}
-
-function handleAuditionMessage(msg) {
-  const page = Number.isFinite(msg.page) ? msg.page : currentPage;
-  const out = getMidiOutForPage(page);
-  if (!out) return;
-  const note = Number.isFinite(msg.note) ? Math.round(msg.note) : null;
-  if (!Number.isFinite(note)) return;
-  const action = msg.action;
-  if (action === "on") {
-    if (Number.isFinite(msg.cc) && Number.isFinite(msg.ccValue)) {
-      const ccChan = getMidiChannelForPage(page, msg.ccChannel);
-      const status = 0xb0 + (ccChan - 1);
-      const ccNum = Math.max(0, Math.min(127, Math.round(msg.cc)));
-      const ccVal = Math.max(0, Math.min(127, Math.round(msg.ccValue)));
-      sendMIDISafe(out, [status, ccNum, ccVal], performance.now());
-    }
-    const channel = getMidiChannelForPage(page, msg.channel);
-    const status = 0x90 + (channel - 1);
-    const vel = Math.max(0, Math.min(127, Math.round(msg.velocity ?? 96)));
-    sendMIDISafe(out, [status, note, vel], performance.now());
-    trackNoteOn(out, channel, note);
-  } else if (action === "off") {
-    const channel = getMidiChannelForPage(page, msg.channel);
-    const status = 0x80 + (channel - 1);
-    sendMIDISafe(out, [status, note, 0], performance.now());
-    trackNoteOff(out, channel, note);
-  }
 }
 
 function noteKey(out, channel) {

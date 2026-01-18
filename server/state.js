@@ -60,10 +60,7 @@ export class SGridState {
     this.deviceColors = this.pages.map((p, i) => (i === 0 ? null : p.color));
     this.deviceOrder = Array.from({ length: 8 }, (_, i) => i + 1);
     this.isomorphicModes = Array(9).fill(false);
-    this.isomorphicMonoActive = Array(9).fill(null);
     this.isomorphicLayout = this.sanitizeIsomorphicLayout({ base: 24, stepX: 1, stepY: 3 });
-    this.deviceTabHoldTimers = Array(9).fill(null);
-    this.deviceTabHoldFired = Array(9).fill(false);
     this.deviceGateWindows = Array.from({ length: 9 }, () => []);
     this.activeNoteWindows = Array.from({ length: 9 }, () => new Map());
     this.gateLedBoost = false;
@@ -113,7 +110,6 @@ export class SGridState {
     this.pendingOctaveOverlays = [];
     this.holdTimers = new Map(); // key -> timeout id for entering edit mode
     this.requestRender = null; // optional callback wired by server to force a render
-    this.auditionHolds = new Map(); // key -> {page, note, channel, cc, ccValue, ccChannel}
     this.lastMultiSelectTime = 0;
   }
 
@@ -1152,7 +1148,6 @@ export class SGridState {
   handleGridKey(x, y, s, opts = {}) {
     const forcePatternControl = !!opts.forcePatternControl;
     const uiMode = !!opts.uiMode;
-    const allowAudition = !!opts.allowAudition;
     if (forcePatternControl) {
       return this.handlePatternControlKey(x, y, s);
     }
@@ -1226,45 +1221,8 @@ export class SGridState {
       }
       if (x === 14) {
         // pattern switch modifier (immediate)
-        const wasHeld = this.patternHeld;
         this.patternHeld = s === 1;
-        if (allowAudition && wasHeld && s === 0) {
-          return this.releaseAuditionHolds();
-        }
         return null;
-      }
-      if (x >= 0 && x <= 7 && !this.patternHeld) {
-        const idx = x + 1;
-        if (s === 1) {
-          if (idx !== this.currentPage) {
-            this.setPage(idx);
-            return null;
-          }
-          if (this.deviceTabHoldTimers[idx]) {
-            clearTimeout(this.deviceTabHoldTimers[idx]);
-            this.deviceTabHoldTimers[idx] = null;
-          }
-          this.deviceTabHoldFired[idx] = false;
-          this.deviceTabHoldTimers[idx] = setTimeout(() => {
-            this.deviceTabHoldTimers[idx] = null;
-            this.deviceTabHoldFired[idx] = true;
-            const res = this.setIsomorphicMode(idx, !this.isIsomorphicMode(idx));
-            if (res !== false) {
-              this.forceLedRefresh = true;
-            }
-          }, 300);
-          return null;
-        }
-        if (s === 0) {
-          if (this.deviceTabHoldTimers[idx]) {
-            clearTimeout(this.deviceTabHoldTimers[idx]);
-            this.deviceTabHoldTimers[idx] = null;
-          }
-          const wasHold = this.deviceTabHoldFired[idx];
-          this.deviceTabHoldFired[idx] = false;
-          if (wasHold || idx === this.currentPage) return null;
-          return null;
-        }
       }
       if (s !== 1) return;
       const idx = x + 1;
@@ -1281,12 +1239,6 @@ export class SGridState {
     }
     const rowInfo = this.getRowInfo(y, { uiMode });
     if (rowInfo.stepRow) {
-      if (this.isIsomorphicMode(this.currentPage)) {
-        return this.handleIsomorphicKey(x, y, s);
-      }
-      if (allowAudition && this.patternHeld && !uiMode) {
-        return this.handleAuditionKey(x, y, s, rowInfo);
-      }
       const page = this.pages[this.currentPage];
       const pat = this.getPattern();
       const len = Math.max(1, pat?.length_steps || 16);
@@ -1808,117 +1760,6 @@ export class SGridState {
     return null;
   }
 
-  handleAuditionKey(x, y, s, rowInfo) {
-    const page = this.pages[this.currentPage];
-    if (!page || !rowInfo?.stepRow) return null;
-    const seqType = page.sequencerType || "mono";
-    if (seqType === "cc") return null;
-    const key = `${x},${y}`;
-    if (s === 1) {
-      if (this.auditionHolds.has(key)) return null;
-      const degree = rowInfo.degree ?? 0;
-      const octave = rowInfo.topRow ? rowInfo.octaveOffset : 0;
-      const pageIdx = this.currentPage;
-      const pageTranspose = page.transpose || 0;
-      let note = null;
-      let channel = clamp(this.midi[pageIdx]?.channel || 1, 1, 16);
-      let cc = null;
-      let ccValue = null;
-      let ccChannel = null;
-      if (seqType === "drum") {
-        note = this.getDrumPitch(page, degree, octave);
-      } else if (seqType === "mdtonal") {
-        const trackCfg = this.mdTrackConfig(pageIdx);
-        note = trackCfg.noteNumber;
-        channel = clamp(trackCfg.noteChannel || channel, 1, 16);
-        const value = this.mdCCFromDegree(degree, pageTranspose, octave);
-        if (value == null) return null;
-        cc = trackCfg.ccNumber;
-        ccValue = value;
-        ccChannel = clamp(trackCfg.ccChannel || channel, 1, 16);
-      } else {
-        const mode = (this.scale && this.scale.mode) || "major";
-        const pat = page.patterns?.[page.active_pattern];
-        const root = pat?.root || 0;
-        note = this.calcPitch(root, mode, degree || 0, octave || 0) + pageTranspose;
-      }
-      if (!Number.isFinite(note)) return null;
-      const safeNote = clamp(Math.round(note), 0, 127);
-      const vel = 96;
-      const hold = { page: pageIdx, note: safeNote, channel, cc, ccValue, ccChannel };
-      this.auditionHolds.set(key, hold);
-      return { type: "audition", action: "on", velocity: vel, ...hold };
-    }
-    if (s === 0) {
-      const hold = this.auditionHolds.get(key);
-      if (!hold) return null;
-      this.auditionHolds.delete(key);
-      return { type: "audition", action: "off", ...hold };
-    }
-    return null;
-  }
-
-  handleIsomorphicKey(x, y, s) {
-    const page = this.pages[this.currentPage];
-    if (!page) return null;
-    const seqType = page.sequencerType || "mono";
-    if (seqType === "cc" || seqType === "drum") return null;
-    const key = `iso:${x},${y}`;
-    if (s === 1) {
-      if (this.auditionHolds.has(key)) return null;
-      const info = this.getIsomorphicNoteInfo(x, y, page);
-      const pageIdx = this.currentPage;
-      let channel = clamp(this.midi[pageIdx]?.channel || 1, 1, 16);
-      let cc = null;
-      let ccValue = null;
-      let ccChannel = null;
-      let note = null;
-      if (seqType === "mdtonal") {
-        const trackCfg = this.mdTrackConfig(pageIdx);
-        note = trackCfg.noteNumber;
-        channel = clamp(trackCfg.noteChannel || channel, 1, 16);
-        const value = this.mdCCFromDegree(info.degree, 0, info.octave);
-        if (value == null) return null;
-        cc = trackCfg.ccNumber;
-        ccValue = value;
-        ccChannel = clamp(trackCfg.ccChannel || channel, 1, 16);
-      } else {
-        const mode = (this.scale && this.scale.mode) || "major";
-        const pat = page.patterns?.[page.active_pattern];
-        const root = pat?.root || 0;
-        note = this.calcPitch(root, mode, info.degree, info.octave);
-      }
-      if (!Number.isFinite(note)) return null;
-      const safeNote = clamp(Math.round(note), 0, 127);
-      const hold = { page: pageIdx, note: safeNote, channel, cc, ccValue, ccChannel };
-      const events = [];
-      if (seqType === "mono" || seqType === "mdtonal") {
-        const activeKey = this.isomorphicMonoActive?.[pageIdx];
-        if (activeKey && activeKey !== key) {
-          const activeHold = this.auditionHolds.get(activeKey);
-          if (activeHold) {
-            events.push({ type: "audition", action: "off", ...activeHold });
-            this.auditionHolds.delete(activeKey);
-          }
-        }
-        if (Array.isArray(this.isomorphicMonoActive)) this.isomorphicMonoActive[pageIdx] = key;
-      }
-      this.auditionHolds.set(key, hold);
-      events.push({ type: "audition", action: "on", velocity: 96, ...hold });
-      return events.length === 1 ? events[0] : events;
-    }
-    if (s === 0) {
-      const hold = this.auditionHolds.get(key);
-      if (!hold) return null;
-      this.auditionHolds.delete(key);
-      if (Array.isArray(this.isomorphicMonoActive) && this.isomorphicMonoActive[this.currentPage] === key) {
-        this.isomorphicMonoActive[this.currentPage] = null;
-      }
-      return { type: "audition", action: "off", ...hold };
-    }
-    return null;
-  }
-
   isIsomorphicMode(page = this.currentPage) {
     const idx = clamp(Math.round(page || 0), 0, 8);
     return !!this.isomorphicModes?.[idx];
@@ -1929,12 +1770,6 @@ export class SGridState {
     const next = !!enabled;
     if (!this.isomorphicModes || this.isomorphicModes[idx] === next) return false;
     this.isomorphicModes[idx] = next;
-    if (!next) {
-      if (Array.isArray(this.isomorphicMonoActive)) this.isomorphicMonoActive[idx] = null;
-      const released = this.releaseAuditionHolds();
-      if (typeof this.requestRender === "function") this.requestRender();
-      return released || true;
-    }
     if (typeof this.requestRender === "function") this.requestRender();
     return true;
   }
@@ -1943,16 +1778,6 @@ export class SGridState {
     const idx = clamp(Math.round(page || 0), 1, 8);
     const next = !this.isIsomorphicMode(idx);
     return this.setIsomorphicMode(idx, next);
-  }
-
-  releaseAuditionHolds() {
-    if (!this.auditionHolds.size) return null;
-    const events = [];
-    this.auditionHolds.forEach((hold) => {
-      events.push({ type: "audition", action: "off", ...hold });
-    });
-    this.auditionHolds.clear();
-    return events;
   }
 
   getStepInfo(x, y, opts = {}) {
@@ -3301,7 +3126,9 @@ export class SGridState {
               const eventTick = baseTick + swingOffsetTicks + microOffset;
               const emit = microOffset >= 0;
               const durMs = this.gateDurationMs(baseDur); // default one step with slight shorten
-              const noteVel = Array.isArray(step.accented) && step.accented.includes(deg) ? 120 : 96;
+              const noteVel = seqTypePlay === "mono"
+                ? (step.accent ? 120 : 96)
+                : (Array.isArray(step.accented) && step.accented.includes(deg) ? 120 : 96);
               if (emit) {
                 this.pushMidiNote(midiEvents, {
                   type: "midi_note",
@@ -3550,7 +3377,9 @@ export class SGridState {
                 pitch = this.calcPitch(pat.root || 0, mode, deg || 0, octave) + pageTranspose;
               }
               const durMs = this.gateDurationMs(baseDur);
-              const noteVel = Array.isArray(nextStepObj.accented) && nextStepObj.accented.includes(deg) ? 120 : 96;
+              const noteVel = seqTypePlay === "mono"
+                ? (nextStepObj.accent ? 120 : 96)
+                : (Array.isArray(nextStepObj.accented) && nextStepObj.accented.includes(deg) ? 120 : 96);
               this.pushMidiNote(midiEvents, {
                 type: "midi_note",
                 page: p,
@@ -3664,7 +3493,7 @@ export class SGridState {
 
   getIsomorphicNoteInfo(x, y, page) {
     const safeX = clamp(Math.round(x || 0), 0, 15);
-    const safeY = clamp(Math.round(y || 0), 0, 6);
+    const safeY = clamp(Math.round(y || 0), -1, 7);
     const layout = this.sanitizeIsomorphicLayout(this.isomorphicLayout || {});
     const gridY = 6 - safeY; // bottom row = 0
     const mode = (this.scale && this.scale.mode) || "major";
@@ -4191,20 +4020,6 @@ export class SGridState {
       }
     }
     const activeMidi = this.getActiveNotesSet(this.currentPage);
-    if (this.auditionHolds && this.auditionHolds.size) {
-      this.auditionHolds.forEach((hold, key) => {
-        if (!key.startsWith("iso:")) return;
-        if (hold.page !== this.currentPage) return;
-        const coords = key.slice(4).split(",").map((v) => Number(v));
-        const [sx, sy] = coords;
-        if (!Number.isFinite(sx) || !Number.isFinite(sy)) return;
-        if (sy < 0 || sy >= STEP_ROWS) return;
-        const info = noteInfos[sy]?.[sx];
-        if (info && Number.isFinite(info.midi)) {
-          activeMidi.add(info.midi);
-        }
-      });
-    }
     if (activeMidi.size) {
       for (let y = 0; y < STEP_ROWS; y += 1) {
         for (let x = 0; x < WIDTH; x += 1) {
@@ -4219,6 +4034,54 @@ export class SGridState {
     return baseFrame;
   }
 
+  renderIsomorphicUIFrame(slideTimeMs) {
+    const WIDTH = 16;
+    const HEIGHT = 8;
+    const page = this.pages[this.currentPage];
+    if (!page) return new Array(WIDTH * HEIGHT).fill(0);
+    const baseLevel = Math.max(1, Math.round((this.ledLevels.step_on || 10) * 0.35));
+    const rootLevel = Math.max(baseLevel + 1, Math.round((this.ledLevels.step_on || 10) * 0.7));
+    const activeLevel = this.ledLevels.step_on || 10;
+    const frame = new Array(WIDTH * HEIGHT).fill(0);
+    const noteInfos = Array.from({ length: HEIGHT }, () => Array(WIDTH).fill(null));
+    for (let y = 0; y < HEIGHT; y += 1) {
+      const isoY = y - 1;
+      for (let x = 0; x < WIDTH; x += 1) {
+        const info = this.getIsomorphicNoteInfo(x, isoY, page);
+        noteInfos[y][x] = info;
+        frame[y * WIDTH + x] = info.degree === 0 ? rootLevel : baseLevel;
+      }
+    }
+    if (!page.sequencerStopped) {
+      const pat = page.patterns?.[page.active_pattern];
+      const len = Math.max(1, pat?.length_steps || 16);
+      const ph = Math.max(0, Math.floor(this.playheads[this.currentPage] ?? 0)) % len;
+      const phBar = Math.floor(ph / 16);
+      const bar = pat?.barView || 0;
+      if (phBar === bar) {
+        const phX = ph % 16;
+        const playLevel = Math.max(1, Math.round((this.ledLevels.playhead || 15) * 0.25));
+        for (let yy = 0; yy < HEIGHT; yy += 1) {
+          const idx = yy * WIDTH + phX;
+          frame[idx] = Math.max(frame[idx] || 0, playLevel);
+        }
+      }
+    }
+    const activeMidi = this.getActiveNotesSet(this.currentPage);
+    if (activeMidi.size) {
+      for (let y = 0; y < HEIGHT; y += 1) {
+        for (let x = 0; x < WIDTH; x += 1) {
+          const info = noteInfos[y][x];
+          if (!info || !Number.isFinite(info.midi)) continue;
+          if (activeMidi.has(info.midi)) {
+            frame[y * WIDTH + x] = activeLevel;
+          }
+        }
+      }
+    }
+    return frame;
+  }
+
   renderUIFrame(slideTimeMs, opts = {}) {
     const WIDTH = 16;
     const HEIGHT = 8;
@@ -4227,6 +4090,9 @@ export class SGridState {
     const prevPatternControl = this.patternControlMode;
     if (ignorePatternControl && prevPatternControl) {
       this.patternControlMode = false;
+    }
+    if (this.isIsomorphicMode(this.currentPage)) {
+      return this.renderIsomorphicUIFrame(slideTimeMs);
     }
     const baseFrame = this.renderLED(slideTimeMs, {
       includeOctaveHint: opts.includeOctaveHint,
@@ -4568,15 +4434,6 @@ export class SGridState {
             frame[idx] = PATTERN_INACTIVE;
           }
         }
-      }
-      if (this.auditionHolds && this.auditionHolds.size) {
-        this.auditionHolds.forEach((hold, key) => {
-          const [sx, sy] = key.split(",").map((val) => Number(val));
-          if (!Number.isFinite(sx) || !Number.isFinite(sy)) return;
-          if (sy < 0 || sy >= STEP_ROWS) return;
-          const idx = sy * WIDTH + sx;
-          frame[idx] = Math.max(frame[idx], STEP_ON);
-        });
       }
     }
     if ((this.patternControlMode || this.patternControlHeld || this.patternHeld) && page) {

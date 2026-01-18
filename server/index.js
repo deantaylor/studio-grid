@@ -192,8 +192,6 @@ function dispatchGridEvents(events) {
       broadcast({ type: "accent_overlay", page: state.currentPage, ...ev });
     } else if (ev.type === "slide") {
       broadcast({ type: "slide_overlay", page: state.currentPage, ...ev });
-    } else if (ev.type === "audition") {
-      broadcast({ type: "audition", ...ev });
     } else if (ev.type === "bar_view") {
       followEnabled = false;
       broadcast({ type: "follow", enabled: followEnabled });
@@ -248,7 +246,7 @@ serial.on("grid_key", (evt) => {
   const isPrimary = !primaryId || evt.deviceId === primaryId;
   const isLarge = (cols > 8 || rows > 8);
   const useUiMode = isPrimary && isLarge && !showMonomeControls;
-  const resp = state.handleGridKey(evt.x, evt.y, evt.s, { forcePatternControl, allowAudition: true, uiMode: useUiMode });
+  const resp = state.handleGridKey(evt.x, evt.y, evt.s, { forcePatternControl, uiMode: useUiMode });
   const events = Array.isArray(resp) ? resp : (resp ? [resp] : []);
   // When a held note is entered from the monome, show the octave arrows in the UI
   if (evt.s === 1) {
@@ -398,7 +396,7 @@ function handleClientMessage(ws, data) {
       {
         const isPatternControlKey = data.x === PATTERN_CONTROL_GRID_X && data.y === PATTERN_CONTROL_GRID_Y;
         const uiMode = isPatternControlKey ? false : fullScaleMode;
-        const resp = state.handleGridKey(data.x, data.y, data.s, { uiMode, allowAudition: false });
+        const resp = state.handleGridKey(data.x, data.y, data.s, { uiMode });
         const events = Array.isArray(resp) ? resp : (resp ? [resp] : []);
         dispatchGridEvents(events);
       }
