@@ -61,6 +61,8 @@ export class SGridState {
     this.deviceOrder = Array.from({ length: 8 }, (_, i) => i + 1);
     this.isomorphicModes = Array(9).fill(false);
     this.isomorphicLayout = this.sanitizeIsomorphicLayout({ base: 24, stepX: 1, stepY: 3 });
+    this.deviceTabHoldTimers = Array(9).fill(null);
+    this.deviceTabHoldFired = Array(9).fill(false);
     this.deviceGateWindows = Array.from({ length: 9 }, () => []);
     this.activeNoteWindows = Array.from({ length: 9 }, () => new Map());
     this.gateLedBoost = false;
@@ -1223,6 +1225,39 @@ export class SGridState {
         // pattern switch modifier (immediate)
         this.patternHeld = s === 1;
         return null;
+      }
+      if (x >= 0 && x <= 7 && !this.patternHeld) {
+        const idx = x + 1;
+        if (s === 1) {
+          if (idx !== this.currentPage) {
+            this.setPage(idx);
+            return null;
+          }
+          if (this.deviceTabHoldTimers[idx]) {
+            clearTimeout(this.deviceTabHoldTimers[idx]);
+            this.deviceTabHoldTimers[idx] = null;
+          }
+          this.deviceTabHoldFired[idx] = false;
+          this.deviceTabHoldTimers[idx] = setTimeout(() => {
+            this.deviceTabHoldTimers[idx] = null;
+            this.deviceTabHoldFired[idx] = true;
+            const res = this.setIsomorphicMode(idx, !this.isIsomorphicMode(idx));
+            if (res !== false) {
+              this.forceLedRefresh = true;
+            }
+          }, 300);
+          return null;
+        }
+        if (s === 0) {
+          if (this.deviceTabHoldTimers[idx]) {
+            clearTimeout(this.deviceTabHoldTimers[idx]);
+            this.deviceTabHoldTimers[idx] = null;
+          }
+          const wasHold = this.deviceTabHoldFired[idx];
+          this.deviceTabHoldFired[idx] = false;
+          if (wasHold || idx === this.currentPage) return null;
+          return null;
+        }
       }
       if (s !== 1) return;
       const idx = x + 1;

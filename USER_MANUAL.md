@@ -2,28 +2,18 @@ studio:grid — User Manual
 ========================
 
 Thanks for trying out studio:grid!
-Born from real problems whilst making music and embracing the worlds of both hardware and software.
-Leave your gear bias at the door, focus on the music and have fun :)
+Born from real music making problems studio:grid and embracing the worlds of both hardware and software.
+Focus on the music and have fun :)
 
 Overview
 --------
-studio:grid is a grid-based multi-sequencer and composer for monome grids (or without). Each project (set) holds up to eight devices/pages, and every page contains eight patterns with lengths up to 128 steps. The app drives MIDI notes/CC, can follow internal or external clock, and exports/imports complete projects (.studiogrid, .sgridset) plus TD-3 .seq files.
+studio:grid is a grid-based multi-sequencer and composer for monome grids (or without). Each project holds up to eight devices, and every device contains eight patterns with lengths up to 64 steps. The app drives MIDI notes/CC, can follow internal or external clock, and exports/imports complete projects (.studiogrid) plus TD-3 .seq files.
 
 It can be used with or without a grid controller.
 
 Prerequisites
 -------------
-- Node.js 18+ installed. (dev)
 - If you use a monome grid: serialosc running on the same machine.
-- A WebMIDI-capable browser (Chrome/Chromium) or the bundled app. (dev)
-- MIDI destinations visible to the OS; Elektron TM-1 is auto-selected for MDTonal unless overridden.
-
-Starting the app
-----------------
-- Development/local web: `npm start` (serves public/ at http://localhost:3000).
-- Electron shell: `npm run electron` (auto-finds a free port, opens the UI, and cleans up LEDs on quit).
-- Build installers: `npm run dist`.
-- The WebSocket/UI connects automatically to the local server; if the grid is attached, LEDs sync through serialosc.
 
 Interface tour
 --------------
@@ -137,10 +127,5 @@ API endpoints
 
 Data files
 ----------
-- Projects: `.studiogrid` (export/import), `.sgridset` (legacy import/export).
+- Projects: `.studiogrid` (export/import)
 - TD-3: `.seq` files for import/export to/from SynthTribe
-
-Extras & caveats
-----------------
-- Program-change filtering: outgoing program changes are filtered; the server side handles this automatically (no UI control). - to be removed
-- Device notes: an optional per-device notes field exists in the toolbar; it may be hidden in the current layout but loads/saves with the set when used. - to be removed
