@@ -7,6 +7,23 @@ const INT_MULT = PPQN_INT / PPQN_EXT;
 const TICKS_PER_STEP_EXT = PPQN_EXT / 4;
 const TICKS_PER_STEP_INT = TICKS_PER_STEP_EXT * INT_MULT;
 const PATTERN_CONTROL_BUTTON = 15; // bottom-row button to enter pattern control view (x index)
+const MICRO_ROW_TOP = 0;
+const MICRO_ROW_BOTTOM = 7;
+const MICRO_ROW_THRESHOLD = 3;
+const MICRO_BUTTON_VALUES = [
+  -23, -19, -15, -11, -8, -5, -3, -1,
+  1, 3, 5, 8, 11, 15, 19, 23
+];
+const OCTAVE_INDICATOR_ROWS = [2, 3, 4, 5];
+const OCTAVE_SHIFT_ROW_MAP = {
+  "-2": 5,
+  "-1": 4,
+  "1": 3,
+  "2": 2
+};
+const OCTAVE_ROW_TO_SHIFT = Object.fromEntries(
+  Object.entries(OCTAVE_SHIFT_ROW_MAP).map(([value, row]) => [row, Number(value)])
+);
 const BASE_DEFAULT_DEVICE_COLOR = "#ffe070";
 const DEFAULT_DEVICE_COLORS = Array(8).fill(BASE_DEFAULT_DEVICE_COLOR);
 const MDTONAL_TRACKS = [
@@ -44,6 +61,10 @@ function intToExtTick(tInt) {
 function safeColor(color, fallback = BASE_DEFAULT_DEVICE_COLOR) {
   return /^#([0-9a-fA-F]{6})$/.test(color || "") ? color : fallback;
 }
+
+const OCTAVE_PULSE_LOOP_MS = 1200;
+const OCTAVE_PULSE_PULSE_MIN = 0.9;
+
 
 export class SGridState {
   constructor() {
@@ -110,9 +131,29 @@ export class SGridState {
     this.pendingPatternTick = Array(9).fill(null); // target tick to apply pending pattern
     this.patternControlLatch = true;
     this.pendingOctaveOverlays = [];
+    this.microtiming = {
+      active: false,
+      row: MICRO_ROW_TOP,
+      value: 0,
+      column: null,
+      heldKey: null
+    };
     this.holdTimers = new Map(); // key -> timeout id for entering edit mode
     this.requestRender = null; // optional callback wired by server to force a render
     this.lastMultiSelectTime = 0;
+  }
+
+  getOctavePulseFactor() {
+    const tMs = Date.now();
+    const octPhase = (tMs % OCTAVE_PULSE_LOOP_MS) / OCTAVE_PULSE_LOOP_MS;
+    const octPulse = (1 - Math.cos(octPhase * Math.PI * 2)) * 0.5;
+    return OCTAVE_PULSE_PULSE_MIN + (1 - OCTAVE_PULSE_PULSE_MIN) * octPulse;
+  }
+
+  applyOctavePulse(level, shifted, factor = null) {
+    if (!shifted) return level;
+    const octFactor = Number.isFinite(factor) ? factor : this.getOctavePulseFactor();
+    return Math.max(1, Math.round((Number(level) || 0) * octFactor));
   }
 
   normalizeDeviceOrder(order) {
@@ -255,6 +296,7 @@ export class SGridState {
     this.pendingOctaveOverlays = [];
     this.holdTimers.forEach((t) => clearTimeout(t));
     this.holdTimers.clear();
+    this.exitMicrotimingMode();
   }
 
   makeEmptyPattern() {
@@ -295,6 +337,62 @@ export class SGridState {
     const out = this.pendingMicroOverlays ? this.pendingMicroOverlays.slice() : [];
     this.pendingMicroOverlays = [];
     return out;
+  }
+
+  microtimingRowForNoteRow(y) {
+    const STEP_ROWS = 7;
+    const safeRow = Number.isFinite(y) ? Math.max(0, Math.min(STEP_ROWS - 1, Math.round(y))) : 0;
+    return safeRow <= MICRO_ROW_THRESHOLD ? MICRO_ROW_BOTTOM : MICRO_ROW_TOP;
+  }
+
+  microtimingValueForColumn(x) {
+    const idx = clamp(Math.round(Number(x) || 0), 0, MICRO_BUTTON_VALUES.length - 1);
+    return MICRO_BUTTON_VALUES[idx];
+  }
+
+  microtimingColumnForValue(value) {
+    if (!Number.isFinite(value) || value === 0) return null;
+    const target = Number(value);
+    const exact = MICRO_BUTTON_VALUES.findIndex((v) => v === target);
+    return exact >= 0 ? exact : null;
+  }
+
+  isMicrotimingActiveForKey(key) {
+    return !!(this.microtiming?.active && this.microtiming.heldKey && key === this.microtiming.heldKey);
+  }
+
+  startMicrotimingMode(noteKey, row = MICRO_ROW_TOP, value = 0) {
+    if (!noteKey) return false;
+    const columnHint = this.microtimingColumnForValue(value);
+    this.microtiming.active = true;
+    this.microtiming.row = row;
+    this.microtiming.heldKey = noteKey;
+    this.updateMicrotimingValue(value, { forceRefresh: true, columnHint });
+    return true;
+  }
+
+  updateMicrotimingValue(value, opts = {}) {
+    const clamped = Number.isFinite(value) ? clamp(Math.round(value), -23, 23) : 0;
+    this.microtiming.value = clamped;
+    if (clamped === 0) {
+      this.microtiming.column = null;
+    } else if (opts.columnHint != null) {
+      this.microtiming.column = clamp(Math.round(opts.columnHint), 0, 15);
+    } else {
+      this.microtiming.column = this.microtimingColumnForValue(clamped);
+    }
+    if (opts.forceRefresh) {
+      this.forceLedRefresh = true;
+      this.requestRender?.();
+    }
+  }
+
+  exitMicrotimingMode() {
+    if (!this.microtiming?.active) return false;
+    this.microtiming.active = false;
+    this.microtiming.heldKey = null;
+    this.updateMicrotimingValue(0, { forceRefresh: true, columnHint: null });
+    return true;
   }
 
   octaveOverlaySnapshot() {
@@ -1062,6 +1160,60 @@ export class SGridState {
     return events.length ? events : null;
   }
 
+  handleMicroGridPress(x, y, opts = {}) {
+    const held = this.heldStep;
+    if (!held) return null;
+    const pat = opts.pat || this.getPattern();
+    if (!pat) return null;
+    const page = opts.page || this.pages[this.currentPage];
+    const abs = held.x + (pat.barView || 0) * 16;
+    const step = pat.steps[abs];
+    if (!step?.on) return null;
+    const heldKey = `${held.x},${held.y}`;
+    const heldInfo = opts.heldInfo || (heldKey ? this.keyHolds.get(heldKey) : null);
+    const seqTypeHeld = page?.sequencerType || "mono";
+    const heldDeg = this.holdTargetDegree != null
+      ? clamp(this.holdTargetDegree, 0, 6)
+      : clamp(6 - held.y, 0, 6);
+    const currentMicro = this.getNoteMicroOffset(step, heldDeg, seqTypeHeld);
+    const targetValue = this.microtimingValueForColumn(x);
+    let delta = targetValue - currentMicro;
+    if (targetValue !== 0 && targetValue === currentMicro) {
+      delta = -currentMicro;
+    }
+    const res = this.setStepMicroOffset(held.x, held.y, delta, { uiMode: opts.uiMode });
+    const microValue = res ? res.microOffset : this.getNoteMicroOffset(step, heldDeg, seqTypeHeld);
+    this.updateMicrotimingValue(microValue, { forceRefresh: true });
+    this.heldStepModified = true;
+    if (heldInfo) {
+      heldInfo.action = "micro";
+      heldInfo.actionDone = false;
+      heldInfo.microEdit = true;
+      this.keyHolds.set(heldKey, heldInfo);
+    }
+    if (!res) return null;
+    const rawY = opts.uiMode ? (held.y === 0 ? 6 : held.y - 1) : held.y;
+    const heldOct = (seqTypeHeld === "poly" || seqTypeHeld === "drum")
+      ? this.getNoteOctave(step, heldDeg)
+      : (step?.octave || 0);
+    return {
+      type: "micro",
+      x: held.x,
+      y: held.y,
+      rawY,
+      octave: heldOct,
+      microOffset: microValue,
+      delta: res.delta
+    };
+  }
+
+  handleMicroGridRelease(x, y, opts = {}) {
+    if (!this.microtiming.active) return null;
+    // keep current selection lit so the user can re-enter micro mode and see it
+    this.updateMicrotimingValue(this.microtiming.value, { forceRefresh: true });
+    return null;
+  }
+
   createChainFromSelection(steps = [], opts = {}) {
     const pat = this.getPattern();
     const page = this.pages[this.currentPage];
@@ -1150,6 +1302,26 @@ export class SGridState {
   handleGridKey(x, y, s, opts = {}) {
     const forcePatternControl = !!opts.forcePatternControl;
     const uiMode = !!opts.uiMode;
+    const WIDTH = 16;
+    const page = this.pages[this.currentPage];
+    const pat = this.getPattern();
+    const heldKey = this.heldStep ? `${this.heldStep.x},${this.heldStep.y}` : null;
+    const heldInfo = heldKey ? this.keyHolds.get(heldKey) : null;
+    const microModeActive = !!(this.microtiming.active && heldKey && heldKey === this.microtiming.heldKey);
+    if (microModeActive) {
+      if (s === 1) {
+        if (y === this.microtiming.row) {
+          return this.handleMicroGridPress(x, y, { page, pat, heldInfo, uiMode });
+        }
+        if (this.heldStep && x === this.heldStep.x - 1 && y === this.heldStep.y) {
+          this.exitMicrotimingMode();
+        }
+        return null;
+      }
+      if (s === 0 && y === this.microtiming.row) {
+        return this.handleMicroGridRelease(x, y, { page, pat, heldInfo, uiMode });
+      }
+    }
     if (forcePatternControl) {
       return this.handlePatternControlKey(x, y, s);
     }
@@ -1197,6 +1369,45 @@ export class SGridState {
     // In pattern control view, map presses to pattern/mute actions per device
     if (this.patternControlMode) {
       return this.handlePatternControlKey(x, y, s);
+    }
+
+    const indicatorCol = this.heldStep
+      ? (this.heldStep.x < WIDTH / 2 ? (WIDTH - 1) : 0)
+      : null;
+    const indicatorShift = OCTAVE_ROW_TO_SHIFT[y];
+    if (indicatorCol != null && indicatorShift != null && x === indicatorCol && s === 1 && heldInfo?.editMode && this.heldStep && pat) {
+      const heldRowInfo = this.getRowInfo(this.heldStep.y, { uiMode });
+      const targetDegree = heldRowInfo?.degree ?? 0;
+      const seqType = page?.sequencerType || "mono";
+      const heldAbs = this.heldStep.x + (pat.barView || 0) * 16;
+      const heldStepObj = pat.steps[heldAbs];
+      if (heldStepObj?.on) {
+        const currentOct = seqType === "poly"
+          ? this.getNoteOctave(heldStepObj, targetDegree)
+          : (heldStepObj.octave || 0);
+        const delta = indicatorShift - currentOct;
+        if (delta !== 0) {
+          const res = this.setStepOctave(this.heldStep.x, this.heldStep.y, delta, { uiMode });
+          if (res) {
+            if (heldInfo) {
+              heldInfo.octaveChanged = true;
+              heldInfo.action = "octave";
+              heldInfo.actionDone = false;
+              this.keyHolds.set(heldKey, heldInfo);
+            }
+            this.heldStepModified = true;
+            this.enqueueOctaveOverlay({
+              page: this.currentPage,
+              x: this.heldStep.x,
+              y: this.heldStep.y,
+              octave: res.octave,
+              delta: res.delta
+            });
+            return { type: "octave", x: this.heldStep.x, y: this.heldStep.y, octave: res.octave, delta: res.delta };
+          }
+        }
+      }
+      return null;
     }
 
     // bottom row y=7 for controls
@@ -1274,8 +1485,6 @@ export class SGridState {
     }
     const rowInfo = this.getRowInfo(y, { uiMode });
     if (rowInfo.stepRow) {
-      const page = this.pages[this.currentPage];
-      const pat = this.getPattern();
       const len = Math.max(1, pat?.length_steps || 16);
       const abs = pat ? x + pat.barView * 16 : -1;
       if (abs < 0 || abs >= len) return null;
@@ -1288,8 +1497,6 @@ export class SGridState {
       const targetDegree = rowInfo.degree;
       const targetOctave = rowInfo.topRow ? rowInfo.octaveOffset : 0;
       const key = `${x},${y}`;
-      const heldKey = this.heldStep ? `${this.heldStep.x},${this.heldStep.y}` : null;
-      const heldInfo = heldKey ? this.keyHolds.get(heldKey) : null;
       if (s === 1) {
         const now = Date.now();
         const heldAbs = this.heldStep && pat ? this.heldStep.x + pat.barView * 16 : -1;
@@ -1297,7 +1504,7 @@ export class SGridState {
         if (heldInfo?.editMode && heldStepObj?.on) {
           const heldRow = this.getRowInfo(this.heldStep.y, { uiMode });
           const heldMatches = this.noteMatchesRow(heldStepObj, heldRow.degree, seqType, heldRow);
-          if (heldMatches) {
+          if (heldMatches && x > this.heldStep.x) {
             const chainEvents = this.applySlideChainGesture(x, y, rowInfo, { uiMode });
             if (chainEvents) {
               const actionType = seqType === "mdtonal" ? "mdslide" : "slide";
@@ -1378,8 +1585,22 @@ export class SGridState {
         if (inEdit && heldInfo?.actionDone) {
           return null;
         }
-        const microEditActive = !!heldInfo?.microEdit;
         if (inEdit && !(sameCell || upDownNeighbor || leftNeighbor || rightNeighbor || rightDiagonal)) {
+          return null;
+        }
+        const canEnterMicroMode = inEdit && leftNeighbor && heldStepObj?.on && !microModeActive;
+        if (canEnterMicroMode) {
+          const row = this.microtimingRowForNoteRow(this.heldStep.y);
+          const noteDeg = this.holdTargetDegree != null ? clamp(this.holdTargetDegree, 0, 6) : clamp(6 - this.heldStep.y, 0, 6);
+          const currentMicro = this.getNoteMicroOffset(heldStepObj, noteDeg, page?.sequencerType || "mono");
+          this.startMicrotimingMode(heldKey, row, currentMicro);
+          if (heldInfo) {
+            heldInfo.action = "micro";
+            heldInfo.actionDone = false;
+            heldInfo.microEdit = true;
+            this.keyHolds.set(heldKey, heldInfo);
+          }
+          this.heldStepModified = true;
           return null;
         }
         const seqTypeSlide = page?.sequencerType || "mono";
@@ -1387,36 +1608,6 @@ export class SGridState {
           inEdit && rightDiagonal && heldStepObj?.on;
         const mdSlideAllowed = seqTypeSlide === "mdtonal" &&
           inEdit && rightDiagonal && heldStepObj?.on;
-        const microNudgeAllowed = inEdit && heldStepObj?.on && (leftNeighbor || rightNeighbor);
-        if (microNudgeAllowed) {
-          const delta = leftNeighbor ? -1 : 1;
-          if (heldInfo) {
-            heldInfo.action = "micro";
-            heldInfo.actionDone = false;
-            heldInfo.microEdit = true;
-            this.keyHolds.set(heldKey, heldInfo);
-          }
-          const res = this.setStepMicroOffset(this.heldStep.x, this.heldStep.y, delta, { uiMode });
-          if (res) {
-            this.heldStepModified = true;
-            const seqTypeHeld = page?.sequencerType || "mono";
-            const heldDeg = this.holdTargetDegree != null ? clamp(this.holdTargetDegree, 0, 6) : clamp(6 - this.heldStep.y, 0, 6);
-            const heldOct = (seqTypeHeld === "poly" || seqTypeHeld === "drum")
-              ? this.getNoteOctave(heldStepObj, heldDeg)
-              : (heldStepObj?.octave || 0);
-            const rawY = uiMode ? (this.heldStep.y === 0 ? 6 : this.heldStep.y - 1) : this.heldStep.y;
-            return {
-              type: "micro",
-              x: this.heldStep.x,
-              y: this.heldStep.y,
-              rawY,
-              octave: heldOct,
-              microOffset: res.microOffset,
-              delta: res.delta
-            };
-          }
-          return null;
-        }
         if (slideAllowed) {
           heldStepObj.slide = !heldStepObj.slide;
           if (heldInfo) {
@@ -1656,6 +1847,14 @@ export class SGridState {
         const key = `${x},${y}`;
         const activeKey = this.heldStep ? `${this.heldStep.x},${this.heldStep.y}` : null;
         const activeHold = activeKey ? this.keyHolds.get(activeKey) : null;
+        const microActive = !!(this.microtiming.active && activeKey && this.microtiming.heldKey === activeKey);
+        if (microActive && key !== activeKey) {
+          this.keyHolds.delete(key);
+          return null;
+        }
+        if (key === activeKey) {
+          this.exitMicrotimingMode();
+        }
         const holdInfo = this.keyHolds.get(key) || (key === activeKey ? activeHold : null);
         const t = this.holdTimers.get(key);
         if (t) {
@@ -4148,6 +4347,7 @@ export class SGridState {
     if (!page || !pat) {
       return uiFrame;
     }
+
     if (this.patternControlMode && !ignorePatternControl) {
       return baseFrame;
     }
@@ -4189,11 +4389,77 @@ export class SGridState {
     return uiFrame;
   }
 
+  renderMicrotimingFrame(slideTimeMs) {
+    const WIDTH = 16;
+    const HEIGHT = 8;
+    const STEP_MICRO = this.ledLevels.step_micro || 10;
+    const rowLevel = Math.max(1, Math.round(STEP_MICRO * 0.45) - 2);
+    const selectionLevel = Math.max(STEP_MICRO, rowLevel + 1);
+    const octFactor = this.getOctavePulseFactor();
+    const activeRow = Number.isFinite(this.microtiming?.row)
+      ? clamp(this.microtiming.row, 0, HEIGHT - 1)
+      : MICRO_ROW_TOP;
+    const prevMicroActive = !!this.microtiming?.active;
+    let baseFrame = new Array(WIDTH * HEIGHT).fill(0);
+    if (prevMicroActive) {
+      try {
+        this.microtiming.active = false;
+        baseFrame = this.renderLED(slideTimeMs, {
+          includeOctaveHint: false,
+          includeMicroHint: false,
+          ignorePatternHoldDim: true,
+          ignoreIsomorphic: true
+        });
+      } finally {
+        this.microtiming.active = prevMicroActive;
+      }
+    }
+    const frame = Array.isArray(baseFrame) ? baseFrame.slice() : new Array(WIDTH * HEIGHT).fill(0);
+    const dimLevel = Math.max(1, Math.round((this.ledLevels.step_on || 10) * 0.35));
+    const heldIdx = this.heldStep ? (this.heldStep.y * WIDTH + this.heldStep.x) : null;
+    const leftIdx = (this.heldStep && this.heldStep.x > 0)
+      ? (this.heldStep.y * WIDTH + (this.heldStep.x - 1))
+      : null;
+    for (let idx = 0; idx < frame.length; idx += 1) {
+      const row = Math.floor(idx / WIDTH);
+      if (row === activeRow) continue;
+      const current = frame[idx] || 0;
+      if (current > 0) frame[idx] = Math.min(current, dimLevel);
+    }
+    const heldBase = this.ledLevels.step_on || 10;
+    const microActive = Number.isFinite(this.microtiming?.value) && this.microtiming.value !== 0;
+    if (heldIdx != null) {
+      const heldLevel = microActive
+        ? this.applyOctavePulse(heldBase, true, octFactor)
+        : heldBase;
+      frame[heldIdx] = Math.max(frame[heldIdx] || 0, heldLevel);
+    }
+    if (leftIdx != null && Math.floor(leftIdx / WIDTH) !== activeRow) {
+      frame[leftIdx] = Math.max(frame[leftIdx] || 0, dimLevel);
+    }
+    const bottomRow = HEIGHT - 1;
+    for (let x = 0; x < WIDTH; x += 1) {
+      frame[bottomRow * WIDTH + x] = 0;
+    }
+    const midCols = new Set([7, 8]);
+    for (let x = 0; x < WIDTH; x += 1) {
+      const idx = activeRow * WIDTH + x;
+      const midBoost = midCols.has(x) ? (rowLevel + 3) : rowLevel;
+      frame[idx] = Math.max(frame[idx] || 0, midBoost);
+    }
+    const highlighted = Number.isFinite(this.microtiming?.column)
+      ? clamp(this.microtiming.column, 0, WIDTH - 1)
+      : null;
+    if (highlighted != null) {
+      frame[activeRow * WIDTH + highlighted] = Math.max(frame[activeRow * WIDTH + highlighted] || 0, selectionLevel);
+    }
+    return frame;
+  }
+
   // DO NOT CHANGE LOGIC: monome LED frame generation depends on this exact pipeline.
   renderLED(slideTimeMs, opts = {}) {
     const ignoreIsomorphic = !!opts.ignoreIsomorphic;
     const includeOctaveHint = opts.includeOctaveHint !== false;
-    const includeMicroHint = opts.includeMicroHint !== false;
     const ignorePatternHoldDim = !!opts.ignorePatternHoldDim;
     const WIDTH = 16;
     const HEIGHT = 8;
@@ -4212,18 +4478,14 @@ export class SGridState {
     const DEVICE_ACTIVE = this.ledLevels.device_active;
     const GATE_LED_BUMP = 2;
     const DEVICE_HAS_DATA = Math.max(DEVICE_PRESENT - 2, PATTERN_HAS_DATA);
-    const tMs = Date.now();
-    const OCT_LOOP_MS = 1200;
-    const octPhase = (tMs % OCT_LOOP_MS) / OCT_LOOP_MS; // 0..1
-    const octPulse = (1 - Math.cos(octPhase * Math.PI * 2)) * 0.5; // cosine ease
-    const PULSE_MIN = 0.9;
-    const octFactor = PULSE_MIN + (1 - PULSE_MIN) * octPulse; // 0.9..1.0
-    const applyOctavePulse = (level, shifted) => {
-      if (!shifted) return level;
-      return Math.max(1, Math.round(level * octFactor));
-    };
+    const octFactor = this.getOctavePulseFactor();
+    const applyOctavePulse = (level, shifted) => this.applyOctavePulse(level, shifted, octFactor);
     const frame = new Array(WIDTH * HEIGHT).fill(OFF);
+    const tMs = Date.now();
     const page = this.pages[this.currentPage];
+    if (this.microtiming.active) {
+      return this.renderMicrotimingFrame(slideTimeMs);
+    }
     if (!ignoreIsomorphic && this.isIsomorphicMode(this.currentPage)) {
       return this.renderIsomorphicLED(slideTimeMs, opts);
     }
@@ -4231,6 +4493,7 @@ export class SGridState {
       return this.renderPatternControlLED();
     }
     const pat = page?.patterns[page?.active_pattern];
+    const bar = pat?.barView || 0;
     const heldKey = this.heldStep ? `${this.heldStep.x},${this.heldStep.y}` : null;
     const heldInfo = heldKey ? this.keyHolds.get(heldKey) : null;
     const multiHoldAny = this.keyHolds.size > 1;
@@ -4238,7 +4501,6 @@ export class SGridState {
     const inEditMode = this.heldStep && heldInfo && !multiHoldAny
       && (heldInfo.editMode || (!multiRecent && heldInfo.start && (Date.now() - heldInfo.start) >= 150));
     if (pat) {
-      const bar = pat.barView || 0;
       const slideStarts = [];
       for (let x = 0; x < 16; x++) {
         const abs = x + bar * 16;
@@ -4332,32 +4594,6 @@ export class SGridState {
         });
       }
       // microtiming hint in edit mode: light left/right neighbors by offset sign
-      if (includeMicroHint && inEditMode && this.heldStep) {
-        const hx = this.heldStep.x;
-        const hy = this.heldStep.y;
-        const seqTypeHint = page?.sequencerType || "mono";
-        const hintY = heldInfo?.uiMode ? (hy === 0 ? 6 : hy - 1) : hy;
-        const heldDeg = this.holdTargetDegree != null ? clamp(this.holdTargetDegree, 0, 6) : clamp(6 - hintY, 0, 6);
-        const absHeld = hx + bar * 16;
-        const heldStepObj = pat.steps[absHeld];
-        const microOffset = this.getNoteMicroOffset(heldStepObj, heldDeg, seqTypeHint);
-        const previewLevel = Math.max(1, Math.round(STEP_MICRO * 0.35));
-        const accentLevel = Math.max(previewLevel, Math.round(STEP_MICRO * 0.8));
-        const candidates = [
-          { x: hx - 1, isLeft: true },
-          { x: hx + 1, isLeft: false }
-        ];
-        candidates.forEach((c) => {
-          if (c.x < 0 || c.x >= WIDTH) return;
-          const idx = hintY * WIDTH + c.x;
-          const levelHint = microOffset > 0
-            ? (c.isLeft ? previewLevel : accentLevel)
-            : microOffset < 0
-              ? (c.isLeft ? accentLevel : previewLevel)
-              : previewLevel;
-          if (frame[idx] === OFF || frame[idx] < levelHint) frame[idx] = levelHint;
-        });
-      }
       if (!page.sequencerStopped) {
         const len = Math.max(1, pat.length_steps);
         // Use the computed playhead to avoid the pageTicks pre-increment offset.
@@ -4459,6 +4695,51 @@ export class SGridState {
           const level = Math.round(dim + (bright - dim) * pulse);
           frame[sp.y1 * WIDTH + sp.x1] = level;
         });
+      }
+    }
+    if (pat && inEditMode && this.heldStep) {
+      const editDim = Math.max(1, Math.round((STEP_ON || 10) * 0.35));
+      const heldIdx = this.heldStep.y * WIDTH + this.heldStep.x;
+      const leftIdx = (this.heldStep.x > 0) ? (this.heldStep.y * WIDTH + (this.heldStep.x - 1)) : null;
+      for (let idx = 0; idx < frame.length; idx++) {
+        if (idx === heldIdx || idx === leftIdx) continue;
+        const current = frame[idx] || 0;
+        if (current > 0) frame[idx] = Math.min(current, editDim);
+      }
+      if (leftIdx != null) {
+        frame[leftIdx] = Math.max(frame[leftIdx] || 0, STEP_ON || 10);
+      }
+      frame[heldIdx] = Math.max(frame[heldIdx] || 0, STEP_ON || 10);
+
+      const seqTypeHint = page?.sequencerType || "mono";
+      const indicatorCol = this.heldStep.x < WIDTH / 2 ? (WIDTH - 1) : 0;
+      const indicatorDim = Math.max(1, Math.round(STEP_MICRO * 0.45) - 2);
+      const indicatorLevel = page?.sequencerStopped
+        ? Math.max(1, Math.round(indicatorDim * 0.4))
+        : indicatorDim;
+      OCTAVE_INDICATOR_ROWS.forEach((row) => {
+        const idx = row * WIDTH + indicatorCol;
+        frame[idx] = Math.max(frame[idx] || 0, indicatorLevel);
+      });
+      const hx = this.heldStep.x;
+      const hy = this.heldStep.y;
+      const absHeld = hx + bar * 16;
+      const heldStepObj = pat.steps[absHeld];
+      const targetDegree = this.holdTargetDegree != null
+        ? clamp(this.holdTargetDegree, 0, 6)
+        : clamp(6 - hy, 0, 6);
+      let octaveShift = heldStepObj?.octave || 0;
+      if (seqTypeHint === "poly" && Array.isArray(heldStepObj?.notes) && heldStepObj.notes.includes(targetDegree)) {
+        octaveShift = this.getNoteOctave(heldStepObj, targetDegree);
+      }
+      const normalizedShift = clamp(Math.round(Number(octaveShift) || 0), -2, 2);
+      const shiftRow = OCTAVE_SHIFT_ROW_MAP[String(normalizedShift)];
+      if (shiftRow != null) {
+        const highlightLevel = page?.sequencerStopped
+          ? Math.max(1, Math.round((STEP_ON || 10) * 0.35))
+          : (STEP_ON || 10);
+        const idx = shiftRow * WIDTH + indicatorCol;
+        frame[idx] = Math.max(frame[idx] || 0, highlightLevel);
       }
     }
     if (this.patternHeld && !ignorePatternHoldDim) {

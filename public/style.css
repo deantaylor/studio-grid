@@ -318,9 +318,6 @@ body {
   -webkit-appearance: none;
 }
 
-
-
-
 .icon-btn,
 .follow-btn {
   --base: var(--panel);

@@ -1051,7 +1051,7 @@ function renderAndPush(force = false) {
   const ignorePatternControl = !showMonomeControls && !state.patternControlMode;
   const frame = fullScaleMode
     ? state.renderUIFrame(Date.now(), { ignorePatternControl })
-    : state.renderLED();
+    : state.renderLED(Date.now(), { ignorePatternControl, includeMicroHint: false });
   const forceRefresh = state.consumeForceRefresh?.() || false;
   queueLedFrame(frame, forceRefresh || force);
 }
@@ -1112,10 +1112,10 @@ function broadcastEvents(events) {
 
 function processTick({ tick, externalStepMs = null }) {
   const { midiEvents, patternSwitches, barChanges, barPlayheadChanges } = state.tick(followEnabled, externalStepMs, tick);
-  const ignorePatternControl = !showMonomeControls && !state.patternControlMode;
-  const frame = fullScaleMode
-    ? state.renderUIFrame(Date.now(), { ignorePatternControl })
-    : state.renderLED(Date.now());
+    const ignorePatternControl = !showMonomeControls && !state.patternControlMode;
+    const frame = fullScaleMode
+      ? state.renderUIFrame(Date.now(), { ignorePatternControl })
+      : state.renderLED(Date.now(), { ignorePatternControl, includeMicroHint: false });
   queueLedFrame(frame);
   if (patternSwitches?.length) {
     patternSwitches.forEach((sw) => broadcastPatternStatus(sw.page));
