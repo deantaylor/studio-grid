@@ -97,13 +97,15 @@ let clockOutEnabled = false;
 let clockOutDevice = ""; // MIDI clock out target (id/name hint)
 let lastGridDevices = serial.deviceList?.() || [];
 updateFullScaleMode(lastGridDevices);
-// LED throttling to avoid flooding monome / browser
-const LED_MIN_INTERVAL = 16; // ~60fps
-const SLIDE_ANIM_INTERVAL = LED_MIN_INTERVAL; // reuse LED cadence for slide animation
-let pendingLedFrame = null;
-let ledTimer = null;
-let lastLedSend = 0;
-let lastRenderedFrame = null;
+const TARGET_FPS = 60;
+const FRAME_INTERVAL_MS = Math.round(1000 / TARGET_FPS);
+const SLIDE_ANIM_INTERVAL = FRAME_INTERVAL_MS;
+const GRID_SIZE = 16 * 8;
+const SMALL_DIFF_THRESHOLD = 8; // <=8 LEDs can use diff packets
+let frontFrame = new Array(GRID_SIZE).fill(0);
+let backFrame = frontFrame.slice();
+let dirtyFrame = false;
+let forceNextSend = false;
 let ledPaused = false;
 let slideAnimTimer = null;
 let lastExternalTickIntervalMs = null;
@@ -153,6 +155,37 @@ function cropFrame(frame, cols, rows, sourceWidth = 16) {
     }
   }
   return out;
+}
+
+function cloneGridFrame(frame) {
+  const out = new Array(GRID_SIZE).fill(0);
+  if (!frame) return out;
+  const len = Math.min(GRID_SIZE, frame.length);
+  for (let i = 0; i < len; i++) {
+    const val = Number(frame[i] || 0);
+    out[i] = Number.isFinite(val) ? Math.max(0, Math.min(15, Math.round(val))) : 0;
+  }
+  return out;
+}
+
+function framesEqual(a, b) {
+  if (a === b) return true;
+  if (!a || !b) return false;
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < Math.min(a.length, GRID_SIZE); i++) {
+    if (a[i] !== b[i]) return false;
+  }
+  return true;
+}
+
+function countFrameChanges(a, b) {
+  if (!a || !b) return GRID_SIZE;
+  const maxLen = Math.max(a.length, b.length, GRID_SIZE);
+  let delta = 0;
+  for (let i = 0; i < maxLen; i++) {
+    if ((a[i] || 0) !== (b[i] || 0)) delta++;
+  }
+  return delta;
 }
 
 function resetLedBuffers() {
@@ -1009,8 +1042,11 @@ function handleClientMessage(ws, data) {
       renderAndPush();
       break;
     case "clear_leds":
-      pendingLedFrame = null;
-      lastRenderedFrame = null;
+      frontFrame = new Array(GRID_SIZE).fill(0);
+      backFrame = frontFrame.slice();
+      dirtyFrame = false;
+      forceNextSend = true;
+      resetLedBuffers();
       serial.clearAll();
       break;
     default:
@@ -1047,13 +1083,15 @@ function guessContentType(p) {
 }
 
 function renderAndPush(force = false) {
+  if (ledPaused) return;
+  manageLedAnimation();
   maybeBroadcastPage();
   const ignorePatternControl = !showMonomeControls && !state.patternControlMode;
   const frame = fullScaleMode
     ? state.renderUIFrame(Date.now(), { ignorePatternControl })
     : state.renderLED(Date.now(), { ignorePatternControl, includeMicroHint: false });
   const forceRefresh = state.consumeForceRefresh?.() || false;
-  queueLedFrame(frame, forceRefresh || force);
+  enqueueLedFrame(frame, force || forceRefresh);
 }
 
 function buildMusicalEvents({ tick, midiEvents }) {
@@ -1112,11 +1150,11 @@ function broadcastEvents(events) {
 
 function processTick({ tick, externalStepMs = null }) {
   const { midiEvents, patternSwitches, barChanges, barPlayheadChanges } = state.tick(followEnabled, externalStepMs, tick);
-    const ignorePatternControl = !showMonomeControls && !state.patternControlMode;
-    const frame = fullScaleMode
-      ? state.renderUIFrame(Date.now(), { ignorePatternControl })
-      : state.renderLED(Date.now(), { ignorePatternControl, includeMicroHint: false });
-  queueLedFrame(frame);
+  const ignorePatternControl = !showMonomeControls && !state.patternControlMode;
+  const frame = fullScaleMode
+    ? state.renderUIFrame(Date.now(), { ignorePatternControl })
+    : state.renderLED(Date.now(), { ignorePatternControl, includeMicroHint: false });
+  enqueueLedFrame(frame);
   if (patternSwitches?.length) {
     patternSwitches.forEach((sw) => broadcastPatternStatus(sw.page));
   }
@@ -1271,7 +1309,7 @@ function manageLedAnimation(forceStop = false) {
       const frame = fullScaleMode
         ? state.renderUIFrame(Date.now(), { ignorePatternControl })
         : state.renderLED(Date.now());
-      queueLedFrame(frame);
+      enqueueLedFrame(frame);
     }, SLIDE_ANIM_INTERVAL);
   } else if (slideAnimTimer) {
     clearInterval(slideAnimTimer);
@@ -1279,9 +1317,8 @@ function manageLedAnimation(forceStop = false) {
   }
 }
 
-function queueLedFrame(frame, force = false) {
-  if (ledPaused) return;
-  manageLedAnimation();
+function enqueueLedFrame(frame, force = false) {
+  if (ledPaused || !frame) return;
   const octaveEvents = state.consumeOctaveOverlays ? state.consumeOctaveOverlays() : [];
   if (octaveEvents.length) {
     octaveEvents.forEach((ev) => broadcast({ type: "octave_overlay", ...ev }));
@@ -1290,79 +1327,76 @@ function queueLedFrame(frame, force = false) {
   if (microEvents.length) {
     microEvents.forEach((ev) => broadcast({ type: "micro_overlay", ...ev }));
   }
-  const patternControllersPresent = hasPatternControllers();
-  if (!force && !patternControllersPresent && lastRenderedFrame && frame && lastRenderedFrame.length === frame.length) {
-    let same = true;
-    for (let i = 0; i < frame.length; i++) {
-      if (frame[i] !== lastRenderedFrame[i]) {
-        same = false;
-        break;
-      }
-    }
-    if (same) return;
-  }
   if (force) {
-    lastRenderedFrame = null;
+    forceNextSend = true;
     resetLedBuffers();
   }
-  pendingLedFrame = frame;
-  scheduleLedSend(force);
+  backFrame = cloneGridFrame(frame);
+  dirtyFrame = true;
 }
 
-function scheduleLedSend(force = false) {
-  if (ledTimer && !force) return;
-  const now = Date.now();
-  const wait = force ? 0 : Math.max(0, LED_MIN_INTERVAL - (now - lastLedSend));
-  if (ledTimer) {
-    clearTimeout(ledTimer);
-    ledTimer = null;
-  }
-  ledTimer = setTimeout(() => {
-    ledTimer = null;
-    if (!pendingLedFrame) return;
-    const frameToSend = pendingLedFrame;
-    pendingLedFrame = null;
-    lastLedSend = Date.now();
-    serial.sendLEDDiff(frameToSend);
-    const patternDevices = patternControllerDevices();
-    if (patternDevices.length) {
-      const patternFrame = state.renderPatternControlLED();
-      const binaryFrame = state.renderPatternControlBinaryLED();
-      patternDevices.forEach((dev) => {
-        const cols = dev.cols || 8;
-        const rows = dev.rows || 8;
-        const useBinary = dev.supportsLevels === false;
-        const baseFrame = useBinary ? binaryFrame : patternFrame;
-        const sliced = cropFrame(baseFrame, cols, rows, 16);
-        if (sliced) {
-          serial.sendLEDDiff(sliced, { deviceId: dev.id });
-        }
-      });
-    }
-    lastRenderedFrame = frameToSend;
-    // broadcast a UI-safe frame without octave neighbor hints
-    const uiFrame = fullScaleMode
-      ? state.renderUIFrame(Date.now(), { includeOctaveHint: false, includeMicroHint: false, ignorePatternHoldDim: true })
-      : state.renderLED(Date.now(), { includeOctaveHint: false, includeMicroHint: false, ignorePatternHoldDim: true });
-    const inPatternControl = state.patternControlMode || state.patternControlHeld || state.patternHeld;
-    broadcast({
-      type: "led_frame",
-      frame: uiFrame,
-      octaveOverlays: inPatternControl ? Array.from({ length: 9 }, () => []) : state.octaveOverlaySnapshot(),
-      deviceHasData: state.pages.map((p, idx) => (idx === 0 ? null : state.deviceHasData(idx))),
-      deviceStopped: state.pages.map((p, idx) => (idx === 0 ? null : !!p?.sequencerStopped))
-    });
-    if (pendingLedFrame) scheduleLedSend();
-  }, wait);
+function broadcastLedUIFrame() {
+  const uiFrame = fullScaleMode
+    ? state.renderUIFrame(Date.now(), { includeOctaveHint: false, includeMicroHint: false, ignorePatternHoldDim: true })
+    : state.renderLED(Date.now(), { includeOctaveHint: false, includeMicroHint: false, ignorePatternHoldDim: true });
+  const inPatternControl = state.patternControlMode || state.patternControlHeld || state.patternHeld;
+  broadcast({
+    type: "led_frame",
+    frame: uiFrame,
+    octaveOverlays: inPatternControl ? Array.from({ length: 9 }, () => []) : state.octaveOverlaySnapshot(),
+    deviceHasData: state.pages.map((p, idx) => (idx === 0 ? null : state.deviceHasData(idx))),
+    deviceStopped: state.pages.map((p, idx) => (idx === 0 ? null : !!p?.sequencerStopped))
+  });
 }
+
+function frameTick() {
+  if (ledPaused || !dirtyFrame || !backFrame) return;
+  if (framesEqual(backFrame, frontFrame) && !forceNextSend) {
+    dirtyFrame = false;
+    return;
+  }
+  dirtyFrame = false;
+  const changes = countFrameChanges(backFrame, frontFrame);
+  const useDiff = changes > 0 && changes <= SMALL_DIFF_THRESHOLD;
+  if (useDiff) {
+    serial.sendLEDDiff(backFrame);
+  } else {
+    serial.sendLEDFrame(backFrame);
+  }
+  frontFrame = backFrame.slice();
+  forceNextSend = false;
+  broadcastLedUIFrame();
+  const patternDevices = patternControllerDevices();
+  if (patternDevices.length) {
+    const patternFrame = state.renderPatternControlLED();
+    const binaryFrame = state.renderPatternControlBinaryLED();
+    patternDevices.forEach((dev) => {
+      const cols = dev.cols || 8;
+      const rows = dev.rows || 8;
+      const useBinary = dev.supportsLevels === false;
+      const baseFrame = useBinary ? binaryFrame : patternFrame;
+      const sliced = cropFrame(baseFrame, cols, rows, 16);
+      if (sliced) {
+        serial.sendLEDDiff(sliced, { deviceId: dev.id });
+      }
+    });
+  }
+}
+
+setInterval(frameTick, FRAME_INTERVAL_MS);
 
 function pauseLEDOutput(flag = true) {
   ledPaused = !!flag;
-  pendingLedFrame = null;
-  lastRenderedFrame = null;
   if (ledPaused) {
-    manageSlideAnimation(false);
+    dirtyFrame = false;
+    forceNextSend = true;
+    frontFrame = new Array(GRID_SIZE).fill(0);
+    backFrame = frontFrame.slice();
+    resetLedBuffers();
+    manageLedAnimation(true);
     serial.clearAll();
+  } else {
+    forceNextSend = true;
   }
 }
 
