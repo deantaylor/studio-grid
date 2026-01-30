@@ -890,7 +890,9 @@ export class SGridState {
             micro: this.clampMicro(s.micro || 0),
             accent: !!s.accent,
             slide: !!s.slide,
+            mdSlide: !!s.mdSlide,
             chain: !!s.chain,
+            tie: !!s.tie,
             cc: clamp(Math.round(s.cc || 0), 0, 127),
             notes: Array.isArray(s.notes) ? s.notes.slice() : [],
             accented: Array.isArray(s.accented) ? s.accented.slice() : [],
@@ -951,7 +953,18 @@ export class SGridState {
     if (Array.isArray(snap.deviceNotes)) this.deviceNotes = snap.deviceNotes.slice(0, 9);
     if (Array.isArray(snap.deviceColors)) this.deviceColors = snap.deviceColors.slice(0, 9);
     if (Array.isArray(snap.deviceOrder)) this.deviceOrder = this.normalizeDeviceOrder(snap.deviceOrder);
-    if (Array.isArray(snap.midi)) this.midi = snap.midi.slice(0, 9);
+    const midiSnap = Array.isArray(snap.midi) ? snap.midi : (Array.isArray(snap.midiSettings) ? snap.midiSettings : null);
+    if (midiSnap) {
+      const base = this.buildDefaultMidi();
+      const next = base.map((entry, idx) => {
+        if (idx === 0) return null;
+        const raw = midiSnap[idx] || {};
+        const outId = typeof raw.outId === "string" ? raw.outId : (entry?.outId || "");
+        const channel = clamp(Math.round(raw.channel || entry?.channel || 1), 1, 16);
+        return { outId, channel };
+      });
+      this.midi = next.slice(0, 9);
+    }
     if (Array.isArray(snap.ccNumbers)) {
       snap.ccNumbers.forEach((cc, idx) => {
         if (idx >= 1 && idx <= 8 && this.pages[idx]) {
@@ -1002,23 +1015,29 @@ export class SGridState {
             pat.time_scale = Math.max(1, Math.min(4, Number(snapScale) || 1));
             pat.change_mode = patSnap.change_mode || pat.change_mode;
             pat.barView = clamp(patSnap.barView || 0, 0, Math.max(0, Math.ceil(pat.length_steps / 16) - 1));
+            const seqType = page.sequencerType || "mono";
             if (Array.isArray(patSnap.steps)) {
               for (let si = 0; si < pat.steps.length && si < patSnap.steps.length; si++) {
                 const ss = patSnap.steps[si];
                 if (!ss) continue;
+                const slide = !!ss.slide;
+                const mdSlide = !!ss.mdSlide || (seqType === "mdtonal" && slide);
                 pat.steps[si] = {
                   on: !!ss.on,
                   degree: clamp(ss.degree || 0, 0, 6),
                   octave: clamp(ss.octave || 0, -3, 4),
                   micro: this.normalizeMicroValue(ss.micro || 0, { legacy: legacyMicro }),
                   accent: !!ss.accent,
-                  slide: !!ss.slide,
+                  slide: seqType === "mdtonal" ? false : slide,
+                  mdSlide,
+                  chain: !!ss.chain,
                   tie: !!ss.tie,
                   cc: clamp(Math.round(ss.cc || 0), 0, 127),
                   notes: Array.isArray(ss.notes) ? ss.notes.map((n) => clamp(n, 0, 6)) : [],
                   accented: Array.isArray(ss.accented) ? ss.accented.map((n) => clamp(n, 0, 6)) : [],
                   noteOctaves: this.sanitizeNoteOctaves(ss.noteOctaves),
-                  noteMicros: this.sanitizeNoteMicros(ss.noteMicros, { legacy: legacyMicro })
+                  noteMicros: this.sanitizeNoteMicros(ss.noteMicros, { legacy: legacyMicro }),
+                  noteSlides: this.sanitizeNoteSlides(ss.noteSlides)
                 };
               }
             }

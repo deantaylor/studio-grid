@@ -164,6 +164,7 @@ let draggedDevicePage = null;
 let deviceHasData = Array(9).fill(null);
 let deviceStopped = Array(9).fill(null);
 let midiSettings = Array.from({ length: 9 }, () => ({ outId: "", channel: 1 }));
+let lastTabsRenderKey = "";
 
 const canvas = document.getElementById("grid");
 // fix canvas size for 40px cells with 16px gaps
@@ -4282,7 +4283,33 @@ function applyDeviceReorder(fromPage, toPage) {
   ws?.readyState === WebSocket.OPEN && ws.send(JSON.stringify({ type: "set_device_order", order }));
 }
 
-function renderTabs() {
+function buildTabsRenderKey() {
+  const order = normalizeDeviceOrder(deviceOrder);
+  const activePage = activeUiPage;
+  const activeColor = activePage ? getDeviceDisplayColor(activePage) : null;
+  const nameKey = order.map((page) => deviceNames[page] || "").join("|");
+  const patternKey = order
+    .map((page) => {
+      const patIdx = activePatterns[page] || 1;
+      const len = (patternLengths[page] && patternLengths[page][patIdx]) || null;
+      const hasPattern = Number.isFinite(len) && len > 0;
+      return `${patIdx}:${hasPattern ? 1 : 0}`;
+    })
+    .join("|");
+  const configKey = [
+    defaultDeviceColor,
+    multiColorDefault ? 1 : 0,
+    defaultUsesMainWhite ? 1 : 0,
+    whiteMode || "",
+    colorMode || ""
+  ].join("|");
+  return `${order.join(",")}|${activePage}|${activeColor || ""}|${nameKey}|${patternKey}|${configKey}`;
+}
+
+function renderTabs({ force = false } = {}) {
+  const nextKey = buildTabsRenderKey();
+  if (!force && nextKey === lastTabsRenderKey) return;
+  lastTabsRenderKey = nextKey;
   tabs.innerHTML = "";
   const order = normalizeDeviceOrder(deviceOrder);
   order.forEach((page) => {
@@ -4756,6 +4783,9 @@ function applyPageMidi() {
 }
 
 midiChan.onchange = () => {
+  if (!midiSettings[currentPage]) {
+    midiSettings[currentPage] = { outId: midiSel?.value || "", channel: 1 };
+  }
   const ch = Math.max(1, Math.min(16, Number(midiChan.value) || 1));
   midiSettings[currentPage].channel = ch;
   sendMidiConfig();
@@ -6613,7 +6643,7 @@ function setFullScaleMode(next) {
 function refreshUiColors() {
   refreshLedPalette();
   refreshDevicePalette();
-  renderTabs();
+  renderTabs({ force: true });
   renderDeviceTabProgressFrame();
   renderFrameIfReady();
 }

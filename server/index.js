@@ -989,26 +989,6 @@ function handleClientMessage(ws, data) {
           snap.setName = deriveSetNameFromFilename(data.filename);
         }
         if (state.loadSnapshot(snap)) {
-          if (typeof snap.baseDivision === "number") {
-            state.setBaseDivision(snap.baseDivision);
-            broadcast({ type: "base_division", division: state.baseDivision });
-          }
-          if (typeof snap.gateLength === "number") {
-            state.setGateLength(snap.gateLength);
-            broadcast({ type: "gate_length", length: state.gateLength });
-          }
-          if (typeof snap.monoSlidePad === "number") {
-            state.setMonoSlidePad(snap.monoSlidePad);
-            broadcast({ type: "mono_slide_pad", value: state.monoSlidePad });
-          }
-          if (typeof snap.patternControlLatch === "boolean") {
-            state.patternControlLatch = !!snap.patternControlLatch;
-            broadcast({ type: "pattern_control_latch", enabled: state.patternControlLatch });
-          }
-          if (snap.ledLevels && typeof snap.ledLevels === "object") {
-            state.setLedLevels(snap.ledLevels);
-            broadcast({ type: "led_levels", levels: state.ledLevels });
-          }
           transport.bpm = state.tempo;
           if (typeof snap.autoFill === "boolean") {
             autoFillBars = !!snap.autoFill;

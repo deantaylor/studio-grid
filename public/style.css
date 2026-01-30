@@ -76,6 +76,8 @@
   --mix-disabled: 65%;
   --mix-ring: 25%;
   --mix-border: 8%;
+  --hover-duration: 180ms;
+  --hover-ease: cubic-bezier(0.22, 1, 0.36, 1);
 
   /* LED brightness */
   --led-0: var(--surface);
@@ -121,6 +123,30 @@ textarea {
   --ring:     color-mix(in oklch, var(--base), var(--fg) var(--mix-ring));
   --border:   color-mix(in oklch, var(--base), var(--fg) var(--mix-border));
   --fg-disabled: color-mix(in oklch, var(--fg), var(--bg) 45%);
+}
+
+.stateful,
+button,
+input,
+select,
+textarea,
+.custom-select-option,
+.icon-btn,
+.follow-btn,
+.transport-btn,
+.clock-toggle,
+.bar-row .bar-btn,
+.tabs button,
+.context-menu button,
+.color-swatch,
+.icon-btn i {
+  transition:
+    background var(--hover-duration) var(--hover-ease),
+    color var(--hover-duration) var(--hover-ease),
+    border-color var(--hover-duration) var(--hover-ease),
+    box-shadow var(--hover-duration) var(--hover-ease),
+    transform var(--hover-duration) var(--hover-ease),
+    opacity var(--hover-duration) var(--hover-ease);
 }
 
 @supports not (color: color-mix(in oklch, #000, #fff 50%)) {
@@ -399,6 +425,9 @@ body {
 }
 .transport-btn.active:hover {
   background: var(--fg);
+}
+.transport-play.active i {
+  color: var(--fg);
 }
 .transport {
   display: flex;
@@ -1316,7 +1345,7 @@ canvas#grid {
   display: flex;
   flex-direction: column;
   align-items: stretch;
-  margin: 0 auto var(--spacing-40);
+  margin: 0 auto;
   padding-bottom: 0;
   max-width: var(--grid-width);
 }
