@@ -36,6 +36,20 @@ const TAB_PROGRESS_BAR_X_PAD = 0;
 const PATTERN_CONTROL_GRID_X = 15;
 const PATTERN_CONTROL_GRID_Y = 7;
 
+const textContentDescriptor = Object.getOwnPropertyDescriptor(Node.prototype, "textContent");
+const textContentCache = new WeakMap();
+if (textContentDescriptor && textContentDescriptor.set) {
+  Object.defineProperty(Node.prototype, "textContent", {
+    ...textContentDescriptor,
+    set(value) {
+      const str = value == null ? "" : String(value);
+      if (textContentCache.get(this) === str) return;
+      textContentCache.set(this, str);
+      textContentDescriptor.set.call(this, str);
+    }
+  });
+}
+
 export function clampLedLevel(level) {
   const n = Number(level);
   if (!Number.isFinite(n)) return 0;
@@ -169,6 +183,7 @@ const swingLabelTop = document.getElementById("swing-label-top");
 const swingBlock = document.getElementById("swing-block");
 const midiSel = document.getElementById("midi-out");
 const midiChan = document.getElementById("midi-chan");
+const midiChanLabel = document.getElementById("midi-chan-label");
 const tabs = document.getElementById("page-tabs");
 const deviceTabProgressCanvas = document.getElementById("device-tab-progress");
 const deviceTabProgressCtx = deviceTabProgressCanvas?.getContext("2d") || null;
@@ -1966,12 +1981,11 @@ function setRunningState(isRunning) {
   const transportBtn = document.getElementById("transport-toggle");
   if (transportBtn) {
     const icon = transportBtn.querySelector("i");
-    const label = transportBtn.querySelector(".transport-label");
     transportBtn.title = running ? "Stop" : "Play";
     transportBtn.setAttribute("aria-pressed", running);
+    transportBtn.setAttribute("aria-label", running ? "Stop" : "Play");
     transportBtn.classList.toggle("active", running);
     if (icon) icon.className = running ? "iconoir-pause-solid" : "iconoir-play-solid";
-    if (label) label.textContent = running ? "Stop" : "Play";
   }
   if (running) {
     startDeviceTabProgressLoop();
@@ -2737,6 +2751,15 @@ function applyClockSourceUI() {
   if (tempoInput && tempoWrap) {
     tempoInput.readOnly = clockSource === "external";
     tempoInput.classList.toggle("readonly", clockSource === "external");
+    if (clockSource === "external") {
+      tempoInput.tabIndex = -1;
+    } else {
+      tempoInput.removeAttribute("tabindex");
+    }
+  }
+  const tempoStepperWrap = tempoInput?.closest(".number-wrap");
+  if (tempoStepperWrap) {
+    tempoStepperWrap.dataset.stepperHidden = clockSource === "external" ? "true" : "false";
   }
   if (clockSource === "external" && tempoInput) {
     tempoInput.value = formatTempoDisplay(tempo);
@@ -4791,20 +4814,15 @@ function applySeqTypeUI({ deferFrame = false } = {}) {
   if (transposeWrap) transposeWrap.classList.toggle("hidden", false);
   if (midiChan) {
     const disableChan = type === "mdtonal";
-    midiChan.disabled = disableChan;
+    midiChan.dataset.readonly = disableChan ? "true" : "false";
+    midiChan.setAttribute("aria-readonly", disableChan ? "true" : "false");
     if (disableChan) {
       midiChan.value = "";
-      midiChan.placeholder = "Auto";
-      midiChan.readOnly = true;
-      midiChan.style.cursor = "not-allowed";
+      midiChan.tabIndex = -1;
     } else {
-      midiChan.placeholder = "";
-      midiChan.readOnly = false;
       midiChan.value = String(midiSettings[currentPage]?.channel || 1);
-      midiChan.style.cursor = "";
+      midiChan.removeAttribute("tabindex");
     }
-    const stepper = midiChan.closest(".number-wrap")?.querySelector(".number-stepper");
-    if (stepper) stepper.disabled = disableChan;
   }
   applyPageTranspose();
   applyDrumNotesUI();
@@ -4842,6 +4860,7 @@ function applyPatternLauncherTypeUI() {
     const chanLabel = midiChan.closest("label");
     if (chanLabel) chanLabel.classList.toggle("hidden", showLauncher);
   }
+  if (midiChanLabel) midiChanLabel.classList.toggle("hidden", showLauncher || type === "mdtonal");
   const mdWrap = document.getElementById("md-config");
   if (mdWrap) mdWrap.classList.toggle("hidden", showLauncher || type !== "mdtonal");
   const ccWrap = document.getElementById("cc-config");
@@ -4937,7 +4956,7 @@ function applyScaleNotesUI() {
   }
 
   scaleNotesWrap.innerHTML = labels
-    .map((note) => `<span class="scale-note label">${note}</span>`)
+    .map((note) => `<span class="scale-note">${note}</span>`)
     .join("");
 }
 

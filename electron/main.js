@@ -206,6 +206,7 @@ function createWindow() {
     height: BASE_HEIGHT,
     show: false,
     useContentSize: true,
+    resizable: false,
     webPreferences: {
       backgroundThrottling: false,
       nodeIntegration: false,
@@ -219,8 +220,24 @@ function createWindow() {
     try {
       const { width, height } = await win.webContents.executeJavaScript(
         `(() => {
-          const uiScale = Number(getComputedStyle(document.documentElement).getPropertyValue("--ui-scale")) || 1;
-          return { width: Math.ceil(1080 * uiScale), height: Math.ceil(690 * uiScale) };
+          const scale = Number(getComputedStyle(document.documentElement).getPropertyValue("--ui-scale")) || 1;
+          const fallbackWidth = 1080;
+          const fallbackHeight = 690;
+          const candidates = [document.getElementById("app-shell"), document.body, document.documentElement];
+          const measured = candidates.reduce(
+            (acc, element) => {
+              if (!element) return acc;
+              return {
+                width: Math.max(acc.width, element.scrollWidth || 0, element.offsetWidth || 0, element.clientWidth || 0),
+                height: Math.max(acc.height, element.scrollHeight || 0, element.offsetHeight || 0, element.clientHeight || 0)
+              };
+            },
+            { width: window.innerWidth / scale, height: window.innerHeight / scale }
+          );
+          return {
+            width: Math.ceil(Math.max(measured.width, fallbackWidth) * scale),
+            height: Math.ceil(Math.max(measured.height, fallbackHeight) * scale)
+          };
         })();`
       );
 
@@ -271,7 +288,18 @@ function createWindow() {
     }).catch(() => {});
   });
 
-  win.webContents.once("did-finish-load", resizeToContent);
+  const scheduleSecondResize = () => {
+    setTimeout(() => {
+      resizeToContent();
+    }, 250);
+  };
+
+  const handleDidFinishLoad = () => {
+    resizeToContent();
+    scheduleSecondResize();
+  };
+
+  win.webContents.on("did-finish-load", handleDidFinishLoad);
   win.loadURL(`http://localhost:${chosenPort}`);
 }
 

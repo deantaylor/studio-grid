@@ -234,6 +234,7 @@ body {
   width: 100%;
   position: relative;
   zoom: var(--ui-scale);
+  padding: var(--spacing-40) 0;
 }
 
 .no-select {
@@ -242,18 +243,31 @@ body {
 
 .top-bar {
   display: flex;
-  justify-content: space-between;
-  align-items: center;
+  flex-direction: column;
+  gap: var(--spacing-32);
   padding: 0;
-  gap: var(--spacing-16);
-  flex-wrap: nowrap;
   background: transparent;
   box-shadow: none;
   top: 0;
   z-index: 10;
   max-width: var(--grid-width);
   width: 100%;
-  margin: var(--spacing-32) auto var(--spacing-8) auto;
+  margin: 0 auto var(--spacing-24);
+}
+.top-bar-body {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--spacing-16);
+  width: 100%;
+}
+.top-bar-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--spacing-4);
+  width: 100%;
 }
 
 .badge {
@@ -262,7 +276,7 @@ body {
   gap: var(--spacing-4);
 }
 
-.badge-title { font-size: 32px; font-weight: 400; line-height: 32px; letter-spacing: -0.03em; color: var(--fg); }
+.badge-title { font-size: 40px; font-weight: 400; line-height: 40px; letter-spacing: -0.03em; color: var(--fg); }
 .badge-sub { font-size: 8px; color: var(--muted); }
 
 .hidden { display: none !important; }
@@ -272,11 +286,11 @@ body {
 .top-controls {
   display: flex;
   align-items: center;
-  gap: var(--spacing-8);
+  gap: var(--spacing-24);
   flex: 1;
   justify-content: flex-start;
-  margin-left: var(--spacing-24);
   font-size: 12px;
+  min-width: 0;
 }
 .top-controls .tempo-block,
 .top-controls .swing-block,
@@ -310,12 +324,28 @@ body {
 .tempo-block input.readonly {
   cursor: default;
   border: none;
+  pointer-events: none;
+  caret-color: transparent;
 }
 
 .tempo-block input.readonly::-webkit-inner-spin-button,
 .tempo-block input.readonly::-webkit-outer-spin-button {
   margin: 0;
   -webkit-appearance: none;
+  appearance: none;
+}
+.tempo-block input.readonly::-moz-inner-spin-button,
+.tempo-block input.readonly::-moz-outer-spin-button {
+  margin: 0;
+  -moz-appearance: none;
+  appearance: none;
+}
+.device-toolbar-right select:disabled {
+  color: var(--label);
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  background: transparent;
+  pointer-events: none;
 }
 
 .icon-btn,
@@ -329,7 +359,7 @@ body {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  transition: background 0.15s ease, filter 0.15s ease, border-color 0.15s ease;
+  transition: background 0.2s ease, filter 0.2s ease, border-color 0.2s ease, color 0.2s ease;
 }
 .icon-btn {
   width: 32px;
@@ -345,15 +375,19 @@ body {
 }
 .transport-btn {
   --base: var(--panel-strong);
-  background: var(--base);
+  background: var(--surface);
   border-radius: var(--radius-sm);
   color: var(--fg);
   display: inline-flex;
   align-items: center;
-  gap: var(--spacing-8);
+  justify-content: center;
+  width: 49.88px;
   height: 32px;
-  padding: 0 var(--spacing-8);
+  min-width: 32px;
+  min-height: 32px;
+  padding: 0;
   position: relative;
+  transition: background 0.2s ease, color 0.2s ease, filter 0.2s ease;
 }
 .transport-btn:hover {
   background: var(--hover);
@@ -366,10 +400,14 @@ body {
 .transport-btn.active:hover {
   background: var(--fg);
 }
-.transport-label {
-   font-size: 12px;
-  font-weight: 400;
-  line-height: 12px;
+.transport {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-4);
+  margin-left: auto;
+}
+.transport-record {
+  color: var(--dev-1);
 }
 .icon-btn.square { width: 32px; height: 32px; }
 [title="Clear"] { color: var(--danger); }
@@ -407,6 +445,26 @@ body {
   display: block;
   line-height: 1;
   transform: translateY(1px);
+}
+.transport-stop i {
+  width: 12px;
+  height: 12px;
+  font-size: 12px;
+  transform: none;
+  margin: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.transport-stop [class^="iconoir-"]:before,
+.transport-stop [class*=" iconoir-"]:before {
+  width: 12px;
+  height: 12px;
+  background-color: currentColor;
+  transform: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
 }
 .icon-btn:hover,
 .follow-btn:hover,
@@ -496,7 +554,7 @@ body {
 .transport {
   display: flex;
   align-items: center;
-  gap: var(--spacing-8);
+  gap: var(--spacing-4);
 }
 .tempo-block {
   position: relative;
@@ -511,7 +569,7 @@ body {
   width: 96px;
 }
 .transport {
-  margin-left: auto;
+  align-self: center;
 }
 
 .top-controls .label-text {
@@ -519,11 +577,11 @@ body {
   letter-spacing: 0.4px;
   text-transform: uppercase;
   color: var(--label);
-  background: var(--panel-strong);
+  background: transparent;
 }
 .top-controls input[type="number"],
 .top-controls select {
-  background: var(--input-bg);
+  background: transparent;
 }
 .top-controls input[type="number"] {
   font-weight: 600;
@@ -536,7 +594,7 @@ body {
   font-weight: 700;
   border: none;
   border-radius: var(--radius-sm);
-  background: var(--input-bg);
+  background: transparent;
 }
 .swing-block input {
   width: 60px;
@@ -544,7 +602,7 @@ body {
   text-align: center;
   border: none;
   border-radius: var(--radius-sm);
-  background: var(--input-bg);
+  background: transparent;
 }
 
 .clock-toggle {
@@ -571,8 +629,8 @@ body {
 }
 
 .devices {
-  padding: 0 auto;
-  margin: var(--spacing-8) auto;
+  padding: 0;
+  margin: 0 auto var(--spacing-16);
   width: 100%;
 }
 .tabs-row {
@@ -690,7 +748,7 @@ body {
   width: var(--grid-width);
   max-width: 100%;
 
-  margin: 0 auto var(--spacing-24);
+  margin: 0 auto;
   align-items: center;
   overflow: visible;
   padding: 0;
@@ -714,7 +772,7 @@ body {
   justify-content: space-between;
   width: 100%;
   max-width: var(--grid-width);
-  margin: var(--spacing-8) auto var(--spacing-8);
+  margin: 0 auto var(--spacing-16);
 }
 .device-toolbar-left,
 .device-toolbar-right {
@@ -734,11 +792,12 @@ body {
 }
 /* drum config removed */
 
+.label,
 label {
   display: flex;
   flex-direction: row;
   align-items: center;
-  gap: var(--spacing-2);
+  gap: var(--spacing-4);
   padding: 0;
   background: transparent;
   border-radius: 0;
@@ -751,14 +810,33 @@ label {
   letter-spacing: 0.4px;
   color: var(--label);
   white-space: nowrap;
+  position: relative;
+}
+.label {
+  padding-left: var(--spacing-8);
+}
+.label::before,
+label::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 1px;
+  height: 24px;
+  background: var(--muted);
+  border-radius: var(--radius-sm);
 }
 .label-text {
   display: inline-flex;
   align-items: center;
   height: 32px;
   padding: 0 var(--spacing-8);
-  background: var(--input-bg);
+  background: transparent;
   border-radius: var(--radius-sm);
+}
+.label.label-text {
+  padding-left: var(--spacing-8);
 }
 label .select-wrap,
 label input:not([type="checkbox"]),
@@ -770,6 +848,16 @@ label textarea {
 .device-toolbar label select,
 label .select-wrap {
   width: auto;
+}
+.device-toolbar label select[data-readonly="true"] {
+  pointer-events: none;
+  cursor: default;
+  color: var(--label);
+  letter-spacing: 0.4px;
+  text-transform: uppercase;
+}
+.cc-config:not(.md-config) label::before {
+  display: none;
 }
 .select-wrap.input-sm { width: 64px; }
 .select-wrap.input-md { width: 96px; }
@@ -789,7 +877,7 @@ label .select-wrap {
   padding: 0 var(--spacing-24) 0 var(--spacing-8);
   border: none;
   border-radius: var(--radius-sm);
-  background: var(--input-bg);
+  background: transparent;
   color: var(--fg);
   font-size: 12px;
   line-height: 12px;
@@ -804,7 +892,7 @@ label .select-wrap {
   box-shadow: 0 0 0 2px var(--ring);
 }
 .select-wrap.custom-select.is-open .custom-select-trigger {
-  background: var(--panel-strong);
+  background: transparent;
 }
 .custom-select-menu {
   position: absolute;
@@ -869,28 +957,25 @@ label .select-wrap {
 
 input,
 select,
-textarea,
+textarea {
+  font-family: "Inter", system-ui, -apple-system, sans-serif;
+  height: 32px;
+  border: none;
+  background: transparent;
+  color: var(--fg);
+  --base: var(--input-bg);
+/*  transition: background 0.15s ease, opacity 0.15s ease, filter 0.15s ease; */
+}
+
 button {
   font-family: "Inter", system-ui, -apple-system, sans-serif;
   height: 32px;
   border: none;
   background: var(--base);
   color: var(--fg);
-/*  transition: background 0.15s ease, opacity 0.15s ease, filter 0.15s ease; */
 }
 
 button { --base: var(--panel); }
-.transport-btn {
-  height: 32px;
-  min-height: 32px;
-}
-input,
-select,
-textarea {
-  --base: var(--input-bg);
-  height: 32px;
-
-}
 
 button:not(:disabled):hover,
 input:not(:disabled):hover,
@@ -913,11 +998,17 @@ textarea:focus-visible {
   box-shadow: 0 0 0 2px var(--ring);
 }
 
-button:disabled,
+button:disabled {
+  background: var(--disabled);
+  color: var(--fg-disabled);
+  cursor: not-allowed;
+  pointer-events: none;
+}
+
 input:disabled,
 select:disabled,
 textarea:disabled {
-  background: var(--disabled);
+  background: transparent;
   color: var(--fg-disabled);
   cursor: not-allowed;
   pointer-events: none;
@@ -953,11 +1044,11 @@ select.input-md,
 textarea.input-md { width: 120px; max-width: 120px; min-width: 120px; }
 input.input-lg,
 select.input-lg,
-textarea.input-lg { width: 200px; max-width: 200px; min-width: 200px; }
+textarea.input-lg { width: 164px; max-width: 164px; min-width: 164px; }
 
 .select-wrap.input-sm { width: 72px; max-width: 72px; min-width: 72px; }
 .select-wrap.input-md { width: 120px; max-width: 120px; min-width: 120px; }
-.select-wrap.input-lg { width: 200px; max-width: 200px; min-width: 200px; }
+.select-wrap.input-lg { width: 164px; max-width: 164px; min-width: 164px; }
 
 /* Use custom steppers for number inputs */
 input[type="number"] {
@@ -974,6 +1065,27 @@ input[type="number"]::-webkit-outer-spin-button {
   display: inline-flex;
   align-items: center;
   width: 100%;
+}
+.number-wrap[data-stepper-hidden="true"] .number-stepper {
+  display: none;
+}
+.number-wrap[data-stepper-hidden="true"] input {
+  pointer-events: none;
+  caret-color: transparent;
+  background: transparent;
+}
+.number-wrap[data-stepper-hidden="true"] input:hover {
+  background: transparent;
+}
+.number-wrap[data-stepper-hidden="true"] input::placeholder {
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  color: var(--label);
+}
+.number-wrap[data-stepper-hidden="true"] input {
+  pointer-events: none;
+  caret-color: transparent;
 }
 .number-stepper {
   position: absolute;
@@ -1041,6 +1153,7 @@ textarea { resize: vertical; }
 }
 .transpose-switch .trans-label {
   white-space: nowrap;
+  padding-left: var(--spacing-8);
 }
 .transpose-step {
   --base: var(--panel);
@@ -1098,7 +1211,7 @@ canvas#grid {
   width: 100%;
   max-width: var(--grid-width);
   position: relative;
-  margin: var(--spacing-8) 0;
+  margin: 0 auto var(--spacing-24);
 }
 .cc-config,
 .md-config {
@@ -1203,7 +1316,7 @@ canvas#grid {
   display: flex;
   flex-direction: column;
   align-items: stretch;
-  margin: var(--spacing-8) auto;
+  margin: 0 auto var(--spacing-40);
   padding-bottom: 0;
   max-width: var(--grid-width);
 }

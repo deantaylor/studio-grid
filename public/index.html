@@ -21,53 +21,62 @@
 
   <div id="app-shell" class="app-shell">
     <header class="top-bar">
-      <div class="badge no-select">
-        <div class="badge-title">studio:<strong>grid</strong></div>
+      <div class="top-bar-head">
+        <div class="badge no-select">
+          <div class="badge-title">studio:<strong>grid</strong></div>
+        </div>
+        <div class="top-actions">
+          <button id="new-set" class="icon-btn" title="New set"><i class="iconoir-empty-page"
+              aria-hidden="true"></i></button>
+          <button id="import" class="icon-btn" title="Load set"><i class="iconoir-upload" aria-hidden="true"></i></button>
+          <button id="export" class="icon-btn" title="Save set"><i class="iconoir-floppy-disk"
+              aria-hidden="true"></i></button>
+          <button id="settings-btn" class="icon-btn" title="Settings"><i class="iconoir-settings"
+              aria-hidden="true"></i></button>
+        </div>
       </div>
-      <div class="top-controls">
-        <div class="tempo-block" id="tempo-block">
-          <span class="label label-text" id="tempo-label-top">Tempo</span>
-          <div class="select-wrap tempo-clock-select hidden" id="clock-source-top-wrap">
-            <select id="clock-source-top" aria-label="Clock source">
-              <option value="internal">Internal</option>
-              <option value="external">External</option>
-            </select>
-            <i class="iconoir-nav-arrow-down select-caret" aria-hidden="true"></i>
-          </div>
-          <input type="number" class="input-sm" id="tempo" min="20" max="300" step="0.1" />
-        </div>
-        <div class="swing-block" id="swing-block">
-          <span class="label label-text" id="swing-label-top">Swing</span>
-          <input type="number" id="swing" min="50" max="80" step="1" />
-        </div>
-        <div class="scale-inline">
-          <span class="label label-text">Scale</span>
-          <div class="scale-pair">
-            <div class="select-wrap">
-              <select id="scale-root" aria-label="Scale root" class="input-sm"></select>
+      <div class="top-bar-body">
+        <div class="top-controls">
+          <div class="tempo-block" id="tempo-block">
+            <span class="label label-text" id="tempo-label-top">Tempo</span>
+            <div class="select-wrap tempo-clock-select hidden" id="clock-source-top-wrap">
+              <select id="clock-source-top" aria-label="Clock source">
+                <option value="internal">Internal</option>
+                <option value="external">External</option>
+              </select>
               <i class="iconoir-nav-arrow-down select-caret" aria-hidden="true"></i>
             </div>
-            <div class="select-wrap">
-              <select id="scale-mode" aria-label="Scale mode" class="input-md"></select>
-              <i class="iconoir-nav-arrow-down select-caret" aria-hidden="true"></i>
+            <input type="number" class="input-sm" id="tempo" min="20" max="300" step="0.1" />
+          </div>
+          <div class="swing-block" id="swing-block">
+            <span class="label label-text" id="swing-label-top">Swing</span>
+            <input type="number" id="swing" min="50" max="80" step="1" />
+          </div>
+          <div class="scale-inline">
+            <span class="label label-text">Scale</span>
+            <div class="scale-pair">
+              <div class="select-wrap">
+                <select id="scale-root" aria-label="Scale root" class="input-sm"></select>
+                <i class="iconoir-nav-arrow-down select-caret" aria-hidden="true"></i>
+              </div>
+              <div class="select-wrap">
+                <select id="scale-mode" aria-label="Scale mode" class="input-md"></select>
+                <i class="iconoir-nav-arrow-down select-caret" aria-hidden="true"></i>
+              </div>
             </div>
           </div>
         </div>
-      </div>
-      <div class="transport">
-        <button id="transport-toggle" class="transport-btn" title="Play" aria-pressed="false">
-          <span class="transport-label">Play</span>
-          <i class="iconoir-play-solid" aria-hidden="true"></i>
-        </button>
-      </div>
-      <div class="top-actions hidden">
-        <button id="new-set" class="icon-btn" title="New set"><i class="iconoir-empty-page"
-            aria-hidden="true"></i></button>
-        <button id="import" class="icon-btn" title="Load set"><i class="iconoir-upload" aria-hidden="true"></i></button>
-        <button id="export" class="icon-btn" title="Save set"><i class="iconoir-floppy-disk"
-            aria-hidden="true"></i></button>
-        <button id="settings-btn" class="icon-btn" title="Settings"><i class="iconoir-settings"
-            aria-hidden="true"></i></button>
+        <div class="transport">
+          <button id="transport-record" class="transport-btn transport-record" title="Record">
+            <i class="iconoir-circle" aria-hidden="true"></i>
+          </button>
+          <button id="transport-toggle" class="transport-btn transport-play" title="Play" aria-pressed="false">
+            <i class="iconoir-play-solid" aria-hidden="true"></i>
+          </button>
+          <button id="transport-stop" class="transport-btn transport-stop" title="Stop">
+            <i class="iconoir-square-solid" aria-hidden="true"></i>
+          </button>
+        </div>
       </div>
     </header>
 
@@ -108,31 +117,6 @@
                   <i class="iconoir-nav-arrow-right" aria-hidden="true"></i>
                 </button>
               </div>
-              <div class="cc-config md-config hidden" id="md-config">
-                <label><span class="label-text">MD Track</span>
-                  <div class="select-wrap input-sm">
-                    <select id="md-track" class="input-sm" aria-label="MD track">
-                    <option value="1">1 BD</option>
-                    <option value="2">2 SD</option>
-                    <option value="3">3 HT</option>
-                    <option value="4">4 MT</option>
-                    <option value="5">5 LT</option>
-                    <option value="6">6 CP</option>
-                    <option value="7">7 RS</option>
-                    <option value="8">8 CB</option>
-                    <option value="9">9 CH</option>
-                    <option value="10">10 OH</option>
-                    <option value="11">11 RC</option>
-                    <option value="12">12 CC</option>
-                    <option value="13">13 M1</option>
-                    <option value="14">14 M2</option>
-                    <option value="15">15 M3</option>
-                    <option value="16">16 M4</option>
-                    </select>
-                    <i class="iconoir-nav-arrow-down select-caret" aria-hidden="true"></i>
-                  </div>
-                </label>
-              </div>
               <div class="cc-config hidden" id="cc-config">
                 <label><span class="label-text">CC</span>
                   <input type="number" id="cc-number" class="input-sm" min="0" max="127" value="1"
@@ -151,8 +135,54 @@
                   <i class="iconoir-nav-arrow-down select-caret" aria-hidden="true"></i>
                 </div>
               </label>
-              <label><span class="label-text">Ch</span>
-                <input type="number" id="midi-chan" class="input-sm" min="1" max="16" value="1" />
+              <div class="cc-config md-config hidden" id="md-config">
+                <label><span class="label-text">MD Track</span>
+                  <div class="select-wrap input-sm">
+                    <select id="md-track" class="input-sm" aria-label="MD track">
+                      <option value="1">1 BD</option>
+                      <option value="2">2 SD</option>
+                      <option value="3">3 HT</option>
+                      <option value="4">4 MT</option>
+                      <option value="5">5 LT</option>
+                      <option value="6">6 CP</option>
+                      <option value="7">7 RS</option>
+                      <option value="8">8 CB</option>
+                      <option value="9">9 CH</option>
+                      <option value="10">10 OH</option>
+                      <option value="11">11 RC</option>
+                      <option value="12">12 CC</option>
+                      <option value="13">13 M1</option>
+                      <option value="14">14 M2</option>
+                      <option value="15">15 M3</option>
+                      <option value="16">16 M4</option>
+                    </select>
+                    <i class="iconoir-nav-arrow-down select-caret" aria-hidden="true"></i>
+                  </div>
+                </label>
+              </div>
+              <label id="midi-chan-label"><span class="label-text">Ch</span>
+                <div class="select-wrap">
+                  <select id="midi-chan" class="input-sm">
+                    <option value="">-</option>
+                    <option value="1">1</option>
+                    <option value="2">2</option>
+                    <option value="3">3</option>
+                    <option value="4">4</option>
+                    <option value="5">5</option>
+                    <option value="6">6</option>
+                    <option value="7">7</option>
+                    <option value="8">8</option>
+                    <option value="9">9</option>
+                    <option value="10">10</option>
+                    <option value="11">11</option>
+                    <option value="12">12</option>
+                    <option value="13">13</option>
+                    <option value="14">14</option>
+                    <option value="15">15</option>
+                    <option value="16">16</option>
+                  </select>
+                  <i class="iconoir-nav-arrow-down select-caret" aria-hidden="true"></i>
+                </div>
               </label>
             </div>
           </div>
