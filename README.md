@@ -11,6 +11,12 @@
 - Full local gate: `npm run check`
 - Build installers: `npm run dist`
 
+## Beta Releases
+- Bump to next beta version (creates commit + tag): `npm version prerelease --preid=beta`
+- Push commit + tag: `git push origin main --follow-tags`
+- Pushing tags like `v0.1.2-beta.0` triggers `.github/workflows/beta-release.yml`
+- Workflow publishes a GitHub pre-release with `.dmg` and `.exe` assets
+
 ## Documentation
 - Docs index: `docs/README.md`
 - User manual: `docs/manual/README.md`
