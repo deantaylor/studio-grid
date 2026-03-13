@@ -1347,7 +1347,9 @@ function connectWS() {
         setDirty(true);
         queueUndoSnapshot();
       }
-    } catch (e) {}
+    } catch (e) {
+      // ignore serialization/inspection errors and continue sending raw payload
+    }
     return rawSend(data);
   };
   ws.onopen = () => {
@@ -3910,7 +3912,9 @@ if (settingsRestoreCfg) {
     try {
       localStorage.removeItem("mgrid_led_config");
       localStorage.removeItem(LOCAL_CONFIG_KEY);
-    } catch (e) {}
+    } catch (e) {
+      // ignore localStorage errors while restoring defaults
+    }
     cachedConfig = null;
     showToast("Defaults restored");
     log("Restored default config");

@@ -3,7 +3,7 @@ import {
   buildTd3PatternBlock,
   parseTd3SeqBuffer,
   importTd3Pattern
-} from "../server/td3.js";
+} from "../../../server/td3.js";
 
 const clamp = (val, min, max) => Math.max(min, Math.min(max, val));
 const SCALE = {

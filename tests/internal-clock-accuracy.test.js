@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
-import { MGridState } from "../server/state.js";
+import { SGridState } from "../server/state.js";
 
 function makeFlatPattern(steps = 8) {
-  const state = new MGridState();
+  const state = new SGridState();
   const pat = state.pages[1].patterns[1];
   pat.length_steps = steps;
   for (let i = 0; i < steps; i++) {

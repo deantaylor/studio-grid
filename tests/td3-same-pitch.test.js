@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import { buildTd3Seq, parseTd3SeqBuffer, importTd3Pattern } from "../server/td3.js";
-import { MGridState } from "../server/state.js";
+import { SGridState } from "../server/state.js";
 
 function makeMonoStateWithFourSameNotes({ slideFirstThree = true } = {}) {
-  const state = new MGridState();
+  const state = new SGridState();
   const pat = state.pages[1].patterns[1];
   pat.length_steps = 4;
   for (let i = 0; i < pat.steps.length; i++) {
@@ -47,7 +47,7 @@ async function testExportEncodesTiesForSamePitchRun() {
 async function testImportMakesHeldRunPlayable() {
   const state = makeMonoStateWithFourSameNotes();
   const { buffer } = await buildTd3Seq(state);
-  const importState = new MGridState();
+  const importState = new SGridState();
   importTd3Pattern(importState, buffer);
   const steps = importState.pages[1].patterns[1].steps;
   const baseDeg = steps[0].degree;

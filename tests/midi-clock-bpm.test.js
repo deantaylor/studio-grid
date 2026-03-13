@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
-import { MGridState } from "../server/state.js";
+import { SGridState } from "../server/state.js";
 
 function calcMidiClockBpm({ tempo, bars = 16, baseDivision = 16 }) {
-  const state = new MGridState();
+  const state = new SGridState();
   state.setTempo(tempo);
   state.setBaseDivision(baseDivision);
   // One sequencer tick = one 16th note (base division), pulses per tick = 96/div

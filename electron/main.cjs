@@ -322,15 +322,14 @@ app.whenReady().then(async () => {
 ipcMain.on("ui-scale-changed", (event, payload) => {
   const win = BrowserWindow.fromWebContents(event.sender);
   if (!win) return;
-  let scale = 1;
   let width = null;
   let height = null;
+  const scale = (payload && typeof payload === "object")
+    ? (Number(payload.scale) || 1)
+    : (Number(payload) || 1);
   if (payload && typeof payload === "object") {
-    scale = Number(payload.scale) || 1;
     width = Number(payload.width) || null;
     height = Number(payload.height) || null;
-  } else {
-    scale = Number(payload) || 1;
   }
   const { width: targetW, height: targetH } = clampWindowSize(scale, width, height);
   win.setContentSize(targetW, targetH);

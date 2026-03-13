@@ -29,7 +29,7 @@ Quick index (jump list)
 
 ## Architecture overview
 - Electron wrapper starts the local Node server and opens the UI.
-  - File: `electron/main.js`
+  - File: `electron/main.cjs`
 - Node server serves static UI, manages WebSocket sync, talks to Monome via serialosc, and runs the transport clock.
   - File: `server/index.js`
 - Browser UI renders the grid, handles WebMIDI + interactions, and sends edits to the server.
@@ -41,15 +41,15 @@ Quick index (jump list)
 
 ### App lifecycle, windows, and menus
 - Electron startup + server boot
-  - `electron/main.js` (`ensureServer`, `app.whenReady`)
+  - `electron/main.cjs` (`ensureServer`, `app.whenReady`)
 - Window sizing, UI scale changes
-  - `electron/main.js` (`createWindow`, `clampWindowSize`, IPC `ui-scale-changed`)
+  - `electron/main.cjs` (`createWindow`, `clampWindowSize`, IPC `ui-scale-changed`)
 - App menus (New/Open/Save/Settings, Undo/Redo)
-  - `electron/main.js` (`buildAppMenu`) → renderer via IPC
+  - `electron/main.cjs` (`buildAppMenu`) → renderer via IPC
 - Save-on-quit dialog
-  - `electron/main.js` (`rendererDirty`, `requestRendererSave`, close handler)
+  - `electron/main.cjs` (`rendererDirty`, `requestRendererSave`, close handler)
 Find quickly
-- `electron/main.js`: `ensureServer`, `createWindow`, `buildAppMenu`, `ipcMain.on`, `ipcMain.handle`
+- `electron/main.cjs`: `ensureServer`, `createWindow`, `buildAppMenu`, `ipcMain.on`, `ipcMain.handle`
 
 ### HTTP server + static UI
 - Serves `public/` files, handles `/api/export`, `/api/export-td3`
@@ -182,7 +182,7 @@ Find quickly
   - `public/main.js` (file picker + `applySnapshot` flow)
   - `server/state.js` (`loadSnapshot`)
 - Electron save to Documents/studio-grid/sets
-  - `electron/main.js` (IPC `save-set`)
+  - `electron/main.cjs` (IPC `save-set`)
   - `public/main.js` (`saveSnapshotToElectron`)
 Find quickly
 - `public/main.js`: `startExport`, `saveSnapshotToElectron`, `loadSavedConfig`
@@ -212,14 +212,14 @@ Find quickly
 ### UI scale + layout
 - UI scale selector and window resize
   - `public/main.js` (ui scale select + WS/IPC send)
-  - `electron/main.js` (`ui-scale-changed` handler)
+  - `electron/main.cjs` (`ui-scale-changed` handler)
 Find quickly
 - `public/main.js`: `applyUiScale`
 
 ### Undo/redo
 - Snapshot history + undo/redo commands
   - `public/main.js` (`queueUndoSnapshot`, `performUndo`, `performRedo`)
-  - `electron/main.js` (menu sends undo/redo IPC)
+  - `electron/main.cjs` (menu sends undo/redo IPC)
 Find quickly
 - `public/main.js`: `queueUndoSnapshot`, `performUndo`, `performRedo`
 

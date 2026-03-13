@@ -1,12 +1,7 @@
-dist/*
-node_modules/*
-__MACOSX/*
-scripts/*
-logs/*
+node_modules/
+dist/
+logs/
+debug/
+__MACOSX/
 .DS_Store
-debug/*
-spec/*
 studio-grid.code-workspace
-.DS_Store
-test_scripts/*
-TD3/example.seq

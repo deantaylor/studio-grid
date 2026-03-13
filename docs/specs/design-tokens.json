@@ -1,0 +1,181 @@
+{
+  "color": {
+    "bg": { "value": "#2E2E2E", "type": "color" },
+    "surface": { "value": "#3C3C3C", "type": "color" },
+    "muted": { "value": "#6F6F75", "type": "color" },
+    "label": { "value": "#8F8F8F", "type": "color" },
+    "fgWarm": { "value": "#E6E1D4", "type": "color" },
+    "fgCold": { "value": "#EFEFEF", "type": "color" },
+    "fg": { "value": "{color.fgWarm}", "type": "color" },
+    "icon": { "value": "{color.fg}", "type": "color" },
+    "device": {
+      "1": { "value": "#FF786E", "type": "color" },
+      "2": { "value": "#FFB39A", "type": "color" },
+      "3": { "value": "#FFE09A", "type": "color" },
+      "4": { "value": "#B6F2A6", "type": "color" },
+      "5": { "value": "#9DE6E8", "type": "color" },
+      "6": { "value": "#A5C4FF", "type": "color" },
+      "7": { "value": "#D1B8FF", "type": "color" },
+      "8": { "value": "#FFB3D8", "type": "color" }
+    },
+    "deviceStrong": {
+      "1": { "value": "#FF786E", "type": "color" },
+      "2": { "value": "#FFB347", "type": "color" },
+      "3": { "value": "#FFD84D", "type": "color" },
+      "4": { "value": "#7CFF6B", "type": "color" },
+      "5": { "value": "#4DEEFF", "type": "color" },
+      "6": { "value": "#5C8CFF", "type": "color" },
+      "7": { "value": "#B57CFF", "type": "color" },
+      "8": { "value": "#FF6EC7", "type": "color" }
+    },
+    "panel": {
+      "value": "color-mix(in oklch, {color.bg}, {color.surface} 70%)",
+      "type": "color"
+    },
+    "panelStrong": {
+      "value": "color-mix(in oklch, {color.bg}, {color.surface} 85%)",
+      "type": "color"
+    },
+    "inputBg": {
+      "value": "color-mix(in oklch, {color.bg}, {color.surface} 82%)",
+      "type": "color"
+    },
+    "surfaceStrong": {
+      "value": "color-mix(in oklch, {color.bg}, {color.surface} 92%)",
+      "type": "color"
+    },
+    "surfaceHover": {
+      "value": "color-mix(in oklch, {color.bg}, {color.surface} 75%)",
+      "type": "color"
+    },
+    "border": {
+      "value": "color-mix(in oklch, {color.fg}, {color.bg} 88%)",
+      "type": "color"
+    },
+    "borderStrong": {
+      "value": "color-mix(in oklch, {color.fg}, {color.bg} 70%)",
+      "type": "color"
+    },
+    "shadowSoft": {
+      "value": "color-mix(in oklch, {color.bg}, {color.fg} 12%)",
+      "type": "color"
+    },
+    "shadowStrong": {
+      "value": "color-mix(in oklch, {color.bg}, {color.fg} 20%)",
+      "type": "color"
+    },
+    "overlay": {
+      "value": "color-mix(in oklch, {color.bg}, {color.fg} 12%)",
+      "type": "color"
+    },
+    "overlayStrong": {
+      "value": "color-mix(in oklch, {color.bg}, {color.fg} 24%)",
+      "type": "color"
+    },
+    "toastBg": {
+      "value": "color-mix(in oklch, {color.bg}, {color.fg} 18%)",
+      "type": "color"
+    },
+    "toastStrong": {
+      "value": "color-mix(in oklch, {color.bg}, {color.fg} 28%)",
+      "type": "color"
+    },
+    "cta": { "value": "{color.fg}", "type": "color" },
+    "accent": { "value": "{color.fg}", "type": "color" },
+    "accentStrong": {
+      "value": "color-mix(in oklch, {color.fg}, {color.bg} 12%)",
+      "type": "color"
+    },
+    "accentSecondary": {
+      "value": "color-mix(in oklch, {color.fg}, {color.bg} 28%)",
+      "type": "color"
+    },
+    "danger": { "value": "{color.deviceStrong.1}", "type": "color" },
+    "led": {
+      "0": { "value": "{color.surface}", "type": "color" },
+      "1": {
+        "value": "color-mix(in oklch, {color.fg}, {color.surface} 94%)",
+        "type": "color"
+      },
+      "2": {
+        "value": "color-mix(in oklch, {color.fg}, {color.surface} 88%)",
+        "type": "color"
+      },
+      "3": {
+        "value": "color-mix(in oklch, {color.fg}, {color.surface} 82%)",
+        "type": "color"
+      },
+      "4": {
+        "value": "color-mix(in oklch, {color.fg}, {color.surface} 76%)",
+        "type": "color"
+      },
+      "5": {
+        "value": "color-mix(in oklch, {color.fg}, {color.surface} 70%)",
+        "type": "color"
+      },
+      "6": {
+        "value": "color-mix(in oklch, {color.fg}, {color.surface} 64%)",
+        "type": "color"
+      },
+      "7": {
+        "value": "color-mix(in oklch, {color.fg}, {color.surface} 58%)",
+        "type": "color"
+      },
+      "8": {
+        "value": "color-mix(in oklch, {color.fg}, {color.surface} 52%)",
+        "type": "color"
+      },
+      "9": {
+        "value": "color-mix(in oklch, {color.fg}, {color.surface} 46%)",
+        "type": "color"
+      },
+      "10": {
+        "value": "color-mix(in oklch, {color.fg}, {color.surface} 40%)",
+        "type": "color"
+      },
+      "11": {
+        "value": "color-mix(in oklch, {color.fg}, {color.surface} 34%)",
+        "type": "color"
+      },
+      "12": {
+        "value": "color-mix(in oklch, {color.fg}, {color.surface} 28%)",
+        "type": "color"
+      },
+      "13": {
+        "value": "color-mix(in oklch, {color.fg}, {color.surface} 22%)",
+        "type": "color"
+      },
+      "14": {
+        "value": "color-mix(in oklch, {color.fg}, {color.surface} 16%)",
+        "type": "color"
+      },
+      "15": {
+        "value": "color-mix(in oklch, {color.fg}, {color.surface} 10%)",
+        "type": "color"
+      },
+      "16": { "value": "{color.fg}", "type": "color" }
+    }
+  },
+  "size": {
+    "gridWidth": { "value": "692px", "type": "dimension" },
+    "radiusSm": { "value": "2px", "type": "dimension" },
+    "radiusMd": { "value": "2px", "type": "dimension" },
+    "radiusLg": { "value": "2px", "type": "dimension" },
+    "padMd": { "value": "8px", "type": "dimension" },
+    "gapSm": { "value": "4px", "type": "dimension" },
+    "gapMd": { "value": "8px", "type": "dimension" },
+    "gapLg": { "value": "16px", "type": "dimension" }
+  },
+  "number": {
+    "uiScale": { "value": 1.5, "type": "number" },
+    "iconoirStrokeWidth": { "value": 3, "type": "number" },
+    "scaleRows": { "value": 7, "type": "number" }
+  },
+  "mix": {
+    "hover": { "value": "10%", "type": "number" },
+    "pressed": { "value": "12%", "type": "number" },
+    "disabled": { "value": "65%", "type": "number" },
+    "ring": { "value": "25%", "type": "number" },
+    "border": { "value": "8%", "type": "number" }
+  }
+}

@@ -250,7 +250,9 @@ export class SerialOSCBridge extends EventEmitter {
         device.listenPort = nextPort;
         try {
           portRef.close();
-        } catch (err) {}
+        } catch (err) {
+          // ignore close errors during retry path
+        }
         this.openDevicePort(device, retryCount + 1);
         return;
       }
@@ -374,7 +376,9 @@ export class SerialOSCBridge extends EventEmitter {
       temp.on("error", () => {
         try {
           temp.close();
-        } catch (e) {}
+        } catch (e) {
+          // ignore close errors on temporary clear socket
+        }
       });
       temp.open();
     }

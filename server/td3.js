@@ -4,7 +4,7 @@ import fs from "fs";
 import { fileURLToPath } from "url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const DEFAULT_SEQ_TEMPLATE = path.join(__dirname, "..", "TD3", "example.seq");
+const DEFAULT_SEQ_TEMPLATE = path.join(__dirname, "..", "fixtures", "td3", "example.seq");
 // TD-3 .seq layout (from SynthTribe dumps):
 // [32-byte header][4-byte filler][110-byte pattern block]
 const TD3_HEADER_LENGTH = 32;

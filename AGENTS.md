@@ -3,14 +3,14 @@
 This file is a quick, always-available map of the main runtime files and what they do. It focuses on where to look first when you need to change behavior.
 
 ## High-level flow
-- Electron app (`electron/main.js`) starts the local Node server and opens a browser window pointed at it.
+- Electron app (`electron/main.cjs`) starts the local Node server and opens a browser window pointed at it.
 - The Node server (`server/index.js`) serves the static UI from `public/`, hosts a WebSocket, talks to Monome via serialosc, and owns the transport clock.
 - The browser UI (`public/main.js`) renders the grid UI, handles WebMIDI + user interactions, and syncs state with the server over WebSocket.
 - Core sequencing logic and LED frame generation live in `server/state.js` (class `SGridState`).
 
 ## File map
 
-### `electron/main.js`
+### `electron/main.cjs`
 Purpose: Electron bootstrap + app lifecycle, window sizing, app menu, IPC bridge for save/dirty/UI scale.
 
 Key areas
@@ -121,7 +121,7 @@ Key areas
 
 ## Entry points when debugging
 - Renderer startup: `public/main.js` global initialization at top-level and DOM `load` handlers.
-- Server startup: `server/index.js` exports `startServer()`; `electron/main.js` calls it.
+- Server startup: `server/index.js` exports `startServer()`; `electron/main.cjs` calls it.
 - Sequencer logic: `SGridState` in `server/state.js` (especially `handleGridKey()` and `tick()`).
 
 ## Notes

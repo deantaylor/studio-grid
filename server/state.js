@@ -4958,14 +4958,11 @@ export class SGridState {
             const idx = baseIdx + b;
             const isActivePattern = (b === 0);
             const isPlayingBar = currentBar != null && currentBar === b;
-            let level = PATTERN_HAS_DATA;
-            if (isActivePattern) {
-              level = patternPulse;
-            } else if (isPlayingBar) {
-              level = this.pulse ? Math.min(PLAYHEAD, Math.round(PATTERN_ACTIVE * 0.7)) : Math.round(PATTERN_HAS_DATA * 0.8);
-            } else {
-              level = Math.round(PATTERN_HAS_DATA * 0.7);
-            }
+            const level = isActivePattern
+              ? patternPulse
+              : (isPlayingBar
+                ? (this.pulse ? Math.min(PLAYHEAD, Math.round(PATTERN_ACTIVE * 0.7)) : Math.round(PATTERN_HAS_DATA * 0.8))
+                : Math.round(PATTERN_HAS_DATA * 0.7));
             frame[7 * WIDTH + idx] = level;
           }
         }
