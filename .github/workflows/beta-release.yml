@@ -10,7 +10,15 @@ permissions:
 
 jobs:
   build-mac:
-    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-13
+            arch: x64
+          - os: macos-14
+            arch: arm64
+    runs-on: ${{ matrix.os }}
 
     steps:
       - name: Checkout
@@ -28,12 +36,12 @@ jobs:
       - name: Build macOS artifacts
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: "false"
-        run: npx electron-builder --mac dmg zip
+        run: npx electron-builder --mac dmg zip --${{ matrix.arch }} --publish never
 
       - name: Upload macOS installer
         uses: actions/upload-artifact@v4
         with:
-          name: mac-installers
+          name: mac-installers-${{ matrix.arch }}
           path: dist/*.dmg
           if-no-files-found: error
 
@@ -54,7 +62,7 @@ jobs:
         run: npm ci
 
       - name: Build Windows artifacts
-        run: npx electron-builder --win nsis
+        run: npx electron-builder --win nsis --publish never
 
       - name: Upload Windows installer
         uses: actions/upload-artifact@v4
@@ -73,8 +81,14 @@ jobs:
       - name: Download macOS artifacts
         uses: actions/download-artifact@v4
         with:
-          name: mac-installers
-          path: release-assets/mac
+          name: mac-installers-arm64
+          path: release-assets/mac/arm64
+
+      - name: Download macOS artifacts (Intel)
+        uses: actions/download-artifact@v4
+        with:
+          name: mac-installers-x64
+          path: release-assets/mac/x64
 
       - name: Download Windows artifacts
         uses: actions/download-artifact@v4
@@ -85,9 +99,11 @@ jobs:
       - name: Create GitHub pre-release
         uses: softprops/action-gh-release@v2
         with:
+          token: ${{ secrets.GITHUB_TOKEN }}
           tag_name: ${{ github.ref_name }}
           prerelease: true
           generate_release_notes: true
+          fail_on_unmatched_files: true
           files: |
-            release-assets/mac/*.dmg
+            release-assets/mac/**/*.dmg
             release-assets/win/*.exe
