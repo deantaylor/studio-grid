@@ -225,6 +225,9 @@ function dispatchGridEvents(events) {
       broadcast({ type: "accent_overlay", page: state.currentPage, ...ev });
     } else if (ev.type === "slide") {
       broadcast({ type: "slide_overlay", page: state.currentPage, ...ev });
+    } else if (ev.type === "isomorphic_note") {
+      state.setLiveNote(ev.page, ev.note, !!ev.on);
+      broadcast({ type: "live_note", page: ev.page, note: ev.note, on: !!ev.on });
     } else if (ev.type === "bar_view") {
       followEnabled = false;
       broadcast({ type: "follow", enabled: followEnabled });
@@ -250,6 +253,9 @@ function dispatchGridEvents(events) {
       broadcastPatternStatus(ev.page || state.currentPage);
     } else if (ev.type === "isomorphic_mode") {
       broadcast({ type: "isomorphic_mode", page: ev.page, enabled: !!ev.enabled });
+    } else if (ev.type === "note_view_offset") {
+      broadcast({ type: "note_view_offset", page: ev.page, offset: ev.offset });
+      broadcast({ type: "octave_overlay", page: ev.page, clearAll: true });
     }
   });
 }
@@ -282,7 +288,7 @@ serial.on("grid_key", (evt) => {
   const resp = state.handleGridKey(evt.x, evt.y, evt.s, { forcePatternControl, uiMode: useUiMode });
   const events = Array.isArray(resp) ? resp : (resp ? [resp] : []);
   // When a held note is entered from the monome, show the octave arrows in the UI
-  if (evt.s === 1) {
+  if (state.isOctaveShiftingEnabled?.() && evt.s === 1) {
     const info = state.getStepInfo(evt.x, evt.y, { uiMode: useUiMode });
     if (info?.on && info.seqType !== "drum" && info.seqType !== "cc") {
       events.push({
@@ -331,6 +337,7 @@ serial.on("device_ready", (info) => {
 
 function broadcastState(ws = null) {
   const transposes = state.pages.map((p, idx) => (idx === 0 ? null : (p?.transpose || 0)));
+  const noteViewOffsets = state.pages.map((p, idx) => (idx === 0 ? null : state.getNoteViewOffset(idx)));
   const names = state.deviceNames || state.pages.map((p, idx) => (idx === 0 ? null : p?.name || `Device ${idx}`));
   const notes = state.deviceNotes || state.pages.map((p, idx) => (idx === 0 ? null : p?.note || ""));
   const colors = state.deviceColors || state.pages.map((p, idx) => (idx === 0 ? null : p?.color || "#ffb703"));
@@ -377,6 +384,7 @@ function broadcastState(ws = null) {
     scale: state.scale,
     setName: state.setName,
     transposes,
+    noteViewOffsets,
     names,
     notes,
     colors,
@@ -417,6 +425,10 @@ function broadcastState(ws = null) {
   wss.clients.forEach((client) => {
     if (client.readyState === client.OPEN) client.send(msg);
   });
+}
+
+function normalizeTd3OctaveApplyMode(raw) {
+  return raw === "legacy_octave_shift" ? "legacy_octave_shift" : "note_view_navigation";
 }
 
 function handleClientMessage(ws, data) {
@@ -606,6 +618,17 @@ function handleClientMessage(ws, data) {
     case "set_transpose":
       state.setTranspose(data.page, data.transpose);
       broadcast({ type: "transpose", page: data.page, transpose: state.pages[data.page]?.transpose || 0 });
+      break;
+    case "shift_note_view":
+      {
+        const page = Number.isFinite(data.page) ? data.page : state.currentPage;
+        const offset = state.shiftNoteView(page, data.delta);
+        if (offset != null) {
+          broadcast({ type: "note_view_offset", page, offset });
+          broadcast({ type: "octave_overlay", page, clearAll: true });
+          renderAndPush();
+        }
+      }
       break;
     case "set_device_name":
       state.setDeviceName(data.page, data.name);
@@ -902,13 +925,14 @@ function handleClientMessage(ws, data) {
         try {
           const buf = Buffer.from(data?.data || "", "base64");
           const mode = data?.mode === "switch_scale" ? "switch_scale" : "fit_current";
+          const octaveApplyMode = normalizeTd3OctaveApplyMode(data?.octaveApplyMode);
           if (mode === "switch_scale") {
             const parsed = parseTd3SeqBuffer(buf);
             const notes = parsed.steps.filter((s) => !s.rest).map((s) => s.midiNote);
             const detected = detectScale(notes);
             state.scale = { root: detected.root, mode: detected.mode };
           }
-          const res = importTd3Pattern(state, buf, { page: data?.page, applyMode: mode });
+          const res = importTd3Pattern(state, buf, { page: data?.page, applyMode: mode, octaveApplyMode });
           broadcastState();
           renderAndPush();
           ws.send(JSON.stringify({ type: "td3_import_applied", ...res }));
@@ -922,13 +946,14 @@ function handleClientMessage(ws, data) {
         try {
           const payload = Buffer.from(data?.data || "", "base64");
           const mode = data?.mode === "switch_scale" ? "switch_scale" : "fit_current";
+          const octaveApplyMode = normalizeTd3OctaveApplyMode(data?.octaveApplyMode);
           if (mode === "switch_scale") {
             const parsed = parseTd3PatternPayload(payload);
             const notes = parsed.steps.filter((s) => !s.rest).map((s) => s.midiNote);
             const detected = detectScale(notes);
             state.scale = { root: detected.root, mode: detected.mode };
           }
-          const res = importTd3PatternPayload(state, payload, { page: data?.page, applyMode: mode });
+          const res = importTd3PatternPayload(state, payload, { page: data?.page, applyMode: mode, octaveApplyMode });
           broadcastState();
           renderAndPush();
           ws.send(JSON.stringify({ type: "td3_import_applied", ...res }));

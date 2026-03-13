@@ -56,7 +56,7 @@
 
   --grid-width: 880px;
   --ui-scale: 1;
-  --iconoir-stroke-width: 3;
+  --iconoir-stroke-width: 1.8;
   --scale-rows: 7;
 
   /* tokens */
@@ -247,7 +247,7 @@ body {
 
 .splash-title { 
   display: block;
-  font-size: 48px; 
+  font-size: 24px; 
   font-weight: 200; 
   letter-spacing: -0.03em; 
   color: var(--fg); 
@@ -291,29 +291,44 @@ body {
 .top-bar-head {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: var(--spacing-4);
+  gap: var(--spacing-16);
   width: 100%;
+  flex-wrap: nowrap;
 }
 
 .badge {
   display: flex;
   align-items: baseline;
   gap: var(--spacing-4);
+  flex-shrink: 0;
 }
 
-.badge-title { font-size: 40px; font-weight: 400; line-height: 40px; letter-spacing: -0.03em; color: var(--fg); }
+.badge-title { font-size: 24px; font-weight: 400; line-height: 24px; letter-spacing: -0.03em; color: var(--fg); }
 .badge-sub { font-size: 8px; color: var(--muted); }
 
 .hidden { display: none !important; }
 
-.top-actions { display: flex; gap: var(--spacing-8); }
+.top-center-controls {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-16);
+  flex: 1;
+  min-width: 0;
+  justify-content: flex-start;
+}
+
+.top-actions {
+  display: flex;
+  gap: var(--spacing-8);
+  margin-left: auto;
+  flex-shrink: 0;
+}
 
 .top-controls {
   display: flex;
   align-items: center;
   gap: var(--spacing-24);
-  flex: 1;
+  flex: 0 1 auto;
   justify-content: flex-start;
   font-size: 12px;
   min-width: 0;
@@ -334,6 +349,14 @@ body {
 @media (max-width: 900px) {
   .top-bar {
     flex-wrap: wrap;
+  }
+  .top-bar-head {
+    flex-wrap: wrap;
+  }
+  .top-center-controls {
+    order: 3;
+    width: 100%;
+    justify-content: flex-start;
   }
   .top-controls {
     justify-content: flex-start;
@@ -433,7 +456,7 @@ body {
   display: flex;
   align-items: center;
   gap: var(--spacing-4);
-  margin-left: auto;
+  margin-left: 0;
 }
 .transport-record {
   color: var(--dev-1);
@@ -443,7 +466,7 @@ body {
 [class^="iconoir-"],
 [class*=" iconoir-"] {
   font-size: 16px;
-  stroke-width: calc(var(--iconoir-stroke-width, 1.8) * 1px) !important;
+  stroke-width: 1.8px !important;
   display: inline-block;
 }
 .icon-btn [class^="iconoir-"],
@@ -466,7 +489,7 @@ body {
   background-color: currentColor;
   -webkit-mask-size: contain;
   mask-size: contain;
-  stroke-width: calc(var(--iconoir-stroke-width, 1.8) * 1px) !important;
+  stroke-width: 1.8px !important;
 }
 .icon-btn i,
 .transport-btn i,
@@ -505,17 +528,6 @@ body {
 }
 .transport-btn.active:hover {
   background: var(--fg);
-}
-#export-td3 .iconoir-emoji-blink-left {
-  display: none;
-}
-#export-td3:hover .iconoir-emoji,
-#export-td3:focus-visible .iconoir-emoji {
-  display: none;
-}
-#export-td3:hover .iconoir-emoji-blink-left,
-#export-td3:focus-visible .iconoir-emoji-blink-left {
-  display: inline-block;
 }
 .icon-btn.danger {
   background: transparent;
@@ -842,19 +854,11 @@ label {
   position: relative;
 }
 .label {
-  padding-left: var(--spacing-8);
+  padding-left: 0;
 }
 .label::before,
 label::before {
-  content: "";
-  position: absolute;
-  left: 0;
-  top: 50%;
-  transform: translateY(-50%);
-  width: 1px;
-  height: 24px;
-  background: var(--muted);
-  border-radius: var(--radius-sm);
+  display: none;
 }
 .label-text {
   display: inline-flex;
@@ -865,7 +869,7 @@ label::before {
   border-radius: var(--radius-sm);
 }
 .label.label-text {
-  padding-left: var(--spacing-8);
+  padding-left: 0;
 }
 label .select-wrap,
 label input:not([type="checkbox"]),
@@ -994,6 +998,16 @@ textarea {
   color: var(--fg);
   --base: var(--input-bg);
 /*  transition: background 0.15s ease, opacity 0.15s ease, filter 0.15s ease; */
+}
+
+/* App-wide: keep all form inputs borderless */
+input,
+select,
+textarea,
+input:focus,
+select:focus,
+textarea:focus {
+  border: none !important;
 }
 
 button {
@@ -1293,12 +1307,36 @@ canvas#grid {
   margin-top: 0;
 }
 .scale-note {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
   font-size: 8px;
   line-height: 10px;
   font-weight: 400;
   font-style: normal;
   text-transform: uppercase;
   color: var(--label);
+}
+.scale-note-root::before {
+  content: "";
+  width: 5px;
+  height: 5px;
+  background: var(--fg);
+  border-radius: 50%;
+  display: inline-block;
+}
+.scale-note-home-up::before,
+.scale-note-home-down::before {
+  display: inline-block;
+  font-size: 9px;
+  line-height: 1;
+  color: var(--fg);
+}
+.scale-note-home-up::before {
+  content: "\2191";
+}
+.scale-note-home-down::before {
+  content: "\2193";
 }
 
 .grid-wrap .cc-config,
@@ -1545,9 +1583,24 @@ canvas#grid {
   gap: var(--spacing-8);
   min-width: 320px;
 }
+#settings-modal {
+  width: min(840px, calc(100vw - 32px));
+  max-width: min(840px, calc(100vw - 32px));
+  height: min(560px, calc(100vh - 48px));
+  max-height: min(560px, calc(100vh - 48px));
+  padding: 0;
+  background: var(--surface);
+}
 #settings-modal .modal-body {
-  width: 700px;
-  max-width: 90vw;
+  position: relative;
+  width: 100%;
+  max-width: none;
+  min-width: 0;
+  height: 100%;
+  padding: 0;
+  gap: 0;
+  background: var(--surface);
+  overflow: hidden;
 }
 .modal-grid {
   display: grid;
@@ -1557,53 +1610,283 @@ canvas#grid {
 }
 .settings-layout {
   display: grid;
-  grid-template-columns: 160px minmax(0, 1fr);
-  gap: var(--spacing-16);
+  grid-template-columns: 264px minmax(0, 1fr);
+  gap: 0;
+  align-items: stretch;
+  height: 100%;
+  min-height: 0;
+}
+.settings-sidebar {
+  background: color-mix(in oklch, var(--bg), var(--surface) 45%);
+  padding: var(--spacing-32) var(--spacing-24) var(--spacing-24);
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-32);
+  height: 100%;
+}
+.settings-sidebar-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--spacing-8);
+}
+.settings-sidebar-head h4 {
+  margin: 0;
+  font-size: 16px;
+  line-height: 16px;
+  font-weight: 600;
+  color: var(--fg);
+}
+#settings-modal #settings-close {
+  position: absolute;
+  top: 24px;
+  right: 24px;
+  --base: transparent;
+  background: transparent;
+  border: none;
+  color: var(--muted);
+  width: 16px;
+  height: 16px;
+  min-width: 16px;
+  min-height: 16px;
+  padding: 0;
+  line-height: 16px;
+  font-size: 16px;
+}
+#settings-modal #settings-close:hover {
+  color: var(--fg);
+  background: transparent;
+  filter: brightness(1.2);
+}
+#settings-modal #settings-close:active,
+#settings-modal #settings-close:focus-visible {
+  background: transparent;
+  border: none;
+  box-shadow: none;
 }
 .settings-tabs {
   display: flex;
   flex-direction: column;
-  gap: var(--spacing-8);
+  gap: 20px;
 }
 .settings-tab {
   background: transparent;
-  --base: var(--panel);
-  color: var(--muted);
-  padding: var(--spacing-8) var(--spacing-12);
+  --base: transparent;
+  color: color-mix(in oklch, var(--fg), var(--bg) 48%);
+  padding: 0;
   text-align: left;
   font-size: 12px;
   letter-spacing: 0.02em;
   text-transform: uppercase;
+  line-height: 12px;
+  height: auto;
+  justify-content: flex-start;
 }
 .settings-tab.is-active {
   color: var(--fg);
 }
+.settings-content {
+  display: flex;
+  flex-direction: column;
+  min-height: 100%;
+  padding: var(--spacing-32) var(--spacing-40) var(--spacing-24);
+  gap: var(--spacing-24);
+}
 .settings-panels {
-  min-height: 240px;
+  min-height: 0;
+  flex: 1;
+  overflow-y: auto;
 }
 .settings-panel {
   display: none;
-  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-  gap: var(--spacing-8) var(--spacing-16);
-  align-items: center;
+  grid-template-columns: minmax(0, 1fr);
+  row-gap: 16px;
+  column-gap: 16px;
+  align-content: start;
+  padding-right: var(--spacing-8);
 }
 .settings-panel.is-active { display: grid; }
-.settings-panel h4 {
+#settings-modal .settings-panel h4 {
   grid-column: 1 / -1;
   margin: 0;
   font-size: 14px;
   font-weight: 600;
+  line-height: 14px;
+}
+#settings-modal .settings-panel .label,
+#settings-modal .settings-panel label,
+#settings-modal .settings-panel .default-color-row,
+#settings-modal .settings-panel .toggle-row {
+  width: min(860px, 100%);
+  min-height: 44px;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--spacing-24);
+  color: var(--fg);
+  font-size: 12px;
+  line-height: 12px;
+  font-weight: 400;
+  text-transform: none;
+  letter-spacing: 0;
+  white-space: normal;
+}
+#settings-modal .settings-panel .label::before,
+#settings-modal .settings-panel label::before {
+  display: none;
+}
+#settings-modal .settings-panel .label-text {
+  height: auto;
+  min-height: 0;
+  padding: 0;
+  font-size: inherit;
+  line-height: inherit;
+  color: inherit;
+  text-transform: none;
+  letter-spacing: 0;
+}
+#settings-modal .settings-panel .switch-option {
+  flex-direction: row-reverse;
+}
+#settings-modal .settings-panel input[type="checkbox"] {
+  appearance: none;
+  width: clamp(24px, 2.1vw, 34px);
+  height: clamp(24px, 2.1vw, 34px);
+  margin: 0;
+  border-radius: var(--radius-sm);
+  border: none;
+  background: transparent;
+  position: relative;
+  flex-shrink: 0;
+}
+#settings-modal .settings-panel input[type="checkbox"]::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 42%;
+  width: 32%;
+  height: 60%;
+  border-right: 2px solid var(--fg);
+  border-bottom: 2px solid var(--fg);
+  transform: translate(-50%, -50%) rotate(45deg) scale(0);
+  transform-origin: center;
+  transition: transform var(--hover-duration) var(--hover-ease);
+}
+#settings-modal .settings-panel input[type="checkbox"]:checked::after {
+  transform: translate(-50%, -50%) rotate(45deg) scale(1);
+}
+#settings-modal .settings-panel .toggle-group {
+  background: transparent;
+  border-color: color-mix(in oklch, var(--fg), var(--bg) 16%);
+  padding: 1px;
+}
+#settings-modal .settings-panel .toggle-btn {
+  height: 40px;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+}
+#settings-modal .settings-panel .select-wrap {
+  width: clamp(150px, 20vw, 280px);
+  height: 40px;
+}
+#settings-modal .settings-panel select {
+  font-size: 12px;
+  height: 40px;
+}
+#settings-modal .settings-actions {
+  margin-top: auto;
+  justify-content: flex-end;
+  align-items: center;
+  gap: var(--spacing-32);
+}
+#settings-modal .settings-link-btn {
+  --base: transparent;
+  background: transparent;
+  border: none;
+  min-width: 0;
+  height: auto;
+  padding: 0;
+  border-radius: 0;
+  font-size: 12px;
+  line-height: 12px;
+  font-weight: 400;
+  text-transform: none;
+  letter-spacing: 0.02em;
+  color: color-mix(in oklch, var(--fg), var(--bg) 28%);
+}
+#settings-modal .settings-link-btn:hover {
+  color: var(--fg);
+  background: transparent;
+}
+#settings-modal .settings-link-btn:active,
+#settings-modal .settings-link-btn:focus-visible {
+  background: transparent;
+}
+#settings-modal #settings-restore-default {
+  margin-top: auto;
+}
+#settings-modal #settings-save-config {
+  color: var(--fg);
+}
+#settings-modal #settings-confirm {
+  min-width: 0;
+  height: 28px;
+  padding: 0 var(--spacing-16);
+  font-size: 12px;
+  font-weight: 500;
 }
 @media (max-width: 700px) {
+  #settings-modal {
+    width: calc(100vw - 16px);
+    max-width: calc(100vw - 16px);
+  }
   .settings-layout {
     grid-template-columns: 1fr;
+    min-height: auto;
+  }
+  .settings-sidebar {
+    padding: var(--spacing-16);
+    gap: var(--spacing-16);
   }
   .settings-tabs {
     flex-direction: row;
     flex-wrap: wrap;
+    gap: var(--spacing-8);
   }
   .settings-tab {
-    flex: 1 1 140px;
+    flex: 1 1 120px;
+  }
+  .settings-content {
+    padding: var(--spacing-16);
+  }
+  #settings-modal .settings-panel h4 {
+    font-size: 14px;
+  }
+  #settings-modal .settings-panel .label,
+  #settings-modal .settings-panel label,
+  #settings-modal .settings-panel .default-color-row,
+  #settings-modal .settings-panel .toggle-row {
+    font-size: 14px;
+    min-height: 36px;
+  }
+  #settings-modal .settings-panel .toggle-btn,
+  #settings-modal .settings-panel select,
+  #settings-modal .settings-panel .select-wrap {
+    height: 34px;
+  }
+  #settings-modal .settings-actions {
+    gap: var(--spacing-16);
+  }
+  #settings-modal .settings-link-btn {
+    font-size: 12px;
+  }
+  #settings-modal #settings-confirm {
+    height: 28px;
+    min-width: 0;
+    font-size: 12px;
   }
 }
 .modal p {

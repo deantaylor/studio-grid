@@ -16,6 +16,11 @@ const BASE_PITCH = 48; // C3, matches state.js BASE_PITCH
 const TRANSPOSE_STEP = 12; // transpose is octave-only in the UI
 const OCTAVE_SHIFT_MIN = -2;
 const OCTAVE_SHIFT_MAX = 2;
+const TD3_IMPORT_OCTAVE_APPLY_MODES = {
+  NAVIGATION: "note_view_navigation",
+  LEGACY: "legacy_octave_shift"
+};
+const TD3_IMPORT_DEFAULT_OCTAVE_APPLY_MODE = TD3_IMPORT_OCTAVE_APPLY_MODES.NAVIGATION;
 const SCALES = {
   "major": [0, 2, 4, 5, 7, 9, 11],
   "minor": [0, 2, 3, 5, 7, 8, 10],
@@ -481,7 +486,13 @@ function mapNoteToScale(note, scale, transpose, allowPenalty = false) {
   return best;
 }
 
-function applyTd3PatternParsed(state, parsed, { page, applyMode = "fit_current" } = {}) {
+function normalizeTd3OctaveApplyMode(raw) {
+  return raw === TD3_IMPORT_OCTAVE_APPLY_MODES.LEGACY
+    ? TD3_IMPORT_OCTAVE_APPLY_MODES.LEGACY
+    : TD3_IMPORT_DEFAULT_OCTAVE_APPLY_MODE;
+}
+
+function applyTd3PatternParsed(state, parsed, { page, applyMode = "fit_current", octaveApplyMode } = {}) {
   const pageIdx = clamp(Math.round(page || state.currentPage || 1), 1, 8);
   const pg = state.pages[pageIdx];
   if (!pg) throw new Error("Page not found");
@@ -494,6 +505,8 @@ function applyTd3PatternParsed(state, parsed, { page, applyMode = "fit_current" 
   const currentScale = state.scale || { root: 0, mode: "major" };
   const targetScale = applyMode === "switch_scale" ? detectedScale : currentScale;
   const transpose = chooseTransposeForNotes(notes, targetScale);
+  const octaveMode = normalizeTd3OctaveApplyMode(octaveApplyMode);
+  const useLegacyOctavePath = octaveMode === TD3_IMPORT_OCTAVE_APPLY_MODES.LEGACY;
 
   // apply transpose to page
   pg.transpose = clamp(Math.round(transpose / TRANSPOSE_STEP) * TRANSPOSE_STEP, -24, 24);
@@ -543,7 +556,7 @@ function applyTd3PatternParsed(state, parsed, { page, applyMode = "fit_current" 
       const tieStep = emptyStep();
       tieStep.on = true;
       tieStep.degree = lastGateMapping.degree;
-      tieStep.octave = 0;
+      tieStep.octave = useLegacyOctavePath ? 0 : clamp(lastGateMapping.octave || 0, OCTAVE_SHIFT_MIN, OCTAVE_SHIFT_MAX);
       tieStep.tie = false;
       tieStep.td3TieSlot = false;
       if (newSteps.length > 0 && newSteps[newSteps.length - 1].on) {
@@ -561,7 +574,7 @@ function applyTd3PatternParsed(state, parsed, { page, applyMode = "fit_current" 
     newSteps.push({
       on: true,
       degree: mapping.degree,
-      octave: 0,
+      octave: useLegacyOctavePath ? 0 : clamp(mapping.octave || 0, OCTAVE_SHIFT_MIN, OCTAVE_SHIFT_MAX),
       micro: 0,
       accent: !!src.accent,
       slide: slideAllowed,
@@ -581,27 +594,47 @@ function applyTd3PatternParsed(state, parsed, { page, applyMode = "fit_current" 
   }
   pat.steps = newSteps;
   pat.length_steps = importedLength;
-  const prevPage = state.currentPage;
-  state.currentPage = pageIdx;
-  newSteps.forEach((st, idx) => {
-    const delta = octaveDeltas[idx];
-    if (!delta || !st?.on) return;
-    const y = clamp(6 - (st.degree || 0), 0, 6);
-    state.setStepOctave(idx, y, delta, { uiMode: false, skipChainClear: true });
-  });
-  state.currentPage = prevPage;
+  let appliedOctaveMode = TD3_IMPORT_OCTAVE_APPLY_MODES.NAVIGATION;
+  if (useLegacyOctavePath) {
+    appliedOctaveMode = TD3_IMPORT_OCTAVE_APPLY_MODES.LEGACY;
+    const prevPage = state.currentPage;
+    state.currentPage = pageIdx;
+    newSteps.forEach((st, idx) => {
+      const delta = octaveDeltas[idx];
+      if (!st?.on) return;
+      if (!delta) {
+        st.octave = 0;
+        return;
+      }
+      const y = clamp(6 - (st.degree || 0), 0, 6);
+      const res = state.setStepOctave(idx, y, delta, { uiMode: false, skipChainClear: true });
+      if (!res) {
+        // Fallback keeps legacy mode from dropping octaves when octave shifting is hidden or row-shifted.
+        st.octave = clamp(delta, OCTAVE_SHIFT_MIN, OCTAVE_SHIFT_MAX);
+        appliedOctaveMode = TD3_IMPORT_OCTAVE_APPLY_MODES.NAVIGATION;
+      }
+    });
+    state.currentPage = prevPage;
+  }
 
-  return { detectedScale, appliedScale: targetScale, transpose: pg.transpose, page: pageIdx, pattern: patIdx };
+  return {
+    detectedScale,
+    appliedScale: targetScale,
+    transpose: pg.transpose,
+    page: pageIdx,
+    pattern: patIdx,
+    octaveApplyMode: appliedOctaveMode
+  };
 }
 
-export function importTd3Pattern(state, buf, { page, applyMode = "fit_current" } = {}) {
+export function importTd3Pattern(state, buf, { page, applyMode = "fit_current", octaveApplyMode } = {}) {
   const parsed = parseTd3SeqBuffer(buf);
-  return applyTd3PatternParsed(state, parsed, { page, applyMode });
+  return applyTd3PatternParsed(state, parsed, { page, applyMode, octaveApplyMode });
 }
 
-export function importTd3PatternPayload(state, payload, { page, applyMode = "fit_current" } = {}) {
+export function importTd3PatternPayload(state, payload, { page, applyMode = "fit_current", octaveApplyMode } = {}) {
   const parsed = parseTd3PatternPayload(payload);
-  return applyTd3PatternParsed(state, parsed, { page, applyMode });
+  return applyTd3PatternParsed(state, parsed, { page, applyMode, octaveApplyMode });
 }
 
 function deriveSlideChainFlags(steps, len) {

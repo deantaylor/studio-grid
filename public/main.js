@@ -35,6 +35,11 @@ const TAB_PROGRESS_SEG_GAP = 2;
 const TAB_PROGRESS_BAR_X_PAD = 0;
 const PATTERN_CONTROL_GRID_X = 15;
 const PATTERN_CONTROL_GRID_Y = 7;
+const ENABLE_OCTAVE_SHIFTING = false;
+// TD-3 import octave application:
+// - "note_view_navigation": direct per-step octave assignment (works with shifted note-view navigation)
+// - "legacy_octave_shift": old setStepOctave-based path
+const TD3_IMPORT_OCTAVE_APPLY_MODE = "note_view_navigation";
 
 const textContentDescriptor = Object.getOwnPropertyDescriptor(Node.prototype, "textContent");
 const textContentCache = new WeakMap();
@@ -218,7 +223,7 @@ const settingsRestoreCfg = document.getElementById("settings-restore-default");
 const settingsConfirm = document.getElementById("settings-confirm");
 const settingsTabs = Array.from(document.querySelectorAll(".settings-tab"));
 const settingsPanels = Array.from(document.querySelectorAll(".settings-panel"));
-let settingsActiveTabId = "settings-panel-interface";
+let settingsActiveTabId = "settings-panel-workflow";
 const showLogToggle = document.getElementById("show-log");
 const autoFillToggle = document.getElementById("auto-fill");
 const autoLoadToggle = document.getElementById("auto-load-set");
@@ -729,6 +734,7 @@ octaveControls.innerHTML = `
   <button type="button" data-delta="-1" aria-label="Lower octave">↓</button>
 `;
 document.body.append(octaveControls);
+if (!ENABLE_OCTAVE_SHIFTING) octaveControls.style.display = "none";
 const octaveUpBtn = octaveControls.querySelector('[data-delta="1"]');
 const octaveDownBtn = octaveControls.querySelector('[data-delta="-1"]');
 const microControls = document.createElement("div");
@@ -862,15 +868,27 @@ logMissingDom([
 let frames = Array.from({ length: 9 }, () => new Array(WIDTH * HEIGHT).fill(0));
 let frameReady = Array(9).fill(false);
 let isomorphicModes = Array(9).fill(false);
-let isomorphicLayout = { base: 24, stepX: 1, stepY: 3 };
+let isomorphicLayout = { base: 48, stepX: 1, stepY: 3 };
 const BLANK_FRAME = new Array(WIDTH * HEIGHT).fill(0);
 let suppressFrameUntilNext = Array(9).fill(false);
 let overlays = Array.from({ length: 9 }, () => []);
 let transposes = Array.from({ length: 9 }, () => 0);
+const NOTE_VIEW_ROW_SHIFT_MIN = -14;
+const NOTE_VIEW_ROW_SHIFT_MAX = 14;
+let noteViewOffsets = Array.from({ length: 9 }, () => 0);
 
 function applyOctaveOverlaysSnapshot(snapshot) {
   if (!Array.isArray(snapshot)) return;
   const prevOverlays = overlays;
+  if (!ENABLE_OCTAVE_SHIFTING) {
+    overlays = Array.from({ length: 9 }, (_, idx) => {
+      const micros = Array.isArray(prevOverlays?.[idx])
+        ? prevOverlays[idx].filter((o) => o?.kind === "micro")
+        : [];
+      return micros;
+    });
+    return;
+  }
   overlays = Array.from({ length: 9 }, (_, idx) => {
     const list = Array.isArray(snapshot[idx]) ? snapshot[idx] : [];
     return list
@@ -1393,6 +1411,11 @@ function connectWS() {
     }
     if (msg.type === "log") {
       log(msg.message);
+    } else if (msg.type === "error") {
+      const text = String(msg.message || "Server error");
+      log(text);
+      showToast(text);
+      pendingTd3SysexExport = null;
     } else if (msg.type === "led_frame") {
       const incoming = msg.frame;
       let targetPage = serverCurrentPage;
@@ -1433,6 +1456,9 @@ function connectWS() {
         updateSetTitle(setName);
       }
       if (msg.transposes) transposes = msg.transposes;
+      if (Array.isArray(msg.noteViewOffsets)) {
+        noteViewOffsets = msg.noteViewOffsets.map((v, idx) => (idx === 0 ? null : (Number.isFinite(v) ? Math.max(NOTE_VIEW_ROW_SHIFT_MIN, Math.min(NOTE_VIEW_ROW_SHIFT_MAX, Math.round(v))) : 0)));
+      }
       if (msg.sequencerTypes) sequencerTypes = msg.sequencerTypes;
       if (msg.scale) scale = msg.scale;
       if (resetNamesOnNextState) {
@@ -1584,6 +1610,12 @@ function connectWS() {
     } else if (msg.type === "transpose") {
       if (typeof msg.page === "number") transposes[msg.page] = msg.transpose;
       applyPageTranspose();
+    } else if (msg.type === "note_view_offset") {
+      if (typeof msg.page === "number") {
+        const next = Math.max(NOTE_VIEW_ROW_SHIFT_MIN, Math.min(NOTE_VIEW_ROW_SHIFT_MAX, Math.round(Number(msg.offset) || 0)));
+        noteViewOffsets[msg.page] = next;
+        if (msg.page === currentPage) applyScaleNotesUI();
+      }
     } else if (msg.type === "seq_type") {
       if (typeof msg.page === "number" && msg.seqType) {
         sequencerTypes[msg.page] = msg.seqType;
@@ -1787,6 +1819,7 @@ function connectWS() {
         showToast("TD-3 pattern sent");
       } else {
         log("TD-3 SysEx export failed: no data");
+        showToast("TD-3 SysEx export failed");
       }
       pendingTd3SysexExport = null;
     } else if (msg.type === "td3_import_preview") {
@@ -1820,6 +1853,10 @@ function connectWS() {
       ensureScheduler();
       scheduler?.enqueue(msg.events || []);
       scheduler?.tick();
+    } else if (msg.type === "live_note") {
+      if (Number.isFinite(msg.note)) {
+        sendLiveMidiNote(msg.page || currentPage, msg.note, 96, !!msg.on);
+      }
     } else if (msg.type === "base_division") {
       baseDivision = msg.division || baseDivision;
       applyBaseNoteLenUI();
@@ -1986,7 +2023,7 @@ function setRunningState(isRunning) {
     transportBtn.setAttribute("aria-pressed", running);
     transportBtn.setAttribute("aria-label", running ? "Stop" : "Play");
     transportBtn.classList.toggle("active", running);
-    if (icon) icon.className = running ? "iconoir-pause-solid" : "iconoir-play-solid";
+    if (icon) icon.className = running ? "iconoir-pause" : "iconoir-play";
   }
   if (running) {
     startDeviceTabProgressLoop();
@@ -2279,6 +2316,20 @@ function sendMIDISafe(out, bytes, ts) {
   out.send(bytes, sendTime);
 }
 
+function sendLiveMidiNote(page, note, velocity, isOn) {
+  const out = getMidiOutForPage(page);
+  if (!out) return;
+  const channel = getMidiChannelForPage(page);
+  const status = (isOn ? 0x90 : 0x80) + (channel - 1);
+  const vel = isOn ? Math.max(0, Math.min(127, Math.round(velocity || 96))) : 0;
+  sendMIDISafe(out, [status, Math.max(0, Math.min(127, Math.round(note || 0))), vel], performance.now());
+  if (isOn) {
+    trackNoteOn(out, channel, note);
+  } else {
+    trackNoteOff(out, channel, note);
+  }
+}
+
 function sendMIDI(page, pitch, vel, durMs, delayMs, chan) {
   const cfg = midiSettings[page] || midiSettings[currentPage] || {};
   const out = cfg.outId && midiAccess?.outputs.get(cfg.outId);
@@ -2424,16 +2475,19 @@ function renderFrame(frame) {
   // overlays
   const now = Date.now();
   const currentOverlays = overlays[currentPage] || [];
-  // keep numeric octave overlays persistent; micro overlays expire
+  const octaveEnabled = ENABLE_OCTAVE_SHIFTING;
+  // keep numeric octave overlays persistent only when octave shifting is enabled; micro overlays expire
   const filtered = currentOverlays.filter((o) => {
     const isNumeric = /^[-+]?\d/.test(o.text);
+    const isOctaveOverlay = o.kind === "octave";
     const drawY = getOverlayDrawY(o);
     if (drawY < 0 || drawY >= HEIGHT) return false;
+    if (!octaveEnabled && (isOctaveOverlay || (isNumeric && o.kind !== "micro"))) return false;
     if (Number.isFinite(o.expiresAt) && now > o.expiresAt) return false;
     const level = displayFrame[drawY * WIDTH + o.x] || 0;
     if (o.kind === "micro") return true;
     if (!isNumeric && level <= 0) return false;
-    if (isNumeric) return true;
+    if (isNumeric) return octaveEnabled;
     return (now - (o.ts || now)) < 1500;
   });
   overlays[currentPage] = filtered;
@@ -2442,7 +2496,7 @@ function renderFrame(frame) {
   overlays[currentPage].forEach((o) => {
     const rawY = getOverlayRawY(o);
     const drawY = getOverlayDrawY(o);
-    const isNumeric = /^[-+]?\d/.test(o.text);
+    const isNumeric = octaveEnabled && /^[-+]?\d/.test(o.text);
     const isMicro = o.kind === "micro";
     if (isMicro || isNumeric) {
       const key = `${o.x}:${rawY}`;
@@ -2468,12 +2522,19 @@ function renderFrame(frame) {
   });
   const overlayRenderList = [];
   combinedOverlays.forEach((entry) => {
-    const microVal = Number(entry.microText ?? 0);
-    const octaveVal = Number(entry.octaveText ?? 0);
+    const microText = entry.microText;
+    const octaveText = entry.octaveText;
+    const microVal = Number(microText ?? 0);
+    const octaveVal = Number(octaveText ?? 0);
+    if (!octaveEnabled) {
+      if (microText == null || microVal === 0) return;
+      const drawY = entry.microDrawY;
+      if (!Number.isFinite(drawY)) return;
+      overlayRenderList.push({ x: entry.x, drawY, text: microText, useSurface: true });
+      return;
+    }
     if (microVal === 0 && octaveVal === 0) return;
-    const microText = entry.microText ?? "0";
-    const octaveText = entry.octaveText ?? "0";
-    const text = `${microText} | ${octaveText}`;
+    const text = `${microText ?? "0"} | ${octaveText ?? "0"}`;
     const drawY = Number.isFinite(entry.octaveDrawY) ? entry.octaveDrawY : entry.microDrawY;
     if (!Number.isFinite(drawY)) return;
     overlayRenderList.push({ x: entry.x, drawY, text, useSurface: true });
@@ -2760,7 +2821,7 @@ function applyClockSourceUI() {
   }
   const tempoStepperWrap = tempoInput?.closest(".number-wrap");
   if (tempoStepperWrap) {
-    tempoStepperWrap.dataset.stepperHidden = clockSource === "external" ? "true" : "false";
+    tempoStepperWrap.dataset.stepperHidden = "false";
   }
   if (clockSource === "external" && tempoInput) {
     tempoInput.value = formatTempoDisplay(tempo);
@@ -3153,19 +3214,24 @@ function resolveTd3Ports(access) {
   return { input: found.input, output: selectedOut || found.output };
 }
 
-function requestTd3Pattern({ input, output }, { group, slot }, { timeoutMs = 2000 } = {}) {
+function requestTd3Pattern({ input, output }, { group, slot }, { timeoutMs = 3500 } = {}) {
   return new Promise((resolve, reject) => {
     if (!input || !output) {
       reject(new Error("TD-3 MIDI ports unavailable"));
       return;
     }
     let timeoutId = null;
+    let fallbackResponse = null;
     const handler = (evt) => {
       const data = evt?.data ? new Uint8Array(evt.data) : null;
-      if (!data || data.length < 123) return;
+      if (!data || data.length < 122) return;
       if (data[0] !== 0xf0 || data[7] !== 0x78 || data[data.length - 1] !== 0xf7) return;
       if (data[1] !== 0x00 || data[2] !== 0x20 || data[3] !== 0x32 || data[4] !== 0x00 || data[5] !== 0x01 || data[6] !== 0x0a) return;
-      if (data[8] !== (group & 0x7f) || data[9] !== (slot & 0x7f)) return;
+      if (data[8] !== (group & 0x7f) || data[9] !== (slot & 0x7f)) {
+        // Some firmware/ports can report an unexpected address; keep the first valid payload as fallback.
+        if (!fallbackResponse) fallbackResponse = data;
+        return;
+      }
       cleanup();
       resolve(data);
     };
@@ -3174,6 +3240,11 @@ function requestTd3Pattern({ input, output }, { group, slot }, { timeoutMs = 200
       input.removeEventListener("midimessage", handler);
     };
     timeoutId = setTimeout(() => {
+      if (fallbackResponse) {
+        cleanup();
+        resolve(fallbackResponse);
+        return;
+      }
       cleanup();
       reject(new Error("TD-3 SysEx response timeout"));
     }, Math.max(250, timeoutMs));
@@ -3285,7 +3356,13 @@ function finalizeTd3Import(mode = "fit_current") {
   if (!pendingTd3Import) return;
   const type = pendingTd3Import.kind === "sysex" ? "td3_import_payload_apply" : "td3_import_apply";
   ws?.readyState === WebSocket.OPEN &&
-    ws.send(JSON.stringify({ type, data: pendingTd3Import.data, page: pendingTd3Import.page, mode }));
+    ws.send(JSON.stringify({
+      type,
+      data: pendingTd3Import.data,
+      page: pendingTd3Import.page,
+      mode,
+      octaveApplyMode: TD3_IMPORT_OCTAVE_APPLY_MODE
+    }));
   pendingTd3Import = null;
 }
 
@@ -3340,8 +3417,9 @@ if (td3SysexConfirm) {
         log("TD-3 SysEx export requested");
       }
     } catch (e) {
-      log(`TD-3 SysEx failed: ${e.message || e}`);
-      showToast("TD-3 SysEx failed");
+      const msg = String(e?.message || e || "TD-3 SysEx failed");
+      log(`TD-3 SysEx failed: ${msg}`);
+      showToast(msg);
     }
   };
 }
@@ -4972,21 +5050,45 @@ function applyScaleNotesUI() {
     for (let row = 0; row < rows; row += 1) {
       const clamped = Math.max(0, Math.min(6, row));
       const t = (6 - clamped) / 6;
-      labels.push(String(Math.max(0, Math.min(127, Math.round(t * 127)))));
+      labels.push({ text: String(Math.max(0, Math.min(127, Math.round(t * 127)))), isRoot: false, homeHint: null });
     }
   } else {
     const mode = scale?.mode || "major";
     const root = Number(scale?.root) || 0;
     const steps = SCALE_STEPS[mode] || SCALE_STEPS.major;
+    const rowShift = Math.max(NOTE_VIEW_ROW_SHIFT_MIN, Math.min(NOTE_VIEW_ROW_SHIFT_MAX, Math.round(Number(noteViewOffsets[currentPage]) || 0)));
+    const noteNameForIndex = (index) => {
+      const degree = ((index % 7) + 7) % 7;
+      const semis = root + (steps[degree] || 0);
+      return NOTE_NAMES[((semis % 12) + 12) % 12] || "C";
+    };
+    // "Home" marker: only the sequencer's base/root note position (index 0),
+    // not every octave repetition of the root degree.
+    const isHomeRootIndex = (index) => index === 0;
+    const minVisibleIndex = rowShift;
+    const maxVisibleIndex = rowShift + Math.max(0, rows - 1);
+    let offscreenHomeDirection = null;
+    if (0 < minVisibleIndex) offscreenHomeDirection = "down";
+    else if (0 > maxVisibleIndex) offscreenHomeDirection = "up";
     for (let row = 0; row < rows; row += 1) {
-      const degree = (fullScaleMode && row === 0) ? 0 : (rows - 1 - row);
-      const note = NOTE_NAMES[((root + steps[degree]) % 12 + 12) % 12];
-      labels.push(note);
+      const rowIndex = (rows - 1) - row;
+      const noteIndex = rowIndex + rowShift;
+      const isRoot = isHomeRootIndex(noteIndex);
+      let homeHint = null;
+      if (!isRoot && offscreenHomeDirection === "up" && row === 0) homeHint = "up";
+      if (!isRoot && offscreenHomeDirection === "down" && row === rows - 1) homeHint = "down";
+      labels.push({ text: noteNameForIndex(noteIndex), isRoot, homeHint });
     }
   }
 
   scaleNotesWrap.innerHTML = labels
-    .map((note) => `<span class="scale-note">${note}</span>`)
+    .map((item) => {
+      const classes = ["scale-note"];
+      if (item.isRoot) classes.push("scale-note-root");
+      if (item.homeHint === "up") classes.push("scale-note-home-up");
+      if (item.homeHint === "down") classes.push("scale-note-home-down");
+      return `<span class="${classes.join(" ")}">${item.text}</span>`;
+    })
     .join("");
 }
 
@@ -5144,6 +5246,7 @@ function applySelectionDelta(target, kind, delta) {
   const infoMap = selectionInfoByPage[currentPage];
   targets.forEach(({ x, y }) => {
     if (kind === "octave") {
+      if (!ENABLE_OCTAVE_SHIFTING) return;
       ws?.readyState === WebSocket.OPEN && ws.send(JSON.stringify({ type: "set_step_octave", x, y, delta }));
       const key = cellKey(x, y);
       const info = infoMap?.get(key);
@@ -5439,6 +5542,7 @@ function startSelectionBox(hit, mode) {
 }
 
 function applySelectionOctave(target) {
+  if (!ENABLE_OCTAVE_SHIFTING) return;
   const selection = selectionByPage[currentPage];
   const infoMap = selectionInfoByPage[currentPage];
   if (!selection || !selection.size || !Number.isFinite(target)) return;
@@ -5812,6 +5916,7 @@ canvas.addEventListener("contextmenu", (e) => {
 });
 
 function nudgeStepOctave(delta) {
+  if (!ENABLE_OCTAVE_SHIFTING) return;
   const target = hoveredStep || lastOctaveTarget;
   if (!target) return;
   applySelectionDelta(target, "octave", delta);
@@ -5825,6 +5930,11 @@ function nudgeStepMicro(delta) {
 
 function showOctaveControls(hover) {
   if (!hover) return;
+  if (!ENABLE_OCTAVE_SHIFTING) {
+    octaveControls.style.display = "none";
+    showMicroControls(hover);
+    return;
+  }
   const seqType = sequencerTypes[currentPage] || "mono";
   const allowOctave = seqType !== "drum" && seqType !== "cc";
   const { x, y, rectLeft, rectTop, scaleX, scaleY } = hover;
@@ -5907,6 +6017,7 @@ function showMicroControls(hover) {
 }
 
 function showOctaveControlsFromOverlay(msg) {
+  if (!ENABLE_OCTAVE_SHIFTING) return;
   const rect = canvas.getBoundingClientRect();
   const scaleX = rect.width / CANVAS_WIDTH;
   const scaleY = rect.height / CANVAS_HEIGHT;
@@ -6072,6 +6183,7 @@ if (seqTypeSel) {
 }
 
 function addOverlay(page, x, y, octave, delta) {
+  if (!ENABLE_OCTAVE_SHIFTING) return;
   const pageIdx = Number.isFinite(page) ? page : currentPage;
   if (!overlays[pageIdx]) overlays[pageIdx] = [];
   const rawVal = Number.isFinite(octave) ? octave : (Number.isFinite(delta) ? delta : 0);
@@ -6133,6 +6245,15 @@ function clearOverlayAt(pageIdx, x, y) {
 
 function handleOctaveOverlayMessage(msg) {
   const pageIdx = Number.isFinite(msg.page) ? msg.page : currentPage;
+  if (!ENABLE_OCTAVE_SHIFTING) {
+    if (msg.clearAll) {
+      overlays[pageIdx] = (overlays[pageIdx] || []).filter((o) => o?.kind === "micro");
+      if (pageIdx === currentPage) renderFrame(frames[currentPage]);
+    }
+    octaveOverlayLock = false;
+    octaveControls.style.display = "none";
+    return;
+  }
   if (msg.clearAll) {
     overlays[pageIdx] = [];
     if (pageIdx === currentPage) renderFrame(frames[currentPage]);
@@ -6349,6 +6470,19 @@ const adjustTranspose = (delta) => {
   ws?.readyState === WebSocket.OPEN &&
     ws.send(JSON.stringify({ type: "set_transpose", page: currentPage, transpose: semis }));
 };
+
+const shiftNoteView = (delta) => {
+  const type = sequencerTypes[currentPage] || "mono";
+  if (type === "cc") return;
+  const current = Number.isFinite(noteViewOffsets[currentPage]) ? noteViewOffsets[currentPage] : 0;
+  const next = Math.max(NOTE_VIEW_ROW_SHIFT_MIN, Math.min(NOTE_VIEW_ROW_SHIFT_MAX, current + Math.sign(Math.round(Number(delta) || 0))));
+  if (next === current) return;
+  noteViewOffsets[currentPage] = next;
+  applyScaleNotesUI();
+  ws?.readyState === WebSocket.OPEN &&
+    ws.send(JSON.stringify({ type: "shift_note_view", page: currentPage, delta }));
+};
+
 if (transposeDec) transposeDec.addEventListener("click", () => adjustTranspose(-1));
 if (transposeInc) transposeInc.addEventListener("click", () => adjustTranspose(1));
 
@@ -7368,6 +7502,12 @@ document.addEventListener("keydown", (e) => {
     if (isTypingTarget(e.target)) return;
     e.preventDefault();
     adjustTranspose(e.key === "ArrowUp" ? 1 : -1);
+    return;
+  }
+  if (!e.metaKey && !e.ctrlKey && !e.shiftKey && !e.altKey && (e.key === "ArrowUp" || e.key === "ArrowDown")) {
+    if (isTypingTarget(e.target)) return;
+    e.preventDefault();
+    shiftNoteView(e.key === "ArrowUp" ? 1 : -1);
     return;
   }
   if ((e.code === "Space" || e.key === " ") && clockSource === "internal") {
