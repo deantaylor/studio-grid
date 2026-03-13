@@ -3,7 +3,7 @@
   "name": "studio-grid",
   "productName": "studio-grid",
   "description": "multi-sequencer and composer for monome devices (and not).",
-  "version": "0.1.1",
+  "version": "0.1.2-beta.0",
   "type": "module",
   "private": true,
   "main": "electron/main.cjs",
