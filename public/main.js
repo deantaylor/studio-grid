@@ -305,6 +305,7 @@ function rebuildCustomSelect(select) {
     btn.textContent = opt.textContent;
     btn.dataset.value = opt.value;
     btn.setAttribute("role", "option");
+    btn.dataset.clickOnUp = "true";
     if (opt.disabled) {
       btn.disabled = true;
       btn.setAttribute("aria-disabled", "true");
@@ -6441,11 +6442,30 @@ function applyUiScale(val) {
   const num = Math.max(0.75, Math.min(1.25, Number(val) || 1));
   const prev = uiScale;
   uiScale = num;
-  document.documentElement.style.setProperty("--ui-scale", uiScale);
-  if (uiScaleSel) uiScaleSel.value = String(uiScale);
-  window.electronAPI?.resizeForScale?.(uiScale);
-  // Resize the Electron window to match scale (no-op in browser)
-  if (!uiScaleInitialized || num !== prev) {
+  // Measure natural (zoom:1) content dimensions before applying the new scale.
+  // Temporarily setting --ui-scale to 1 forces a synchronous reflow at zoom:1, giving
+  // accurate unscaled dimensions. No visible flicker — the browser paints only after
+  // this synchronous task completes, so only the final state (zoom:num) is rendered.
+  const appShellEl = document.getElementById("app-shell");
+  document.documentElement.style.setProperty("--ui-scale", 1);
+  // Only measure height from the DOM — the app width is fixed by design (BASE_WINDOW_WIDTH).
+  // Measuring scrollWidth from body/documentElement can return inflated values from
+  // absolutely-positioned elements (menus, toasts) that extend beyond the layout width.
+  const naturalH = appShellEl
+    ? Math.max(appShellEl.scrollHeight || 0, BASE_WINDOW_HEIGHT)
+    : BASE_WINDOW_HEIGHT;
+  document.documentElement.style.setProperty("--ui-scale", num);
+  if (uiScaleSel) uiScaleSel.value = String(num);
+  // Send exact target dimensions so the main process doesn't have to guess from BASE_HEIGHT.
+  // main.cjs already supports { scale, width, height } and uses the provided values directly.
+  window.electronAPI?.resizeForScale?.({
+    scale: num,
+    width: Math.round(BASE_WINDOW_WIDTH * num),
+    height: Math.round(naturalH * num)
+  });
+  // Fallback resize for non-Electron browser context (window.resizeTo sets outer window
+  // size which conflicts with Electron's setContentSize — only use when electronAPI absent)
+  if (!window.electronAPI && (!uiScaleInitialized || num !== prev)) {
     uiScaleInitialized = true;
     if (typeof window.resizeTo === "function" && window.innerWidth) {
       const w = Math.round(BASE_WINDOW_WIDTH * uiScale);
@@ -6457,6 +6477,7 @@ function applyUiScale(val) {
       }
     }
   }
+  if (window.electronAPI) uiScaleInitialized = true;
 }
 
 function sendScale() {

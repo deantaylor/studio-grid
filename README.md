@@ -11,6 +11,10 @@
 - Full local gate: `npm run check`
 - Build installers: `npm run dist`
 
+## Dependency Install Modes
+- Full development install (includes lint/build/test tooling): `npm ci`
+- Runtime-only install (smaller footprint, excludes dev dependencies): `npm ci --omit=dev`
+
 ## Beta Releases
 - Bump to next beta version (creates commit + tag): `npm version prerelease --preid=beta`
 - Push commit + tag: `git push origin main --follow-tags`
