@@ -2439,7 +2439,7 @@ function renderFrame(frame) {
       const { x, y } = parseCellKey(key);
       const useWrap = !!selectionRenderOffset;
       const drawX = useWrap ? wrapIndex(x + (offset.dx || 0), WIDTH) : x;
-      const drawY = useWrap ? wrapIndex(y + (offset.dy || 0), getStepRows()) : y;
+      const drawY = useWrap ? wrapIndex(y + (offset.dy || 0), getEffectiveStepRows()) : y;
       if (drawX < 0 || drawX >= WIDTH || drawY < 0 || drawY >= HEIGHT) return;
       const px = drawX * (CELL_SIZE + CELL_GAP) + 1;
       const py = drawY * (CELL_SIZE + CELL_GAP) + 1;
@@ -5052,10 +5052,11 @@ function applyScaleNotesUI() {
   const labels = [];
   const rows = getStepRows();
   if (type === "cc") {
-    for (let row = 0; row < rows; row += 1) {
-      const clamped = Math.max(0, Math.min(6, row));
-      const t = (6 - clamped) / 6;
-      labels.push({ text: String(Math.max(0, Math.min(127, Math.round(t * 127)))), isRoot: false, homeHint: null });
+    // Only label the 7 active CC rows; row 7 (bottom) is disabled when grid not connected
+    const ccRows = fullScaleMode ? DEFAULT_STEP_ROWS : rows;
+    for (let row = 0; row < ccRows; row += 1) {
+      const t = (6 - row) / 6;
+      labels.push({ text: String(Math.round(t * 127)), isRoot: false, homeHint: null });
     }
   } else {
     const mode = scale?.mode || "major";
@@ -5323,7 +5324,7 @@ function getChainSelectionForMenu(target) {
 }
 
 function isPlayableCell(hit) {
-  return hit?.inBounds && hit.inCell && hit.y >= 0 && hit.y < getStepRows();
+  return hit?.inBounds && hit.inCell && hit.y >= 0 && hit.y < getEffectiveStepRows();
 }
 
 function toggleGridCell(x, y) {
@@ -5468,7 +5469,7 @@ function performSelectionMove(dx, dy, opts = {}) {
     selection.forEach((key) => {
       const { x, y } = parseCellKey(key);
       const nx = wrapIndex(x + dx, WIDTH);
-      const ny = wrapIndex(y + dy, getStepRows());
+      const ny = wrapIndex(y + dy, getEffectiveStepRows());
       const nextKey = cellKey(nx, ny);
       nextSelection.add(nextKey);
       const info = infoMap.get(key);
@@ -5498,7 +5499,7 @@ function collectCellsInBox(start, end) {
   const lastX = Math.min(WIDTH - 1, Math.floor(maxX / step));
   const firstY = Math.max(0, Math.floor(minY / step));
   const lastY = Math.min(HEIGHT - 1, Math.floor(maxY / step));
-  const rows = getStepRows();
+  const rows = getEffectiveStepRows();
   const cells = [];
   for (let y = firstY; y <= lastY; y += 1) {
     if (y >= rows) continue;
@@ -6752,6 +6753,13 @@ function handleGridStatus(connected, nextFullScaleMode = null, devices = null, n
 
 function getStepRows() {
   return fullScaleMode ? 8 : DEFAULT_STEP_ROWS;
+}
+
+// Returns the number of interactive rows for the current sequencer type.
+// CC always uses 7 rows (no extra row even when grid is disconnected).
+function getEffectiveStepRows() {
+  if ((sequencerTypes[currentPage] || "mono") === "cc") return DEFAULT_STEP_ROWS;
+  return getStepRows();
 }
 
 function normalizeOctaveOverlay(rawY, octave) {

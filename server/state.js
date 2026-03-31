@@ -1186,7 +1186,9 @@ export class SGridState {
       return { stepRow: false, controlRow: false, degree: null, octaveOffset: 0, topRow: false, uiMode };
     }
     if (seqType === "cc") {
-      const ccRow = clamp(y - 1, 0, 6);
+      // Row 7 is disabled (bottom row) when grid is not connected; workspace stays at rows 0-6
+      if (y === 7) return { stepRow: false, controlRow: false, degree: null, octaveOffset: 0, topRow: false, uiMode };
+      const ccRow = clamp(y, 0, 6);
       return { stepRow: true, controlRow: false, degree: clamp(6 - ccRow, 0, 6), octaveOffset: 0, topRow: false, uiMode };
     }
     const rowIndex = y === 0 ? 7 : (7 - y);
@@ -1633,8 +1635,7 @@ export class SGridState {
       const step = pat && abs >= 0 ? pat.steps[abs] : null;
       const seqType = page?.sequencerType || "mono";
       if (seqType === "cc") {
-        const ccRow = uiMode ? clamp(y - 1, 0, 6) : y;
-        return this.handleCCKey(x, ccRow, s, pat);
+        return this.handleCCKey(x, y, s, pat);
       }
       const targetDegree = rowInfo.degree;
       const targetOctave = rowInfo.octaveOffset || 0;
@@ -2396,7 +2397,9 @@ export class SGridState {
     const pat = this.getPattern();
     if (!pat) return { ok: false, reason: "no_pattern" };
     const uiMode = !!opts.uiMode;
-    const rows = uiMode ? 8 : 7;
+    const seqType = this.pages[this.currentPage]?.sequencerType || "mono";
+    // CC always has 7 active rows; other types get an extra row when in uiMode (grid disconnected)
+    const rows = (uiMode && seqType !== "cc") ? 8 : 7;
     const wrapIndex = (val, max) => {
       if (!max) return 0;
       const mod = val % max;
@@ -2463,7 +2466,8 @@ export class SGridState {
     const pat = this.getPattern();
     if (!pat) return { ok: false, reason: "no_pattern" };
     const uiMode = !!opts.uiMode;
-    const rows = uiMode ? 8 : 7;
+    const seqType = this.pages[this.currentPage]?.sequencerType || "mono";
+    const rows = (uiMode && seqType !== "cc") ? 8 : 7;
     const wrapIndex = (val, max) => {
       if (!max) return 0;
       const mod = val % max;
@@ -4111,6 +4115,10 @@ export class SGridState {
     const slideProp = move.info.seqType === "mdtonal" ? "mdSlide" : "slide";
     step[slideProp] = !!move.info.slide;
     step.tie = false;
+    if (move.info.seqType === "cc") {
+      // targetDeg = clamp(6 - ccRow, 0, 6), so cc value = round(targetDeg / 6 * 127)
+      step.cc = Math.round((targetDeg / 6) * 127);
+    }
   }
 
   clearChainFromStart(pat, abs, pageIdx, opts, seqType) {
@@ -4494,9 +4502,12 @@ export class SGridState {
       this.patternControlMode = prevPatternControl;
     }
     const uiFrame = new Array(WIDTH * HEIGHT).fill(0);
+    const currentSeqType = this.pages[this.currentPage]?.sequencerType || "mono";
     for (let y = 0; y < STEP_ROWS; y++) {
       for (let x = 0; x < WIDTH; x++) {
-        uiFrame[(y + 1) * WIDTH + x] = baseFrame[y * WIDTH + x] || 0;
+        // CC keeps workspace at rows 0-6 (row 7 is disabled); other types shift up by 1
+        const destY = currentSeqType === "cc" ? y : y + 1;
+        uiFrame[destY * WIDTH + x] = baseFrame[y * WIDTH + x] || 0;
       }
     }
     const page = this.pages[this.currentPage];
@@ -4526,8 +4537,11 @@ export class SGridState {
         if (ignorePatternControl && prevPatternControlMode) this.patternControlMode = prevPatternControlMode;
       }
     }
-    for (let x = 0; x < WIDTH; x += 1) {
-      uiFrame[x] = topFrame ? (topFrame[6 * WIDTH + x] || 0) : 0;
+    // CC workspace occupies rows 0-6; skip the row-0 overwrite that blanks it for non-topFrame types
+    if (currentSeqType !== "cc") {
+      for (let x = 0; x < WIDTH; x += 1) {
+        uiFrame[x] = topFrame ? (topFrame[6 * WIDTH + x] || 0) : 0;
+      }
     }
     const bar = pat.barView || 0;
     if (!page.sequencerStopped) {
@@ -4537,7 +4551,9 @@ export class SGridState {
       if (phBar === bar) {
         const phX = ph % 16;
         const playLevel = this.ledLevels.playhead;
-        for (let yy = 0; yy < HEIGHT; yy++) {
+        // For CC, only paint playhead through the active rows (0-6), not the disabled bottom row
+        const playRows = currentSeqType === "cc" ? STEP_ROWS : HEIGHT;
+        for (let yy = 0; yy < playRows; yy++) {
           uiFrame[yy * WIDTH + phX] = playLevel;
         }
       }
