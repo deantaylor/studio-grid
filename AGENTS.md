@@ -126,3 +126,136 @@ Key areas
 
 ## Notes
 - This file is intended to stay short and factual. Expand by adding focused subsections when you learn a new module or behavior.
+
+
+## Git Workflow & Agent Isolation
+
+### Branch Management
+
+- Never implement new features, bug fixes, or significant refactoring directly on `main`.
+- Create a dedicated Git branch for each independent task using the following naming conventions:
+  - `feature/<short-description>` for features.
+  - `fix/<short-description>` for bug fixes.
+  - `refactor/<short-description>` for refactoring.
+  - `chore/<short-description>` for maintenance.
+- Check the current branch and working tree status before making changes.
+- If already working on an appropriate task-specific branch, continue using it rather than creating another.
+- Never discard, reset, overwrite, or clean up uncommitted changes without explicit permission.
+
+### Worktree Isolation
+
+- When multiple agents are working concurrently, each agent must use its own Git worktree and dedicated branch.
+- Never allow multiple agents to modify the same working directory simultaneously.
+- If operating in a worktree provided by Codex, use that worktree rather than creating another unnecessarily.
+- Do not switch branches in a working directory shared with another agent.
+- Do not remove worktrees or delete branches belonging to other agents.
+
+### Task Execution
+
+1. Inspect the repository status and existing branch before starting.
+2. Create or use an appropriate feature branch or isolated worktree.
+3. Implement only changes relevant to the assigned task.
+4. Follow existing project conventions and architecture.
+5. Run relevant tests, linting, and type checks where available.
+6. Review the final diff for unintended changes.
+7. Summarize the implementation, tests performed, and any outstanding issues.
+
+### Merging & Safety
+
+- Never merge changes into `main` without explicit user approval.
+- Never force-push, rewrite shared history, or delete remote branches without permission.
+- Do not automatically commit or push changes unless explicitly instructed.
+- Keep changes small, focused, and independently reviewable.
+- Prefer pull requests for integrating completed features.
+- Resolve merge conflicts carefully rather than automatically accepting one side.
+- Never overwrite another agent's work.
+
+### Parallel Agent Coordination
+
+- Assign each agent a clearly defined and independent scope.
+- Avoid overlapping file modifications wherever possible.
+- Identify dependencies between concurrent tasks before implementation.
+- Coordinate changes to shared interfaces, database schemas, configuration, and infrastructure.
+- Treat the main branch as the stable integration baseline.
+
+### General Principle
+
+Every independent feature should be developed in isolation, validated, reviewed, and only then integrated into the main codebase.
+
+Use branches for logical isolation and worktrees for filesystem isolation when agents work concurrently. Do not create repository forks for routine feature development.
+
+## Model Selection & Cost Optimization
+
+### Core Principle
+
+Always use the least expensive model capable of reliably completing a task.
+
+Do not default to the most powerful model for routine operations. Optimize for cost, speed, and correctness, not maximum model capability.
+
+### Task-Based Model Routing
+
+**Lightweight tasks — use a cheap, fast model (prefer GPT-6 Luna when available):**
+- Reading files and locating relevant code.
+- Searching the codebase for functions, classes, or references.
+- Summarizing documentation, logs, or existing implementations.
+- Exploring directory structures and dependencies.
+- Simple formatting, renaming, and repetitive edits.
+- Gathering information for the main agent.
+- Running predefined checks and reporting their results.
+
+**Moderate tasks — use a balanced model and reasoning effort:**
+- Implementing straightforward, well-defined features.
+- Writing unit tests.
+- Fixing isolated bugs with clear causes.
+- Small refactoring tasks.
+- Updating API integrations with established patterns.
+- Reviewing routine code changes.
+
+**Complex tasks — use a high-capability model:**
+- Architectural design and major refactoring.
+- Debugging complex or intermittent failures.
+- Security-sensitive functionality.
+- Database schema design and migrations.
+- Cross-cutting changes involving multiple systems.
+- Ambiguous tasks requiring substantial reasoning.
+- Reviewing high-risk changes and resolving difficult integration issues.
+
+### Subagent Delegation
+
+- Prefer delegating independent, narrowly scoped tasks to cheaper subagents when doing so reduces overall cost.
+- Explicitly select a cheaper model and lower reasoning effort for lightweight subagents whenever the Codex environment supports it.
+- Do not automatically inherit the main agent's expensive model for simple delegated tasks.
+- Provide subagents with specific objectives, relevant file paths, constraints, and expected outputs.
+- Keep subagent context small. Avoid passing unnecessary files or conversation history.
+- Use parallel subagents only when tasks are genuinely independent and parallelism provides a meaningful benefit.
+- Avoid spawning agents for trivial tasks that can be completed more efficiently with a direct tool call or simple command.
+- Prefer read-only exploration subagents when gathering information.
+
+### Escalation Strategy
+
+1. Start with the cheapest model reasonably capable of the task.
+2. Validate the result against explicit requirements.
+3. If the result is incomplete, incorrect, or the task proves more complex than expected, escalate to a stronger model.
+4. Avoid repeatedly retrying an unsuitable cheap model.
+5. Reserve the strongest model for tasks where its reasoning capability materially improves correctness.
+
+### Main Agent Responsibilities
+
+The main agent is responsible for:
+- Planning and decomposing complex tasks.
+- Selecting appropriate models for subagents.
+- Coordinating parallel work and preventing conflicts.
+- Integrating and reviewing subagent results.
+- Verifying that the complete solution meets requirements.
+
+The main agent should not personally perform large amounts of routine reading, searching, or summarization when a cheaper subagent can do the work more efficiently.
+
+### Cost Awareness
+
+- Minimize unnecessary model calls and repeated context processing.
+- Reuse existing findings instead of independently rediscovering information.
+- Prefer deterministic commands and tools over model-based reasoning when appropriate.
+- Do not sacrifice correctness, security, or maintainability to reduce costs.
+- When model selection is unavailable, respect the runtime limitations rather than claiming a cheaper model was used.
+
+**Default behavior: cheap models for exploration and routine execution, stronger models for difficult reasoning, architectural decisions, and final verification.**
