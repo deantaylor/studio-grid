@@ -218,7 +218,7 @@ function dispatchGridEvents(events) {
   events.forEach((ev) => {
     if (!ev) return;
     if (ev.type === "octave") {
-      broadcast({ type: "octave_overlay", page: state.currentPage, ...ev });
+      broadcast({ type: "octave_overlay", page: state.currentPage, ...ev, changed: true });
     } else if (ev.type === "micro") {
       broadcast({ type: "micro_overlay", page: state.currentPage, ...ev });
     } else if (ev.type === "accent") {
@@ -243,7 +243,7 @@ function dispatchGridEvents(events) {
         broadcast({ type: "octave_overlay", page: state.currentPage, clearAll: true });
         broadcast({ type: "pattern_control", enabled: true });
       } else {
-        broadcast({ type: "pattern_control", enabled: false, octaveOverlays: state.octaveOverlaySnapshot() });
+        broadcast({ type: "pattern_control", enabled: false, octaveOverlays: state.octaveOverlaySnapshot({ uiMode: fullScaleMode }) });
         broadcastPatternStatus(state.currentPage);
       }
     } else if (ev.type === "pattern_length") {
@@ -287,20 +287,6 @@ serial.on("grid_key", (evt) => {
   const useUiMode = isPrimary && isLarge && !showMonomeControls;
   const resp = state.handleGridKey(evt.x, evt.y, evt.s, { forcePatternControl, uiMode: useUiMode });
   const events = Array.isArray(resp) ? resp : (resp ? [resp] : []);
-  // When a held note is entered from the monome, show the octave arrows in the UI
-  if (state.isOctaveShiftingEnabled?.() && evt.s === 1) {
-    const info = state.getStepInfo(evt.x, evt.y, { uiMode: useUiMode });
-    if (info?.on && info.seqType !== "drum" && info.seqType !== "cc") {
-      events.push({
-        type: "octave",
-        x: evt.x,
-        y: evt.y,
-        octave: info.octave || 0,
-        delta: 0,
-        fromHold: true
-      });
-    }
-  }
   dispatchGridEvents(events);
   renderAndPush();
 });
@@ -356,7 +342,7 @@ function broadcastState(ws = null) {
     if (idx === 0 || !p) return null;
     return p.patterns.map((pat, pi) => (pi === 0 || !pat ? null : pat.time_scale || 1));
   });
-  const octaveOverlays = state.octaveOverlaySnapshot();
+  const octaveOverlays = state.octaveOverlaySnapshot({ uiMode: fullScaleMode });
   const barPlayheads = state.pages.map((p, idx) => {
     if (idx === 0 || !p) return null;
     const pat = p.patterns?.[p.active_pattern];
@@ -530,7 +516,7 @@ function handleClientMessage(ws, data) {
       {
         const res = state.setStepOctave(data.x, data.y, data.delta, { uiMode: fullScaleMode });
         if (res) {
-          broadcast({ type: "octave_overlay", page: state.currentPage, x: data.x, y: data.y, octave: res.octave, delta: res.delta });
+          broadcast({ type: "octave_overlay", page: state.currentPage, x: data.x, y: data.y, octave: res.octave, delta: res.delta, changed: true });
           renderAndPush();
         }
       }
@@ -1075,7 +1061,7 @@ function broadcastGridStatus(connected = gridConnected, devices = lastGridDevice
 function maybeBroadcastPage() {
   if (state.currentPage !== lastBroadcastPage) {
     lastBroadcastPage = state.currentPage;
-    broadcast({ type: "page_change", page: state.currentPage, octaveOverlays: state.octaveOverlaySnapshot() });
+    broadcast({ type: "page_change", page: state.currentPage, octaveOverlays: state.octaveOverlaySnapshot({ uiMode: fullScaleMode }) });
   }
 }
 
@@ -1263,7 +1249,7 @@ function broadcastPatternStatus(page) {
     page,
     active: p.active_pattern,
     pending: p.pending_pattern || null,
-    octaveOverlays: state.octaveOverlaySnapshot()
+    octaveOverlays: state.octaveOverlaySnapshot({ uiMode: fullScaleMode })
   });
 }
 
@@ -1291,7 +1277,7 @@ function broadcastBarView(page, pattern, bar) {
     page,
     pattern,
     bar: barVal,
-    octaveOverlays: state.octaveOverlaySnapshot()
+    octaveOverlays: state.octaveOverlaySnapshot({ uiMode: fullScaleMode })
   });
 }
 
@@ -1348,7 +1334,8 @@ function broadcastLedUIFrame() {
   broadcast({
     type: "led_frame",
     frame: uiFrame,
-    octaveOverlays: inPatternControl ? Array.from({ length: 9 }, () => []) : state.octaveOverlaySnapshot(),
+    octaveAnchors: inPatternControl ? [] : state.octaveAnchorCells({ uiMode: fullScaleMode }),
+    octaveOverlays: inPatternControl ? Array.from({ length: 9 }, () => []) : state.octaveOverlaySnapshot({ uiMode: fullScaleMode }),
     deviceHasData: state.pages.map((p, idx) => (idx === 0 ? null : state.deviceHasData(idx))),
     deviceStopped: state.pages.map((p, idx) => (idx === 0 ? null : !!p?.sequencerStopped))
   });

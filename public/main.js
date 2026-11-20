@@ -35,7 +35,7 @@ const TAB_PROGRESS_SEG_GAP = 2;
 const TAB_PROGRESS_BAR_X_PAD = 0;
 const PATTERN_CONTROL_GRID_X = 15;
 const PATTERN_CONTROL_GRID_Y = 7;
-const ENABLE_OCTAVE_SHIFTING = false;
+const ENABLE_OCTAVE_SHIFTING = true;
 // TD-3 import octave application:
 // - "note_view_navigation": direct per-step octave assignment (works with shifted note-view navigation)
 // - "legacy_octave_shift": old setStepOctave-based path
@@ -756,7 +756,6 @@ let octaveHideTimer = null;
 let microHideTimer = null;
 let lastOctaveTarget = null;
 let remoteOctaveTimer = null;
-let recentOctaveOverlay = null;
 let octaveOverlayLock = false;
 const selectionByPage = Array.from({ length: 9 }, () => new Set());
 const selectionInfoByPage = Array.from({ length: 9 }, () => new Map());
@@ -873,6 +872,7 @@ let isomorphicLayout = { base: 48, stepX: 1, stepY: 3 };
 const BLANK_FRAME = new Array(WIDTH * HEIGHT).fill(0);
 let suppressFrameUntilNext = Array(9).fill(false);
 let overlays = Array.from({ length: 9 }, () => []);
+const octaveAnchors = Array.from({ length: 9 }, () => new Set());
 let transposes = Array.from({ length: 9 }, () => 0);
 const NOTE_VIEW_ROW_SHIFT_MIN = -14;
 const NOTE_VIEW_ROW_SHIFT_MAX = 14;
@@ -895,19 +895,13 @@ function applyOctaveOverlaysSnapshot(snapshot) {
     return list
       .filter((o) => Number.isFinite(o?.x) && Number.isFinite(o?.y) && Number.isFinite(o?.octave))
       .map((o) => {
-        const rawY = o.y;
-        const val = normalizeOctaveOverlay(rawY, o.octave);
-        if (!val) return null;
         return {
           x: o.x,
-          y: rawY,
-          rawY,
-          octave: val,
-          text: val > 0 ? `+${val}` : `${val}`,
-          ts: Date.now()
+          y: o.y,
+          kind: "octave",
+          text: o.octave > 0 ? `+${o.octave}` : `${o.octave}`
         };
-      })
-      .filter(Boolean);
+      });
   }).map((octs, idx) => {
     const micros = Array.isArray(prevOverlays?.[idx])
       ? prevOverlays[idx].filter((o) => o?.kind === "micro")
@@ -922,6 +916,9 @@ function clearNumericOverlays(pageIdx) {
 }
 
 function resetOctaveOverlayUI() {
+  if (octaveHoverTimer) clearTimeout(octaveHoverTimer);
+  octaveHoverTimer = null;
+  pendingOctaveHover = null;
   hoveredStep = null;
   lastOctaveTarget = null;
   octaveOverlayLock = false;
@@ -1427,6 +1424,7 @@ function connectWS() {
       }
       if (Array.isArray(incoming)) {
         frames[targetPage] = incoming.slice();
+        octaveAnchors[targetPage] = new Set(msg.octaveAnchors || []);
         frameReady[targetPage] = true;
         suppressFrameUntilNext[targetPage] = false;
       }
@@ -1593,10 +1591,6 @@ function connectWS() {
       swing = msg.swing || swing;
       updateSwing(swing, { broadcast: false });
     } else if (msg.type === "octave_overlay") {
-      if (msg.fromHold) {
-        cancelSelectionActions();
-        clearSelection();
-      }
       handleOctaveOverlayMessage(msg);
     } else if (msg.type === "micro_overlay") {
       handleMicroOverlayMessage(msg);
@@ -2497,15 +2491,13 @@ function renderFrame(frame) {
   const combinedOverlays = new Map();
   const singleOverlays = [];
   overlays[currentPage].forEach((o) => {
-    const rawY = getOverlayRawY(o);
     const drawY = getOverlayDrawY(o);
     const isNumeric = octaveEnabled && /^[-+]?\d/.test(o.text);
     const isMicro = o.kind === "micro";
     if (isMicro || isNumeric) {
-      const key = `${o.x}:${rawY}`;
+      const key = `${o.x}:${drawY}`;
       const entry = combinedOverlays.get(key) || {
         x: o.x,
-        rawY,
         microText: null,
         octaveText: null,
         microDrawY: null,
@@ -5236,6 +5228,7 @@ function clearSelectedNotes() {
 
 function getSelectionTargetsForEdit(target) {
   if (!target) return [];
+  if (target.octaveAnchor) return [target];
   const selection = selectionByPage[currentPage];
   if (selection && selection.size) {
     const key = cellKey(target.x, target.y);
@@ -5627,6 +5620,7 @@ canvas.addEventListener("mousemove", (e) => {
   const anchor = hoveredStep;
   const withinHoverBand = anchor && x === anchor.x && y >= anchor.y - 1 && y <= anchor.y + 1;
   const movedCell = !anchor || anchor.x !== x || anchor.y !== y;
+  if (withinHoverBand && octaveControls.style.display === "flex") return;
 
   if (octaveHoverTimer && !withinHoverBand) {
     clearTimeout(octaveHoverTimer);
@@ -5655,7 +5649,7 @@ canvas.addEventListener("mousemove", (e) => {
   const frame = frames[currentPage] || [];
   const val = frame[y * WIDTH + x] || 0;
   const playVal = ledLevels.playhead || 0;
-  if (!running && playVal > 0 && val === playVal) {
+  if (!running && playVal > 0 && val === playVal && !octaveAnchors[currentPage].has(y * WIDTH + x)) {
     hoveredStep = null;
     if (!isOverOctaveControls) octaveControls.style.display = "none";
     if (!isOverMicroControls) microControls.style.display = "none";
@@ -5673,7 +5667,7 @@ canvas.addEventListener("mousemove", (e) => {
   const target = withinHoverBand && anchor ? anchor : { x, y };
   hoveredStep = target;
   updateSelectionPopover();
-  if (withinHoverBand && (octaveHoverTimer || pendingOctaveHover || octaveControls.style.display === "flex")) return;
+  if (withinHoverBand && (octaveHoverTimer || pendingOctaveHover)) return;
 
   if (octaveControls.style.display === "flex" && movedCell && !isOverOctaveControls) {
     octaveControls.style.display = "none";
@@ -5681,6 +5675,7 @@ canvas.addEventListener("mousemove", (e) => {
   }
 
   octaveHoverTimer = setTimeout(() => {
+    octaveHoverTimer = null;
     pendingOctaveHover = {
       x: target.x,
       y: target.y,
@@ -5698,6 +5693,15 @@ canvas.addEventListener("pointerdown", (e) => {
   const hit = getGridHit(e.clientX, e.clientY);
   if (!hit.inBounds) return;
   const playable = isPlayableCell(hit);
+  if (playable && octaveAnchors[currentPage].has(hit.y * WIDTH + hit.x)) {
+    resetOctaveOverlayUI();
+    showOctaveControls({
+      x: hit.x, y: hit.y, rectLeft: hit.rect.left, rectTop: hit.rect.top,
+      scaleX: hit.scaleX, scaleY: hit.scaleY, octaveAnchor: true
+    });
+    e.preventDefault();
+    return;
+  }
   const selection = selectionByPage[currentPage];
   const hasSelection = selection && selection.size > 0;
   const key = playable ? cellKey(hit.x, hit.y) : null;
@@ -5943,51 +5947,35 @@ function showOctaveControls(hover) {
   }
   const seqType = sequencerTypes[currentPage] || "mono";
   const allowOctave = seqType !== "drum" && seqType !== "cc";
-  const { x, y, rectLeft, rectTop, scaleX, scaleY } = hover;
-  hoveredStep = { x, y };
-  lastOctaveTarget = { x, y };
+  const { x, y, rectLeft, rectTop, scaleX, scaleY, octaveAnchor } = hover;
+  hoveredStep = { x, y, octaveAnchor };
+  lastOctaveTarget = hoveredStep;
   if (!allowOctave) {
     if (!isOverOctaveControls) octaveControls.style.display = "none";
     showMicroControls(hover);
     return;
   }
-  const hasUp = y > 0;
-  const hasDown = y < getStepRows() - 1;
-  if (!hasUp && !hasDown) {
-    if (!isOverOctaveControls) octaveControls.style.display = "none";
-    if (!isOverMicroControls) microControls.style.display = "none";
-    return;
-  }
+  const atEdge = y === 0 || y === getStepRows() - 1;
   const btnSize = 24 * scaleX;
-  const distY = (CELL_SIZE + CELL_GAP) * scaleY;
-  const gapPx = hasUp && hasDown
-    ? Math.max(0, 2 * distY - btnSize)
-    : Math.max(0, distY - btnSize);
-  octaveControls.style.rowGap = `${gapPx}px`;
-  [octaveUpBtn, octaveDownBtn].forEach((btn) => {
-    if (btn) {
-      btn.style.width = `${btnSize}px`;
-      btn.style.height = `${btnSize}px`;
-    }
-  });
+  const rowHeight = (CELL_SIZE + CELL_GAP) * scaleY;
+  const columnGap = 4 * scaleX;
+  const width = atEdge ? 2 * btnSize + columnGap : btnSize;
   const centerX = rectLeft + (x * (CELL_SIZE + CELL_GAP) + CELL_SIZE / 2) * scaleX;
-  const centerUp = rectTop + ((y - 1) * (CELL_SIZE + CELL_GAP) + CELL_SIZE / 2) * scaleY;
-  const centerDown = rectTop + ((y + 1) * (CELL_SIZE + CELL_GAP) + CELL_SIZE / 2) * scaleY;
-  if (hasUp && octaveUpBtn) {
-    octaveUpBtn.style.display = "flex";
-  } else if (octaveUpBtn) {
-    octaveUpBtn.style.display = "none";
-  }
-  if (hasDown && octaveDownBtn) {
-    octaveDownBtn.style.display = "flex";
-  } else if (octaveDownBtn) {
-    octaveDownBtn.style.display = "none";
-  }
-  const top = hasUp ? (centerUp - btnSize / 2) : (centerDown - btnSize / 2);
-  octaveControls.style.left = `${centerX - btnSize / 2}px`;
+  const topRow = y === 0 ? 1 : y - 1;
+  const top = rectTop + topRow * rowHeight + (CELL_SIZE * scaleY - btnSize) / 2;
+  const left = Math.max(rectLeft, Math.min(centerX - width / 2, rectLeft + CANVAS_WIDTH * scaleX - width));
+  octaveControls.style.flexDirection = atEdge ? "row" : "column";
+  octaveControls.style.columnGap = `${columnGap}px`;
+  octaveControls.style.rowGap = `${Math.max(0, 2 * rowHeight - btnSize)}px`;
+  [octaveUpBtn, octaveDownBtn].forEach((btn) => {
+    btn.style.width = `${btnSize}px`;
+    btn.style.height = `${btnSize}px`;
+  });
+  octaveControls.style.left = `${left}px`;
   octaveControls.style.top = `${top}px`;
   octaveControls.style.display = "flex";
-  showMicroControls(hover);
+  if (octaveAnchor) microControls.style.display = "none";
+  else showMicroControls(hover);
 }
 
 function showMicroControls(hover) {
@@ -6040,7 +6028,8 @@ function showOctaveControlsFromOverlay(msg) {
     rectLeft: rect.left,
     rectTop: rect.top,
     scaleX,
-    scaleY
+    scaleY,
+    octaveAnchor: msg.octaveAnchor
   };
   showOctaveControls(hover);
   // keep arrows visible until user exits (mouse leave or edit exit); no auto-hide timer
@@ -6188,33 +6177,6 @@ if (seqTypeSel) {
   });
 }
 
-function addOverlay(page, x, y, octave, delta) {
-  if (!ENABLE_OCTAVE_SHIFTING) return;
-  const pageIdx = Number.isFinite(page) ? page : currentPage;
-  if (!overlays[pageIdx]) overlays[pageIdx] = [];
-  const rawVal = Number.isFinite(octave) ? octave : (Number.isFinite(delta) ? delta : 0);
-  const val = normalizeOctaveOverlay(y, rawVal);
-  if (!val) {
-    // remove any existing numeric overlay when returning to zero
-    overlays[pageIdx] = overlays[pageIdx].filter((o) => {
-      if (o.kind && o.kind !== "octave") return true;
-      if (!/^[-+]?\d/.test(o.text)) return true;
-      return !(o.x === x && getOverlayRawY(o) === y);
-    });
-    if (pageIdx === currentPage) renderFrame(frames[currentPage]);
-    return;
-  }
-  const text = val > 0 ? `+${val}` : `${val}`;
-  const ts = Date.now();
-  overlays[pageIdx] = overlays[pageIdx].filter((o) => {
-    if (o.kind && o.kind !== "octave") return true;
-    if (!/^[-+]?\d/.test(o.text)) return true;
-    return !(o.x === x && getOverlayRawY(o) === y);
-  });
-  overlays[pageIdx].push({ x, y, rawY: y, octave: val, text, ts, kind: "octave" });
-  if (pageIdx === currentPage) renderFrame(frames[currentPage]);
-}
-
 function addMicroOverlay(page, x, y, microOffset, delta, octave, opts = {}) {
   const pageIdx = Number.isFinite(page) ? page : currentPage;
   if (!overlays[pageIdx]) overlays[pageIdx] = [];
@@ -6240,64 +6202,24 @@ function addMicroOverlay(page, x, y, microOffset, delta, octave, opts = {}) {
   if (pageIdx === currentPage) renderFrame(frames[currentPage]);
 }
 
-function clearOverlayAt(pageIdx, x, y) {
-  if (!overlays[pageIdx]) overlays[pageIdx] = [];
-  overlays[pageIdx] = overlays[pageIdx].filter((o) => {
-    if (o.kind === "micro") return true;
-    if (!/^[-+]?\d/.test(o.text)) return true;
-    return !(o.x === x && getOverlayRawY(o) === y);
-  });
-}
-
 function handleOctaveOverlayMessage(msg) {
-  const pageIdx = Number.isFinite(msg.page) ? msg.page : currentPage;
-  if (!ENABLE_OCTAVE_SHIFTING) {
-    if (msg.clearAll) {
-      overlays[pageIdx] = (overlays[pageIdx] || []).filter((o) => o?.kind === "micro");
-      if (pageIdx === currentPage) renderFrame(frames[currentPage]);
-    }
-    octaveOverlayLock = false;
-    octaveControls.style.display = "none";
-    return;
-  }
+  const page = Number.isFinite(msg.page) ? msg.page : currentPage;
   if (msg.clearAll) {
-    overlays[pageIdx] = [];
-    if (pageIdx === currentPage) renderFrame(frames[currentPage]);
-    hoveredStep = null;
-    lastOctaveTarget = null;
-    octaveOverlayLock = false;
-    octaveControls.style.display = "none";
-    microControls.style.display = "none";
+    overlays[page] = [];
+    octaveAnchors[page].clear();
+    if (page === currentPage) renderFrame(frames[page]);
+  }
+  if (page !== currentPage) return;
+  if (msg.clearAll || msg.clear || msg.changed) {
+    resetOctaveOverlayUI();
     return;
   }
-  if (msg.clear) {
-    if (Array.isArray(msg.clears) && msg.clears.length) {
-      msg.clears.forEach(({ x, y }) => clearOverlayAt(pageIdx, x, y));
-    } else {
-      clearOverlayAt(pageIdx, msg.x, msg.y);
-    }
-    if (pageIdx === currentPage) renderFrame(frames[currentPage]);
-    hoveredStep = null;
-    lastOctaveTarget = null;
-    octaveOverlayLock = false;
-    octaveControls.style.display = "none";
-    microControls.style.display = "none";
-    return;
-  }
-  const val = Number.isFinite(msg.octave) ? msg.octave : (Number.isFinite(msg.delta) ? msg.delta : 0);
-  const rawY = Number.isFinite(msg.rawY) ? msg.rawY : unmapOverlayY(msg.y, val, fullScaleMode);
-  addOverlay(pageIdx, msg.x, rawY, msg.octave, msg.delta);
-  if (!msg.silent) {
-    const overlayPage = pageIdx;
-    recentOctaveOverlay = {
-      page: overlayPage,
-      x: msg.x,
-      y: msg.y,
-      ts: Date.now()
-    };
-    if (!Number.isFinite(overlayPage) || overlayPage === currentPage) {
-      showOctaveControlsFromOverlay(msg);
-    }
+  if (!ENABLE_OCTAVE_SHIFTING || !msg.fromHold) return;
+  const y = msg.y + Number(fullScaleMode) - Number(!!msg.uiMode);
+  if (y >= 0 && y < getStepRows()) {
+    cancelSelectionActions();
+    clearSelection();
+    showOctaveControlsFromOverlay({ ...msg, y });
   }
 }
 
@@ -6361,14 +6283,14 @@ function handleStepStateMessage(msg) {
   if (pendingOctaveHover && msg.x === pendingOctaveHover.x && msg.y === pendingOctaveHover.y) {
     const hover = pendingOctaveHover;
     pendingOctaveHover = null;
-    if (!msg.on) {
+    if (!msg.on && !msg.octaveAnchor) {
       hoveredStep = null;
       if (!isOverOctaveControls) octaveControls.style.display = "none";
       if (!isOverMicroControls) microControls.style.display = "none";
       return;
     }
-    hoveredStep = { x: msg.x, y: msg.y };
-    showOctaveControls(hover);
+    showOctaveControls({ ...hover, octaveAnchor: msg.octaveAnchor });
+    if (msg.octaveAnchor) return;
     handleMicroOverlayMessage({
       page: msg.page,
       x: msg.x,
@@ -6762,13 +6684,6 @@ function getEffectiveStepRows() {
   return getStepRows();
 }
 
-function normalizeOctaveOverlay(rawY, octave) {
-  if (!Number.isFinite(octave)) return 0;
-  if (!fullScaleMode) return octave;
-  if (rawY === 6 && octave > 0) return octave - 1;
-  return octave;
-}
-
 function mapOverlayY(y, octave, useFullScale) {
   if (!useFullScale) return y;
   if (y === 6 && Number(octave) >= 1) return 0;
@@ -6786,6 +6701,7 @@ function getOverlayRawY(overlay) {
 }
 
 function getOverlayDrawY(overlay) {
+  if (overlay?.kind === "octave") return overlay.y;
   const rawY = getOverlayRawY(overlay);
   if (!Number.isFinite(rawY)) return overlay?.y ?? 0;
   if (Number.isFinite(overlay?.octave)) {

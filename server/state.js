@@ -11,7 +11,8 @@ const NOTE_VIEW_UP_BUTTON = PATTERN_CONTROL_BUTTON;
 const NOTE_VIEW_DOWN_BUTTON = 13;
 const NOTE_VIEW_ROW_SHIFT_MIN = -14;
 const NOTE_VIEW_ROW_SHIFT_MAX = 14;
-const ENABLE_OCTAVE_SHIFTING = false;
+const ENABLE_OCTAVE_SHIFTING = true;
+const OCTAVE_ANCHOR_LEVEL = 2;
 const MICRO_ROW_TOP = 0;
 const MICRO_ROW_BOTTOM = 7;
 const MICRO_ROW_THRESHOLD = 3;
@@ -424,7 +425,7 @@ export class SGridState {
     return true;
   }
 
-  octaveOverlaySnapshot() {
+  octaveOverlaySnapshot(opts = {}) {
     if (!this.isOctaveShiftingEnabled()) {
       return Array(9).fill(null).map(() => []);
     }
@@ -436,33 +437,66 @@ export class SGridState {
       if (!pat) continue;
       const bar = pat.barView || 0;
       const seqType = page.sequencerType || "mono";
+      if (seqType !== "mono" && seqType !== "poly" && seqType !== "mdtonal") continue;
+      const addNote = (x, degree, octave) => {
+        if (!octave) return;
+        const y = this.rowForNote(degree, octave, { ...opts, page: p });
+        if (y != null) pages[p].push({ x, y, octave });
+      };
       for (let x = 0; x < 16; x++) {
         const abs = x + bar * 16;
         if (abs >= pat.steps.length) break;
         const step = pat.steps[abs];
         if (!step?.on) continue;
         if (seqType === "poly") {
-          if (Array.isArray(step.notes) && step.notes.length) {
-            step.notes.forEach((deg) => {
-              const oct = this.getNoteOctave(step, deg);
-              if (!oct) return;
-              const y = clamp(6 - deg, 0, 6);
-              pages[p].push({ x, y, octave: oct });
-            });
-          }
-          if ((step.octave || 0) !== 0) {
-            const y = clamp(6 - (step.degree || 0), 0, 6);
-            pages[p].push({ x, y, octave: step.octave || 0 });
-          }
-        } else if (seqType === "mono" || seqType === "mdtonal") {
-          if ((step.octave || 0) !== 0) {
-            const y = clamp(6 - (step.degree || 0), 0, 6);
-            pages[p].push({ x, y, octave: step.octave || 0 });
-          }
+          step.notes?.forEach((degree) => addNote(x, degree, this.getNoteOctave(step, degree)));
+        } else {
+          addNote(x, step.degree || 0, step.octave || 0);
         }
       }
     }
     return pages;
+  }
+
+  octaveAnchorCells(opts = {}) {
+    const page = this.pages[this.currentPage];
+    const pat = this.getPattern();
+    if (!this.isOctaveShiftingEnabled() || !pat || this.patternControlMode || this.isIsomorphicMode(this.currentPage)) return [];
+    const cells = [];
+    const barStart = (pat.barView || 0) * 16;
+    for (let x = 0; x < 16 && barStart + x < pat.length_steps; x++) {
+      const step = pat.steps[barStart + x];
+      if (!step?.on || !step.octaveOrigins) continue;
+      for (const degreeKey of Object.keys(step.octaveOrigins)) {
+        const degree = Number(degreeKey);
+        const origin = this.getOctaveOrigin(step, degree, page.sequencerType);
+        if (origin == null) continue;
+        const y = this.rowForNote(degree, origin, opts);
+        if (y != null) cells.push(y * 16 + x);
+      }
+    }
+    return cells;
+  }
+
+  getOctaveOrigin(step, degree, seqType) {
+    const origin = step?.octaveOrigins?.[degree];
+    if (!step?.on || !Number.isInteger(origin)) return null;
+    if (seqType === "poly") {
+      return step.notes?.includes(degree) && origin !== this.getNoteOctave(step, degree) ? origin : null;
+    }
+    if (seqType !== "mono" && seqType !== "mdtonal") return null;
+    return step.degree === degree && origin !== (step.octave || 0) ? origin : null;
+  }
+
+  updateOctaveOrigin(step, degree, currentOctave, nextOctave) {
+    const origin = step.octaveOrigins?.[degree] ?? currentOctave;
+    if (origin === nextOctave) {
+      delete step.octaveOrigins?.[degree];
+      if (step.octaveOrigins && !Object.keys(step.octaveOrigins).length) delete step.octaveOrigins;
+    } else {
+      step.octaveOrigins ??= {};
+      step.octaveOrigins[degree] = origin;
+    }
   }
 
   sanitizeNoteOctaves(noteOctaves) {
@@ -991,6 +1025,7 @@ export class SGridState {
             notes: Array.isArray(s.notes) ? s.notes.slice() : [],
             accented: Array.isArray(s.accented) ? s.accented.slice() : [],
             noteOctaves: this.sanitizeNoteOctaves(s.noteOctaves),
+            ...(s.octaveOrigins && { octaveOrigins: this.sanitizeNoteOctaves(s.octaveOrigins) }),
             noteMicros: this.sanitizeNoteMicros(s.noteMicros),
             noteSlides: this.sanitizeNoteSlides(s.noteSlides)
           }))
@@ -1132,6 +1167,7 @@ export class SGridState {
                   notes: Array.isArray(ss.notes) ? ss.notes.map((n) => clamp(n, 0, 6)) : [],
                   accented: Array.isArray(ss.accented) ? ss.accented.map((n) => clamp(n, 0, 6)) : [],
                   noteOctaves: this.sanitizeNoteOctaves(ss.noteOctaves),
+                  ...(ss.octaveOrigins && { octaveOrigins: this.sanitizeNoteOctaves(ss.octaveOrigins) }),
                   noteMicros: this.sanitizeNoteMicros(ss.noteMicros, { legacy: legacyMicro }),
                   noteSlides: this.sanitizeNoteSlides(ss.noteSlides)
                 };
@@ -1531,10 +1567,13 @@ export class SGridState {
           delta = -currentOct;
         }
         if (delta !== 0) {
-          const res = this.setStepOctave(this.heldStep.x, this.heldStep.y, delta, { uiMode, abs: this.heldStep?.abs, barView: this.heldStep?.bar });
+          const res = this.setStepOctave(this.heldStep.x, this.heldStep.y, delta, {
+            uiMode, abs: this.heldStep.abs, barView: this.heldStep.bar, sourceOctave: heldInfo.shiftedOctave
+          });
           if (res) {
             if (heldInfo) {
               heldInfo.octaveChanged = true;
+              heldInfo.shiftedOctave = res.octave;
               heldInfo.action = "octave";
               heldInfo.actionDone = false;
               this.keyHolds.set(heldKey, heldInfo);
@@ -1642,6 +1681,15 @@ export class SGridState {
       const key = `${x},${y}`;
       if (s === 1) {
         const now = Date.now();
+        if (!heldInfo?.editMode && this.getOctaveOrigin(step, targetDegree, seqType) === targetOctave) {
+          if (this.keyHolds.size) return null;
+          this.heldStep = { x, y, bar: pat.barView || 0, abs };
+          this.holdTargetDegree = targetDegree;
+          this.heldStepModified = true;
+          this.keyHolds.set(key, { start: now, editMode: true, wasOn: true, octaveAnchor: true, action: "octave" });
+          this.enqueueOctaveOverlay({ page: this.currentPage, x, y, uiMode, fromHold: true, octaveAnchor: true });
+          return null;
+        }
         const heldAbs = this.heldStep && pat
           ? (Number.isFinite(this.heldStep?.abs) ? this.heldStep.abs : (this.heldStep.x + (pat.barView || 0) * 16))
           : -1;
@@ -1717,7 +1765,7 @@ export class SGridState {
               this.startMicrotimingMode(key, row, curMicro);
               this.heldStepModified = true;
             }
-            this.enqueueOctaveOverlay({ page: this.currentPage, x: this.heldStep.x, y: this.heldStep.y, octave: curOct, delta: 0, fromHold: true });
+            this.enqueueOctaveOverlay({ page: this.currentPage, x: this.heldStep.x, y: this.heldStep.y, uiMode, fromHold: true });
             const rawY = uiMode ? (this.heldStep.y === 0 ? 6 : this.heldStep.y - 1) : this.heldStep.y;
             this.enqueueMicroOverlay({
               page: this.currentPage,
@@ -1739,9 +1787,9 @@ export class SGridState {
           return null;
         }
         const seqTypeSlide = page?.sequencerType || "mono";
-        const slideAllowed = seqTypeSlide === "mono" &&
+        const slideAllowed = seqTypeSlide === "mono" && !heldInfo?.octaveAnchor &&
           inEdit && rightDiagonal && heldStepObj?.on;
-        const mdSlideAllowed = seqTypeSlide === "mdtonal" &&
+        const mdSlideAllowed = seqTypeSlide === "mdtonal" && !heldInfo?.octaveAnchor &&
           inEdit && rightDiagonal && heldStepObj?.on;
         if (slideAllowed) {
           heldStepObj.slide = !heldStepObj.slide;
@@ -1816,7 +1864,9 @@ export class SGridState {
             const stepNow = curPat && absNow >= 0 ? curPat.steps[absNow] : null;
             if (stepNow?.on) {
               const curOct = seqTypeNow === "poly" ? this.getNoteOctave(stepNow, targetDegree) : (stepNow.octave || 0);
-              this.enqueueOctaveOverlay({ page: this.currentPage, x, y, octave: curOct, delta: 0, fromHold: true });
+              if (seqTypeNow !== "drum") {
+                this.enqueueOctaveOverlay({ page: this.currentPage, x, y, uiMode, fromHold: true });
+              }
               const curMicro = this.getNoteMicroOffset(stepNow, targetDegree, seqTypeNow);
               const rawY = uiMode ? (y === 0 ? 6 : y - 1) : y;
               this.enqueueMicroOverlay({
@@ -1847,6 +1897,7 @@ export class SGridState {
             if (currentOct !== targetOctave) {
               if (!step.noteOctaves || typeof step.noteOctaves !== "object") step.noteOctaves = {};
               step.noteOctaves[targetDegree] = targetOctave;
+              delete step.octaveOrigins?.[targetDegree];
               this.heldStep = { x, y, bar: pat?.barView || 0, abs: x + (pat?.barView || 0) * 16 };
               this.heldStepModified = true;
               return null;
@@ -1898,6 +1949,7 @@ export class SGridState {
               if (this.getNoteOctave(step, targetDegree) !== targetOctave) {
                 if (!step.noteOctaves || typeof step.noteOctaves !== "object") step.noteOctaves = {};
                 step.noteOctaves[targetDegree] = targetOctave;
+                delete step.octaveOrigins?.[targetDegree];
                 this.heldStep = { x, y, bar: pat?.barView || 0, abs: x + (pat?.barView || 0) * 16 };
                 this.heldStepModified = true;
                 return null;
@@ -1929,6 +1981,7 @@ export class SGridState {
             step.degree = targetDegree;
             step.notes = [targetDegree];
             step.octave = targetOctave;
+            delete step.octaveOrigins;
             if (seqTypeCur === "mono") {
               this.breakChainAtStep(pat, abs, this.currentPage, seqTypeCur);
             }
@@ -2039,6 +2092,10 @@ export class SGridState {
           this.heldStepModified = false;
           return null;
         }
+        if (holdInfo.octaveAnchor) {
+          this.heldStepModified = false;
+          return null;
+        }
         const targetDeg = rowInfo.degree;
         // long press toggles accent (as long as no other edit action was taken)
         if (duration >= 150 && holdInfo?.wasOn && step2.on && !hasEditAction) {
@@ -2102,6 +2159,7 @@ export class SGridState {
               if (step2.noteOctaves && typeof step2.noteOctaves === "object") {
                 delete step2.noteOctaves[targetDeg];
               }
+              delete step2.octaveOrigins?.[targetDeg];
               if (step2.noteMicros && typeof step2.noteMicros === "object") {
                 delete step2.noteMicros[targetDeg];
               }
@@ -2175,6 +2233,7 @@ export class SGridState {
     const seqType = page?.sequencerType || "mono";
     const degree = rowInfo.degree;
     const isNoteOn = this.noteMatchesRow(step, degree, seqType, rowInfo);
+    const octaveOrigin = this.getOctaveOrigin(step, degree, seqType);
     const accent = (seqType === "poly" || seqType === "drum")
       ? (isNoteOn && Array.isArray(step?.accented) && step.accented.includes(degree))
       : (isNoteOn && !!step?.accent);
@@ -2187,6 +2246,8 @@ export class SGridState {
     return {
       exists: !!step,
       on: isNoteOn,
+      octaveOrigin,
+      octaveAnchor: octaveOrigin === rowInfo.octaveOffset,
       octave: this.getNoteOctave(step, degree),
       microOffset: this.getNoteMicroOffset(step, degree, seqType),
       accent,
@@ -2245,6 +2306,7 @@ export class SGridState {
 
   setStepOctave(x, y, delta, opts = {}) {
     if (!this.isOctaveShiftingEnabled()) return null;
+    if (!Number.isInteger(x) || x < 0 || x >= 16 || !Number.isInteger(y) || !Number.isInteger(delta)) return null;
     const pat = this.getPattern();
     const page = this.pages[this.currentPage];
     const seqType = page?.sequencerType || "mono";
@@ -2257,20 +2319,25 @@ export class SGridState {
       : (x + (Number.isFinite(opts.barView) ? opts.barView : (pat.barView || 0)) * 16);
     if (abs < 0 || abs >= pat.steps.length) return null;
     const step = pat.steps[abs];
-    if (!this.noteMatchesRow(step, rowInfo.degree, seqType, rowInfo)) return null;
     const targetDeg = rowInfo.degree;
+    // A Monome edit stays anchored to the held key after the note changes rows.
+    const isOctaveAnchor = this.getOctaveOrigin(step, targetDeg, seqType) === rowInfo.octaveOffset;
+    if (Number.isInteger(opts.sourceOctave)) rowInfo.octaveOffset = opts.sourceOctave;
+    if (!isOctaveAnchor && !this.noteMatchesRow(step, targetDeg, seqType, rowInfo)) return null;
     if (seqType === "poly") {
       if (!Array.isArray(step.notes) || !step.notes.includes(targetDeg)) return null;
       if (!step.noteOctaves || typeof step.noteOctaves !== "object") step.noteOctaves = {};
       const currentOct = this.getNoteOctave(step, targetDeg);
       const nextOct = clamp((currentOct || 0) + (delta || 0), -2, 2);
       if (nextOct === currentOct) return null;
+      this.forceLedRefresh = true;
       const prevStep = abs > 0 ? pat.steps[abs - 1] : null;
       const hasSlideChain = this.hasPolyNoteSlide(step, targetDeg) || this.hasPolyNoteSlide(prevStep, targetDeg);
       const prevInChain = prevStep?.on && this.hasPolyNoteSlide(prevStep, targetDeg)
         && Array.isArray(prevStep.notes) && prevStep.notes.includes(targetDeg)
         && this.getNoteOctave(prevStep, targetDeg) === currentOct;
       const chainStart = hasSlideChain && !prevInChain;
+      if (opts.trackOrigin !== false) this.updateOctaveOrigin(step, targetDeg, currentOct, nextOct);
       step.noteOctaves[targetDeg] = nextOct;
       const chainEndAbs = hasSlideChain ? this.polyChainEnd(pat, abs, targetDeg) : abs;
       if (!skipChainClear) {
@@ -2280,6 +2347,7 @@ export class SGridState {
             const step2 = pat.steps[idx];
             if (!step2?.on || !Array.isArray(step2.notes) || !step2.notes.includes(targetDeg)) break;
             if (!step2.noteOctaves || typeof step2.noteOctaves !== "object") step2.noteOctaves = {};
+            if (opts.trackOrigin !== false) this.updateOctaveOrigin(step2, targetDeg, this.getNoteOctave(step2, targetDeg), nextOct);
             step2.noteOctaves[targetDeg] = nextOct;
             if (idx >= barBase && idx < barBase + 16) {
               const x2 = idx - barBase;
@@ -2307,6 +2375,7 @@ export class SGridState {
     // keep octave offsets within a musical window
     const nextOct = clamp((step.octave || 0) + (delta || 0), -2, 2);
     if (nextOct === (step.octave || 0)) return null;
+    this.forceLedRefresh = true;
     const slideProp = seqType === "mdtonal" ? "mdSlide" : "slide";
     let endAbs = abs;
     if ((seqType === "mono" && step.chain) || (seqType !== "mono" && step[slideProp])) {
@@ -2322,6 +2391,7 @@ export class SGridState {
         endAbs += 1;
       }
     }
+    if (opts.trackOrigin !== false) this.updateOctaveOrigin(step, targetDeg, step.octave || 0, nextOct);
     step.octave = nextOct;
     if (!skipChainClear) {
       if (seqType === "mono") {
@@ -2332,6 +2402,7 @@ export class SGridState {
           for (let idx = abs + 1; idx <= endAbs; idx++) {
             const step2 = pat.steps[idx];
             if (!step2?.on) break;
+            if (opts.trackOrigin !== false) this.updateOctaveOrigin(step2, step2.degree || 0, step2.octave || 0, nextOct);
             step2.octave = nextOct;
             if (idx >= barBase && idx < barBase + 16) {
               const x2 = idx - barBase;
@@ -2662,12 +2733,15 @@ export class SGridState {
     const dy = ny - this.heldStep.y;
     if (dy === 0) return null;
     const delta = dy < 0 ? 1 : -1;
+    const key = `${this.heldStep.x},${this.heldStep.y}`;
+    const info = this.keyHolds.get(key) || {};
     // reuse setStepOctave so the same path is used for monome/UI updates
-    const res = this.setStepOctave(this.heldStep.x, this.heldStep.y, delta, { ...opts, abs: this.heldStep?.abs, barView: this.heldStep?.bar });
+    const res = this.setStepOctave(this.heldStep.x, this.heldStep.y, delta, {
+      ...opts, abs: this.heldStep.abs, barView: this.heldStep.bar, sourceOctave: info.shiftedOctave
+    });
     if (res) {
-      const key = `${this.heldStep.x},${this.heldStep.y}`;
-      const info = this.keyHolds.get(key) || {};
       info.octaveChanged = true;
+      info.shiftedOctave = res.octave;
       this.keyHolds.set(key, info);
       this.heldStepModified = true;
       this.enqueueOctaveOverlay({ page: this.currentPage, x: this.heldStep.x, y: this.heldStep.y, octave: res.octave, delta: res.delta });
@@ -2698,6 +2772,7 @@ export class SGridState {
         step.octave = 0;
         step.micro = 0;
         step.noteOctaves = {};
+        delete step.octaveOrigins;
         step.noteMicros = {};
       }
       this.heldStep = null;
@@ -2779,6 +2854,7 @@ export class SGridState {
         step.notes = step.notes.filter((n) => n !== tgt);
         if (Array.isArray(step.accented)) step.accented = step.accented.filter((n) => n !== tgt);
         delete step.noteOctaves[tgt];
+        delete step.octaveOrigins?.[tgt];
         if (step.noteMicros && typeof step.noteMicros === "object") {
           delete step.noteMicros[tgt];
         }
@@ -2866,6 +2942,7 @@ export class SGridState {
     step.notes = [];
     step.accented = [];
     step.noteOctaves = {};
+    delete step.octaveOrigins;
     step.noteMicros = {};
     step.noteSlides = {};
     // clear overlays for the notes that existed on this step
@@ -2914,6 +2991,7 @@ export class SGridState {
         notes: Array.isArray(s.notes) ? s.notes.slice() : [],
         accented: Array.isArray(s.accented) ? s.accented.slice() : [],
         noteOctaves: this.sanitizeNoteOctaves(s.noteOctaves),
+        ...(s.octaveOrigins && { octaveOrigins: this.sanitizeNoteOctaves(s.octaveOrigins) }),
         noteMicros: this.sanitizeNoteMicros(s.noteMicros),
         noteSlides: this.sanitizeNoteSlides(s.noteSlides)
       }))
@@ -2949,6 +3027,7 @@ export class SGridState {
         notes: Array.isArray(s.notes) ? s.notes.map((n) => clamp(n, 0, 6)) : [],
         accented: Array.isArray(s.accented) ? s.accented.map((n) => clamp(n, 0, 6)) : [],
         noteOctaves: this.sanitizeNoteOctaves(s.noteOctaves),
+        ...(s.octaveOrigins && { octaveOrigins: this.sanitizeNoteOctaves(s.octaveOrigins) }),
         noteMicros: this.sanitizeNoteMicros(s.noteMicros),
         noteSlides: this.sanitizeNoteSlides(s.noteSlides)
       };
@@ -3002,6 +3081,7 @@ export class SGridState {
         notes: Array.isArray(s.notes) ? s.notes.map((n) => clamp(n, 0, 6)) : [],
         accented: Array.isArray(s.accented) ? s.accented.map((n) => clamp(n, 0, 6)) : [],
         noteOctaves: this.sanitizeNoteOctaves(s.noteOctaves),
+        ...(s.octaveOrigins && { octaveOrigins: this.sanitizeNoteOctaves(s.octaveOrigins) }),
         noteMicros: this.sanitizeNoteMicros(s.noteMicros),
         noteSlides: this.sanitizeNoteSlides(s.noteSlides)
       };
@@ -3102,6 +3182,11 @@ export class SGridState {
       for (let i = start; i < end; i++) {
         const step = pat.steps[i];
         if (!step?.on) continue;
+        if (step.octaveOrigins) {
+          step.octaveOrigins = Object.fromEntries(
+            Object.entries(step.octaveOrigins).map(([degree, origin]) => [wrapDegree(Number(degree)), origin])
+          );
+        }
         if (seqType === "poly" || seqType === "drum") {
           const notes = Array.isArray(step.notes) ? step.notes : [];
           const newNotes = notes.map((n) => wrapDegree(n));
@@ -3997,6 +4082,7 @@ export class SGridState {
     if (step.noteOctaves && typeof step.noteOctaves === "object") {
       delete step.noteOctaves[degree];
     }
+    delete step.octaveOrigins?.[degree];
     if (step.noteMicros && typeof step.noteMicros === "object") {
       delete step.noteMicros[degree];
     }
@@ -4080,6 +4166,7 @@ export class SGridState {
     step.notes = step.notes.filter((n) => n !== degree);
     if (Array.isArray(step.accented)) step.accented = step.accented.filter((n) => n !== degree);
     if (step.noteOctaves && typeof step.noteOctaves === "object") delete step.noteOctaves[degree];
+    delete step.octaveOrigins?.[degree];
     if (step.noteMicros && typeof step.noteMicros === "object") delete step.noteMicros[degree];
     if (step.noteSlides && typeof step.noteSlides === "object") delete step.noteSlides[degree];
   }
@@ -4087,6 +4174,12 @@ export class SGridState {
   applyMoveOrCopyToStep(step, move, targetDeg, nextOct, opts = {}) {
     if (!step) return;
     const isPoly = move.info.seqType === "poly" || move.info.seqType === "drum";
+    if (isPoly) delete step.octaveOrigins?.[targetDeg];
+    else delete step.octaveOrigins;
+    if (move.info.octaveOrigin != null) {
+      const origin = nextOct + move.info.octaveOrigin - move.info.octave;
+      if (origin >= -3 && origin <= 4) this.updateOctaveOrigin(step, targetDeg, origin, nextOct);
+    }
     if (isPoly) {
       if (!Array.isArray(step.notes)) step.notes = [];
       if (!step.noteOctaves || typeof step.noteOctaves !== "object") step.noteOctaves = {};
@@ -4496,6 +4589,7 @@ export class SGridState {
     const baseFrame = this.renderLED(slideTimeMs, {
       includeOctaveHint: opts.includeOctaveHint,
       includeMicroHint: opts.includeMicroHint,
+      includeOctaveAnchors: false,
       ignorePatternHoldDim: opts.ignorePatternHoldDim
     });
     if (ignorePatternControl && prevPatternControl) {
@@ -4530,6 +4624,7 @@ export class SGridState {
         topFrame = this.renderLED(slideTimeMs, {
           includeOctaveHint: opts.includeOctaveHint,
           includeMicroHint: opts.includeMicroHint,
+          includeOctaveAnchors: false,
           ignorePatternHoldDim: opts.ignorePatternHoldDim
         });
       } finally {
@@ -4558,10 +4653,13 @@ export class SGridState {
         }
       }
     }
+    this.octaveAnchorCells({ uiMode: true }).forEach((index) => {
+      uiFrame[index] = OCTAVE_ANCHOR_LEVEL;
+    });
     return uiFrame;
   }
 
-  renderMicrotimingFrame(slideTimeMs) {
+  renderMicrotimingFrame(slideTimeMs, opts = {}) {
     const WIDTH = 16;
     const HEIGHT = 8;
     const STEP_ROWS = 7;
@@ -4582,6 +4680,7 @@ export class SGridState {
         baseFrame = this.renderLED(slideTimeMs, {
           includeOctaveHint: false,
           includeMicroHint: false,
+          includeOctaveAnchors: opts.includeOctaveAnchors,
           ignorePatternHoldDim: true,
           ignoreIsomorphic: true
         });
@@ -4626,7 +4725,7 @@ export class SGridState {
       frame[activeRow * WIDTH + highlighted] = Math.max(frame[activeRow * WIDTH + highlighted] || 0, selectionLevel);
     }
 
-    if (this.isOctaveShiftingEnabled() && pat && this.heldStep) {
+    if (opts.includeOctaveHint !== false && this.isOctaveShiftingEnabled() && pat && this.heldStep && page?.sequencerType !== "drum") {
       const indicatorCol = this.heldStep.x < WIDTH / 2 ? (WIDTH - 1) : 0;
       const indicatorDim = Math.max(1, Math.round(STEP_MICRO * 0.45) - 2);
       const indicatorLevel = page?.sequencerStopped
@@ -4691,7 +4790,7 @@ export class SGridState {
     const tMs = Date.now();
     const page = this.pages[this.currentPage];
     if (this.microtiming.active) {
-      return this.renderMicrotimingFrame(slideTimeMs);
+      return this.renderMicrotimingFrame(slideTimeMs, { includeOctaveHint, includeOctaveAnchors: opts.includeOctaveAnchors });
     }
     if (!ignoreIsomorphic && this.isIsomorphicMode(this.currentPage)) {
       return this.renderIsomorphicLED(slideTimeMs, opts);
@@ -4883,7 +4982,12 @@ export class SGridState {
         });
       }
     }
-    if (this.isOctaveShiftingEnabled() && pat && inEditMode && this.heldStep) {
+    if (opts.includeOctaveAnchors !== false) {
+      this.octaveAnchorCells().forEach((index) => {
+        frame[index] = OCTAVE_ANCHOR_LEVEL;
+      });
+    }
+    if (includeOctaveHint && this.isOctaveShiftingEnabled() && pat && inEditMode && this.heldStep && page?.sequencerType !== "drum") {
       const editDim = Math.max(1, Math.min(15, Math.round((STEP_ON || 10) * 0.2)));
       const heldIdx = this.heldStep.y * WIDTH + this.heldStep.x;
       for (let idx = 0; idx < frame.length; idx++) {

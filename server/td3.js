@@ -607,7 +607,7 @@ function applyTd3PatternParsed(state, parsed, { page, applyMode = "fit_current",
         return;
       }
       const y = clamp(6 - (st.degree || 0), 0, 6);
-      const res = state.setStepOctave(idx, y, delta, { uiMode: false, skipChainClear: true });
+      const res = state.setStepOctave(idx, y, delta, { uiMode: false, skipChainClear: true, trackOrigin: false });
       if (!res) {
         // Fallback keeps legacy mode from dropping octaves when octave shifting is hidden or row-shifted.
         st.octave = clamp(delta, OCTAVE_SHIFT_MIN, OCTAVE_SHIFT_MAX);
