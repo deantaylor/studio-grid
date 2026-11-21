@@ -21,13 +21,27 @@ test("the NI screen uses the selected Studio Grid track, order, and frame", () =
   assert.equal(surface.name, "SH-101");
   assert.equal(surface.sequencer, "Poly");
   assert.equal(surface.slots[0].page, 3);
-  assert.deepEqual(surface.patterns[0], { number: 1, active: true, pending: false, occupied: false });
-  assert.deepEqual(surface.patterns[1], { number: 2, active: false, pending: true, occupied: true });
+  assert.deepEqual(surface.patterns[0], { number: 1, active: true, pending: false, occupied: false, level: 12 });
+  assert.deepEqual(surface.patterns[1], { number: 2, active: false, pending: true, occupied: true, level: 6 });
   assert.equal(surface.frame[48], 15);
   assert.deepEqual(surface.parameters.map(({ value }) => value), ["120", "50", "B", "minor", "1", "32", "1x", "2"]);
   assert.deepEqual(niControlCommand(state, { slot: 2 }, "internal"), { type: "set_page", page: 1 });
   assert.deepEqual(niControlCommand(state, { pattern: 8 }, "internal"), { type: "set_pattern", pattern: 8 });
   assert.deepEqual(niControlCommand(state, { dial: -2 }, "internal"), { type: "set_note_view_offset", page: 3, offset: -2 });
+});
+
+test("NI patterns mirror the Monome selector levels including queued pulses and occupied slots", () => {
+  const state = new SGridState();
+  state.patternHeld = true;
+  state.pages[1].pending_pattern = 2;
+  state.pages[1].patterns[3].steps[0].on = true;
+  state.setPatternLength(1, 3, 32);
+  for (const pulse of [false, true]) {
+    state.pulse = pulse;
+    const levels = niSurfaceSnapshot(state, [], "internal").patterns.map(({ level }) => level);
+    assert.deepEqual(levels, state.renderLED().slice(112, 120));
+    assert.deepEqual(levels.slice(0, 4), [12, pulse ? 12 : 6, 11, 4]);
+  }
 });
 
 test("NI knob movement uses the existing app commands and respects the clock and bar bounds", () => {
@@ -43,6 +57,26 @@ test("NI knob movement uses the existing app commands and respects the clock and
   assert.deepEqual(turn(7), { type: "set_pattern_time_scale", pattern: 1, scale: 2 });
   assert.deepEqual(turn(8), { type: "set_bar_view", pattern: 1, bar: 0 });
   assert.equal(turn(9), null);
+});
+
+test("track setup uses the selected track and maps knobs one, three and four", () => {
+  const state = new SGridState();
+  const midiOutputs = [{ id: "synth", name: "Synth MIDI" }, { id: "drum", name: "Drum MIDI" }];
+  state.setPage(3);
+  state.setMidiConfig(3, { outId: "synth", channel: 7 });
+  const setup = () => niSurfaceSnapshot(state, [], "internal", { midiOutputs }).trackSetupParameters;
+  const turn = (knob, steps = 1, setupPage = 3) => niControlCommand(state, { knob, steps, setupPage }, "internal", midiOutputs);
+  assert.deepEqual(setup(), [{ label: "Type", value: "Mono" }, null, { label: "MIDI Out", value: "Synth MIDI" }, { label: "Ch", value: "7" }]);
+  assert.deepEqual(turn(1), { type: "set_seq_type", page: 3, seqType: "poly" });
+  assert.equal(turn(2), null);
+  assert.deepEqual(turn(3), { type: "set_midi", page: 3, outId: "drum", channel: 7 });
+  assert.deepEqual(turn(3, -1), { type: "set_midi", page: 3, outId: "", channel: 7 });
+  assert.deepEqual(turn(4, 12), { type: "set_midi", page: 3, outId: "synth", channel: 16 });
+  assert.deepEqual(turn(5), { type: "set_pattern", pattern: 2 });
+  assert.equal(turn(3, 1, 2), null);
+  state.setSequencerType(3, "mdtonal");
+  assert.deepEqual(setup()[3], { label: "MD Track", value: "1" });
+  assert.deepEqual(turn(4), { type: "set_md_track", page: 3, track: 2 });
 });
 
 test("NI row labels follow the visible scale and drum grid and disappear in the launcher", () => {

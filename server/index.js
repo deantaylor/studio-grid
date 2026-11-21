@@ -76,6 +76,10 @@ let niLauncherHolder = null;
 const localNiClients = new WeakSet();
 const niUiClients = new Map();
 const NI_EDIT_ACTIONS = new Set(["copy_bar", "copy_pattern", "paste", "clear_bar", "clear_pattern"]);
+function getNiUiClient() {
+  const available = [...niUiClients].filter(([client]) => client.readyState === client.OPEN);
+  return available.findLast(([, ui]) => ui.desktop) || available.at(-1) || [];
+}
 const serial = new SerialOSCBridge({ prefix: "sgrid" });
 const state = new SGridState();
 state.requestRender = () => renderAndPush();
@@ -489,14 +493,28 @@ function handleClientMessage(ws, data) {
       if (typeof data.pressed === "boolean") setNiPatternLauncherPressed(ws, data.pressed);
       break;
     case "register_ni_ui":
-      if (localNiClients.has(ws)) niUiClients.set(ws, data.desktop === true);
+      if (localNiClients.has(ws)) niUiClients.set(ws, { desktop: data.desktop === true, midiOutputs: [] });
       break;
+    case "ni_midi_outputs": {
+      const ui = niUiClients.get(ws);
+      if (!ui || !Array.isArray(data.outputs)) break;
+      ui.midiOutputs = data.outputs.slice(0, 128).filter((port) =>
+        typeof port?.id === "string" && port.id.length > 0 && port.id.length <= 256 && typeof port.name === "string"
+      ).map(({ id, name }) => ({ id, name: name.slice(0, 256) || id }));
+      break;
+    }
     case "ni_edit": {
       if (!niSurfaces.has(ws) || state.patternControlMode || !NI_EDIT_ACTIONS.has(data.action)) break;
-      const available = [...niUiClients].filter(([client]) => client.readyState === client.OPEN);
-      const [renderer] = available.findLast(([, desktop]) => desktop) || available.at(-1) || [];
+      const [renderer] = getNiUiClient();
       if (renderer) renderer.send(JSON.stringify({ type: "ni_edit", action: data.action }));
       else ws.send(JSON.stringify({ type: "ni_toast", text: "Open Studio Grid to edit" }));
+      break;
+    }
+    case "ni_note_edit": {
+      if (!activeNiSurfaces.has(ws)) break;
+      const event = state.editHeldNote(data.action);
+      if (event) dispatchGridEvents([event]);
+      renderAndPush();
       break;
     }
     case "ni_ui_toast":
@@ -507,7 +525,10 @@ function handleClientMessage(ws, data) {
       break;
     case "ni_control": {
       if (!niSurfaces.has(ws) || state.patternControlMode) break;
-      const command = niControlCommand(state, data, clockSource);
+      if ((Number.isInteger(data.slot) || Number.isInteger(data.pattern)) && state.getHeldNoteEdit()) break;
+      if (data.setupPage != null && (!activeNiSurfaces.has(ws) || state.getHeldNoteEdit())) break;
+      const [, ui] = getNiUiClient();
+      const command = niControlCommand(state, data, clockSource, ui?.midiOutputs);
       if (command) handleClientMessage(ws, command);
       break;
     }
@@ -854,6 +875,7 @@ function handleClientMessage(ws, data) {
       if (page >= 1 && page <= 8 && (seq === "mono" || seq === "poly" || seq === "drum" || seq === "cc" || seq === "mdtonal")) {
         state.setSequencerType(page, seq);
         broadcast({ type: "seq_type", page, seqType: seq });
+        renderAndPush();
       }
       break;
     }
@@ -1439,7 +1461,10 @@ function getLedUIFrame() {
 function pushNiSurface() {
   if (!niSurfaces.size) return;
   const frame = state.patternControlMode ? state.renderPatternControlLED() : getLedUIFrame();
-  const payload = JSON.stringify({ type: "ni_surface", ...niSurfaceSnapshot(state, frame, clockSource, { uiMode: fullScaleMode }) });
+  const [, ui] = getNiUiClient();
+  const payload = JSON.stringify({ type: "ni_surface", ...niSurfaceSnapshot(state, frame, clockSource, {
+    uiMode: fullScaleMode, midiOutputs: ui?.midiOutputs
+  }) });
   for (const [ws, previous] of niSurfaces) {
     if (previous === payload || ws.readyState !== ws.OPEN || ws.bufferedAmount > 16384) continue;
     ws.send(payload);

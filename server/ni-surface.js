@@ -17,11 +17,14 @@ function stepChoice(choices, current, steps) {
     : (choices.findLast((choice) => choice < current) ?? choices[0]);
 }
 
-export function niSurfaceSnapshot(state, frame, clockSource, { uiMode = true } = {}) {
+export function niSurfaceSnapshot(state, frame, clockSource, { uiMode = true, midiOutputs = [] } = {}) {
   const page = state.currentPage;
   const track = state.pages[page];
   const pattern = state.getPattern();
   const length = pattern.length_steps;
+  const midi = state.midi[page];
+  const mdtonal = track.sequencerType === "mdtonal";
+  const noteEdit = state.getHeldNoteEdit();
   const rowLabels = [];
   if (!state.patternControlMode && !state.isIsomorphicMode(page) && track.sequencerType !== "cc") {
     const intervals = state.getScaleIntervals(state.scale.mode);
@@ -35,6 +38,13 @@ export function niSurfaceSnapshot(state, frame, clockSource, { uiMode = true } =
   return {
     page,
     patternLauncherActive: state.patternControlMode,
+    noteEdit: noteEdit ? {
+      canAccent: noteEdit.info.canAccent,
+      accent: noteEdit.info.accent,
+      canSlide: noteEdit.canSlide,
+      slide: noteEdit.info.slide,
+      canOctave: state.isOctaveShiftingEnabled() && noteEdit.info.seqType !== "drum"
+    } : null,
     rowLabels,
     slots: state.deviceOrder.map((device, index) => ({
       number: index + 1,
@@ -43,13 +53,21 @@ export function niSurfaceSnapshot(state, frame, clockSource, { uiMode = true } =
     })),
     name: state.deviceNames[page] || String(page),
     sequencer: SEQUENCER_TYPES[track.sequencerType] || SEQUENCER_TYPES.mono,
+    trackSetupParameters: [
+      { label: "Type", value: SEQUENCER_TYPES[track.sequencerType] || SEQUENCER_TYPES.mono },
+      null,
+      { label: "MIDI Out", value: midi.outId ? (midiOutputs.find(({ id }) => id === midi.outId)?.name || "Unavailable") : "None" },
+      mdtonal ? { label: "MD Track", value: String(track.mdTrack || 1) }
+        : { label: "Ch", value: String(midi.channel || 1) }
+    ],
     patterns: Array.from({ length: 8 }, (_, index) => {
       const number = index + 1;
       return {
         number,
         active: number === track.active_pattern,
         pending: number === track.pending_pattern,
-        occupied: state.patternHasData(page, number)
+        occupied: state.patternHasData(page, number),
+        level: state.patternSelectorLevel(page, number)
       };
     }),
     parameters: [
@@ -66,8 +84,8 @@ export function niSurfaceSnapshot(state, frame, clockSource, { uiMode = true } =
   };
 }
 
-export function niControlCommand(state, data, clockSource) {
-  const { slot, pattern: patternSlot, dial, knob, steps, transposeOctave } = data;
+export function niControlCommand(state, data, clockSource, midiOutputs = []) {
+  const { slot, pattern: patternSlot, dial, knob, steps, transposeOctave, setupPage } = data;
   if (Number.isInteger(slot) && slot >= 1 && slot <= 8) {
     const page = state.deviceOrder[slot - 1];
     return { type: "set_page", page };
@@ -91,7 +109,32 @@ export function niControlCommand(state, data, clockSource) {
     };
   }
   if (!Number.isInteger(steps) || steps === 0 || Math.abs(steps) > 64) return null;
-  const track = state.pages[state.currentPage];
+  const page = state.currentPage;
+  const track = state.pages[page];
+  if (setupPage != null && setupPage !== page) return null;
+  if (setupPage === page && knob <= 4) {
+    const midi = state.midi[page];
+    const outId = midi.outId || "";
+    const channel = midi.channel || 1;
+    switch (knob) {
+      case 1: {
+        const seqType = stepChoice(Object.keys(SEQUENCER_TYPES), track.sequencerType, steps);
+        return seqType === track.sequencerType ? null : { type: "set_seq_type", page, seqType };
+      }
+      case 3: {
+        const choices = ["", ...midiOutputs.map(({ id }) => id)];
+        const index = Math.max(0, choices.indexOf(outId));
+        const next = choices[clamp(index + steps, 0, choices.length - 1)];
+        return next === outId ? null : { type: "set_midi", page, outId: next, channel };
+      }
+      case 4: {
+        if (track.sequencerType === "mdtonal") return { type: "set_md_track", page, track: clamp((track.mdTrack || 1) + steps, 1, 16) };
+        return { type: "set_midi", page, outId, channel: clamp(channel + steps, 1, 16) };
+      }
+      default:
+        return null;
+    }
+  }
   const pattern = state.getPattern();
   const selectedPattern = track.active_pattern;
   switch (knob) {

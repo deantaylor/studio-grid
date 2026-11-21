@@ -107,3 +107,58 @@ test("the eighth-row layout shows notes on its top row at the upper scroll limit
   assert.deepEqual(state.noteViewPitches(), [21]);
   assert.ok(state.renderUIFrame()[1] > 0);
 });
+
+test("eight-row note edit keeps the held key and microtiming strip in place at both edges", async () => {
+  const options = { uiMode: true };
+  for (const row of [0, 7]) {
+    const state = new SGridState();
+    state.pages[1].sequencerStopped = true;
+    const { degree, octaveOffset } = state.getRowInfo(row, options);
+    const step = state.getPattern().steps[2];
+    Object.assign(step, { on: true, degree, octave: octaveOffset });
+    state.handleGridKey(2, row, 1, options);
+    await setTimeout(175);
+    assert.ok(state.getHeldNoteEdit());
+    assert.equal(state.microtiming.active, true);
+    const timingRow = row === 0 ? 7 : 0;
+    const frame = state.renderUIFrame();
+    assert.ok(frame[row * 16 + 2] > 0);
+    assert.ok(frame[timingRow * 16 + 7] > frame[timingRow * 16 + 6]);
+    assert.equal(state.handleGridKey(8, timingRow, 1, options)?.microOffset, 1);
+    state.handleGridKey(8, timingRow, 0, options);
+    state.handleGridKey(2, row, 0, options);
+    assert.equal(state.microtiming.active, false);
+    assert.equal(state.getHeldNoteEdit(), null);
+    assert.equal(step.on, true);
+    assert.equal(step.micro, 1);
+    assert.equal(step.accent, false);
+  }
+});
+
+test("NI note actions edit the held poly note through repeated octave changes", async () => {
+  const state = new SGridState();
+  const options = { uiMode: true };
+  state.setSequencerType(1, "poly");
+  const step = state.getPattern().steps[4];
+  Object.assign(step, { on: true, notes: [0, 4] });
+  state.handleGridKey(4, 7, 1, options);
+  await setTimeout(175);
+  assert.equal(state.editHeldNote("octave_up")?.octave, 1);
+  assert.equal(state.editHeldNote("octave_up")?.octave, 2);
+  assert.equal(state.editHeldNote("accent")?.accent, true);
+  assert.equal(state.editHeldNote("slide")?.slide, true);
+  assert.equal(state.editHeldNote("slide")?.slide, false);
+  assert.equal(state.editHeldNote("octave_down")?.octave, 1);
+  state.handleGridKey(4, 7, 0, options);
+  assert.deepEqual(step.accented, [0]);
+  assert.equal(state.getNoteOctave(step, 0), 1);
+  assert.equal(state.getNoteOctave(step, 4), 0);
+  assert.equal(state.editHeldNote("accent"), null);
+
+  state.handleGridKey(4, 7, 1, options);
+  await setTimeout(175);
+  assert.equal(state.getHeldNoteEdit()?.hold.octaveAnchor, true);
+  assert.equal(state.editHeldNote("slide")?.slide, true);
+  state.handleGridKey(4, 7, 0, options);
+  assert.deepEqual(step.noteSlides, { 0: true });
+});

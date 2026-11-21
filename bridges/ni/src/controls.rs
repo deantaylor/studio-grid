@@ -6,6 +6,7 @@ pub const DISPLAY_BUTTONS: [&str; 8] = [
     "top_1", "top_2", "top_3", "top_4", "top_5", "top_6", "top_7", "top_8",
 ];
 const DEFAULT_BUTTON_COLOR: &str = "#393939";
+const NOTE_EDIT_ACTIONS: [&str; 4] = ["accent", "slide", "octave_up", "octave_down"];
 
 #[derive(Clone, Copy)]
 pub struct Profile {
@@ -101,17 +102,19 @@ impl Profile {
 
 #[derive(Default)]
 pub struct Controls {
-    track_latched: bool,
+    track_collapsed: bool,
     pressed: HashSet<&'static str>,
     pub clear_confirm: bool,
     pub launcher_active: bool,
+    note_edit: Option<[bool; 4]>,
+    track_setup: Option<(usize, u64)>,
 }
 
 impl Controls {
     pub fn mode(&self, profile: Profile) -> &'static str {
         if self.pressed.contains(profile.pattern) {
             "pattern"
-        } else if self.track_latched {
+        } else if !self.track_collapsed {
             "track"
         } else {
             "none"
@@ -120,6 +123,54 @@ impl Controls {
 
     pub fn clear_held(&self, profile: Profile) -> bool {
         self.pressed.contains(profile.clear)
+    }
+
+    pub fn track_button_pressed(
+        &mut self,
+        slot: usize,
+        active_slot: Option<usize>,
+        page: u64,
+    ) -> bool {
+        self.track_setup = (active_slot == Some(slot)).then_some((slot, page));
+        self.track_setup.is_some()
+    }
+
+    pub fn track_setup_page(&self) -> Option<u64> {
+        self.track_setup.map(|(_, page)| page)
+    }
+
+    pub fn update_track_setup(
+        &mut self,
+        profile: Profile,
+        page: u64,
+        active_slot: Option<usize>,
+    ) -> bool {
+        let Some((slot, held_page)) = self.track_setup else {
+            return false;
+        };
+        if self.launcher_active
+            || self.note_edit.is_some()
+            || self.clear_held(profile)
+            || self.pressed.contains(profile.pattern)
+            || held_page != page
+            || active_slot != Some(slot)
+        {
+            self.track_setup = None;
+            return true;
+        }
+        false
+    }
+
+    pub fn update_note_edit(&mut self, note: &Value) {
+        self.note_edit = note.is_object().then(|| {
+            let octave = note["canOctave"] == true;
+            [
+                note["canAccent"] == true,
+                note["canSlide"] == true,
+                octave,
+                octave,
+            ]
+        });
     }
 
     pub fn display_button_colors<'a>(
@@ -131,6 +182,9 @@ impl Controls {
             if self.launcher_active {
                 return None;
             }
+            if index < 4 && (self.clear_held(profile) || self.note_edit.is_some()) {
+                return None;
+            }
             if self.clear_held(profile) && index >= 4 {
                 return if self.clear_confirm {
                     [Some("#292929"), None, Some("#ff9890"), Some("#ff9890")][index - 4]
@@ -138,17 +192,11 @@ impl Controls {
                     Some(DEFAULT_BUTTON_COLOR)
                 };
             }
+            if let Some(available) = self.note_edit {
+                return available[index - 4].then_some(DEFAULT_BUTTON_COLOR);
+            }
             if self.pressed.contains(profile.pattern) {
-                let pattern = &state["patterns"][index];
-                return Some(if pattern["pending"] == true {
-                    "#ffc185"
-                } else if pattern["active"] == true {
-                    "#bacfda"
-                } else if pattern["occupied"] == true {
-                    "#4b5962"
-                } else {
-                    DEFAULT_BUTTON_COLOR
-                });
+                return Some(DEFAULT_BUTTON_COLOR);
             }
             let track = &state["slots"][index];
             Some(
@@ -161,11 +209,37 @@ impl Controls {
         })
     }
 
-    pub fn display_lamp(&self, profile: Profile, name: &str, color: Option<&str>) -> LedValue {
+    pub fn display_lamp(
+        &self,
+        profile: Profile,
+        index: usize,
+        color: Option<&str>,
+        state: &Value,
+    ) -> LedValue {
         let Some(color) = color else {
             return LedValue::Off;
         };
-        let bright = self.bright(profile, name);
+        let name = DISPLAY_BUTTONS[index];
+        let mut bright = self.bright(profile, name);
+        if !self.clear_held(profile) && self.note_edit.is_some() {
+            bright |= match index {
+                4 => state["noteEdit"]["accent"] == true,
+                5 => state["noteEdit"]["slide"] == true,
+                _ => false,
+            };
+            return profile.lamp(name, bright);
+        }
+        if self.pressed.contains(profile.pattern) && (index < 4 || !self.clear_held(profile)) {
+            let level = state["patterns"][index]["level"].as_u64().unwrap_or(0);
+            return match (profile.indexed_buttons, bright, level) {
+                (true, true, _) | (true, false, 10..) => LedValue::Single(71),
+                (true, false, 5..=9) => LedValue::Single(70),
+                (true, false, 1..=4) => LedValue::Single(69),
+                (_, false, 0) => LedValue::Off,
+                (false, true, _) | (false, false, 10..) => LedValue::Bright,
+                (false, false, _) => LedValue::Dim,
+            };
+        }
         if profile.product != 0x1610 {
             return profile.lamp(name, bright);
         }
@@ -205,19 +279,29 @@ impl Controls {
             return None;
         }
         if profile.launcher == Some(name) {
+            self.track_setup = None;
             return Some(json!({ "kind": "pattern_launcher", "pressed": pressed }));
         }
         if !pressed {
+            if self
+                .track_setup
+                .is_some_and(|(slot, _)| name == DISPLAY_BUTTONS[slot - 1])
+            {
+                self.track_setup = None;
+            }
             if name == profile.clear {
                 self.clear_confirm = false;
             }
             return None;
         }
+        if name == profile.clear || name == profile.pattern {
+            self.track_setup = None;
+        }
         if self.launcher_active {
             return None;
         }
         if name == profile.track {
-            self.track_latched = !self.track_latched;
+            self.track_collapsed = !self.track_collapsed;
             self.clear_confirm = false;
             return None;
         }
@@ -233,6 +317,9 @@ impl Controls {
             return Some(json!({ "kind": "octave", "transposeOctave": transpose_octave }));
         }
         let index = DISPLAY_BUTTONS.iter().position(|button| *button == name)?;
+        if index < 4 && (self.clear_held(profile) || self.note_edit.is_some()) {
+            return None;
+        }
         if self.clear_held(profile) && index >= 4 {
             let action = if self.clear_confirm {
                 self.clear_confirm = false;
@@ -255,6 +342,10 @@ impl Controls {
             };
             return Some(json!({ "kind": "edit", "action": action }));
         }
+        if let Some(available) = self.note_edit {
+            return available[index - 4]
+                .then(|| json!({ "kind": "note_edit", "action": NOTE_EDIT_ACTIONS[index - 4] }));
+        }
         self.clear_confirm = false;
         let slot = index + 1;
         if self.pressed.contains(profile.pattern) {
@@ -265,7 +356,7 @@ impl Controls {
     }
 
     pub fn bright(&self, profile: Profile, name: &str) -> bool {
-        self.pressed.contains(name) || (name == profile.track && self.track_latched)
+        self.pressed.contains(name) || (name == profile.track && !self.track_collapsed)
     }
 
     pub fn lamp(&self, profile: Profile, name: &str) -> LedValue {
@@ -284,9 +375,34 @@ mod tests {
     use super::*;
 
     #[test]
-    fn track_latches_and_display_buttons_work_in_normal_mode() {
+    fn track_setup_is_only_active_while_the_selected_slot_is_held() {
         let profile = Profile::for_name("s49").unwrap();
         let mut controls = Controls::default();
+        controls.button(profile, "top_5", true);
+        assert!(controls.track_button_pressed(5, Some(5), 2));
+        assert_eq!(controls.track_setup_page(), Some(2));
+        assert!(!controls.update_track_setup(profile, 2, Some(5)));
+        controls.button(profile, "top_5", false);
+        assert_eq!(controls.track_setup_page(), None);
+
+        controls.button(profile, "top_6", true);
+        assert!(!controls.track_button_pressed(6, Some(5), 2));
+        assert!(!controls.update_track_setup(profile, 3, Some(6)));
+        assert_eq!(controls.track_setup_page(), None);
+        controls.button(profile, "top_6", false);
+
+        controls.button(profile, "top_6", true);
+        assert!(controls.track_button_pressed(6, Some(6), 3));
+        assert!(controls.update_track_setup(profile, 2, Some(5)));
+        assert_eq!(controls.track_setup_page(), None);
+    }
+
+    #[test]
+    fn track_starts_active_and_can_be_toggled() {
+        let profile = Profile::for_name("s49").unwrap();
+        let mut controls = Controls::default();
+        assert_eq!(controls.mode(profile), "track");
+        assert_eq!(controls.lamp(profile, "track"), LedValue::Bright);
         assert_eq!(controls.lamp(profile, "top_2"), LedValue::Single(68));
         assert_eq!(controls.button(profile, "top_2", true).unwrap()["slot"], 2);
         assert_eq!(controls.lamp(profile, "top_2"), LedValue::Single(71));
@@ -294,11 +410,11 @@ mod tests {
         assert_eq!(controls.lamp(profile, "top_2"), LedValue::Single(68));
         controls.button(profile, "track", true);
         controls.button(profile, "track", false);
-        assert_eq!(controls.mode(profile), "track");
-        assert!(controls.bright(profile, "track"));
+        assert_eq!(controls.mode(profile), "none");
+        assert_eq!(controls.lamp(profile, "track"), LedValue::Dim);
         controls.button(profile, "track", true);
         controls.button(profile, "track", false);
-        assert_eq!(controls.mode(profile), "none");
+        assert_eq!(controls.mode(profile), "track");
     }
 
     #[test]
@@ -308,7 +424,7 @@ mod tests {
         controls.button(profile, "pattern", true);
         assert_eq!(controls.mode(profile), "pattern");
         controls.button(profile, "pattern", false);
-        assert_eq!(controls.mode(profile), "none");
+        assert_eq!(controls.mode(profile), "track");
         controls.button(profile, "track", true);
         controls.button(profile, "track", false);
         controls.button(profile, "pattern", true);
@@ -320,7 +436,7 @@ mod tests {
         );
         controls.button(profile, "top_8", false);
         controls.button(profile, "pattern", false);
-        assert_eq!(controls.mode(profile), "track");
+        assert_eq!(controls.mode(profile), "none");
         assert!(!controls.bright(profile, "pattern"));
         assert_eq!(controls.button(profile, "top_8", true).unwrap()["slot"], 8);
     }
@@ -335,7 +451,7 @@ mod tests {
             Some(json!({ "kind": "pattern_launcher", "pressed": true }))
         );
         assert!(controls.button(profile, "key_mode", true).is_none());
-        assert_eq!(controls.mode(profile), "none");
+        assert_eq!(controls.mode(profile), "track");
         assert_eq!(
             controls.button(profile, "key_mode", false),
             Some(json!({ "kind": "pattern_launcher", "pressed": false }))
@@ -344,35 +460,39 @@ mod tests {
     }
 
     #[test]
-    fn display_lamps_share_track_and_pattern_colors_with_the_screen() {
+    fn display_lamps_use_track_colors_and_white_pattern_levels() {
         let profile = Profile::for_name("s49").unwrap();
         let mut controls = Controls::default();
         let state = json!({ "page": 2, "slots": [{ "page": 2, "color": "#ff786e" }],
-            "patterns": [{ "active": true }, { "pending": true }, { "occupied": true }] });
+            "patterns": [{ "level": 12 }, { "level": 6 }, { "level": 4 }, { "level": 0 }] });
         let track_colors = controls.display_button_colors(profile, &state);
         assert_eq!(&track_colors[..2], &[Some("#ff786e"), Some("#393939")]);
-        let track = controls.display_lamp(profile, "top_1", track_colors[0]);
+        let track = controls.display_lamp(profile, 0, track_colors[0], &state);
         assert_eq!(track, LedValue::Single(5));
         controls.button(profile, "pattern", true);
         let patterns = controls.display_button_colors(profile, &state);
         assert_eq!(
-            &patterns[..3],
-            &[Some("#bacfda"), Some("#ffc185"), Some("#4b5962")]
+            [0, 1, 2, 3].map(|index| controls.display_lamp(
+                profile,
+                index,
+                patterns[index],
+                &state
+            )),
+            [
+                LedValue::Single(71),
+                LedValue::Single(70),
+                LedValue::Single(69),
+                LedValue::Off
+            ]
         );
-        let active = controls.display_lamp(profile, "top_1", patterns[0]);
-        let pending = controls.display_lamp(profile, "top_2", patterns[1]);
-        assert_ne!(active, pending);
-        controls.button(profile, "top_1", true);
-        let LedValue::Single(active) = active else {
-            panic!("expected an indexed lamp")
-        };
+        controls.button(profile, "top_3", true);
         assert_eq!(
-            controls.display_lamp(profile, "top_1", patterns[0]),
-            LedValue::Single(active | 3)
+            controls.display_lamp(profile, 2, patterns[2], &state),
+            LedValue::Single(71)
         );
         let maschine = Profile::for_name("maschine-mk3").unwrap();
         assert_eq!(
-            controls.display_lamp(maschine, "top_2", patterns[1]),
+            controls.display_lamp(maschine, 1, patterns[1], &state),
             LedValue::Dim
         );
     }
@@ -429,9 +549,10 @@ mod tests {
         controls.button(profile, "pattern", true);
         controls.button(profile, "erase", true);
         assert!(controls.bright(profile, "erase"));
+        assert!(controls.button(profile, "top_2", true).is_none());
         assert_eq!(
-            controls.button(profile, "top_2", true).unwrap()["pattern"],
-            2
+            controls.display_button_colors(profile, &Value::Null)[1],
+            None
         );
         assert_eq!(
             controls.button(profile, "top_5", true).unwrap()["action"],
@@ -453,5 +574,33 @@ mod tests {
             controls.button(profile, "top_8", true).unwrap()["pattern"],
             8
         );
+    }
+
+    #[test]
+    fn note_edit_routes_only_the_right_display_buttons() {
+        let profile = Profile::for_name("s49").unwrap();
+        let mut controls = Controls::default();
+        controls
+            .update_note_edit(&json!({ "canAccent": true, "canSlide": true, "canOctave": true }));
+        for button in &DISPLAY_BUTTONS[..4] {
+            assert!(controls.button(profile, button, true).is_none());
+        }
+        for (button, action) in DISPLAY_BUTTONS[4..].iter().zip(NOTE_EDIT_ACTIONS) {
+            assert_eq!(
+                controls.button(profile, button, true),
+                Some(json!({ "kind": "note_edit", "action": action }))
+            );
+            controls.button(profile, button, false);
+        }
+        controls.button(profile, "clear", true);
+        assert_eq!(
+            controls.button(profile, "top_5", true).unwrap()["action"],
+            "copy_bar"
+        );
+        controls.button(profile, "top_5", false);
+        controls.button(profile, "clear", false);
+        controls.update_note_edit(&json!({ "canAccent": false, "canOctave": false }));
+        assert!(controls.button(profile, "top_5", true).is_none());
+        assert!(controls.button(profile, "top_6", true).is_none());
     }
 }

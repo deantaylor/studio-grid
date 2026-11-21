@@ -957,6 +957,7 @@ const hasElectronSave = !!window.electronAPI?.saveSet;
 const NON_DIRTY_WS_TYPES = new Set([
   "subscribe_events",
   "register_ni_ui",
+  "ni_midi_outputs",
   "ni_ui_toast",
   "midi_log",
   "transport",
@@ -1386,6 +1387,7 @@ function connectWS() {
     resetLastSentState();
     ws.send(JSON.stringify({ type: "subscribe_events" }));
     ws.send(JSON.stringify({ type: "register_ni_ui", desktop: !!window.electronAPI }));
+    sendNiMidiOutputs();
     if (MIDI_LOG && !midiLogAnnounced) {
       midiLogAnnounced = true;
       const payload = { kind: "enabled", nowTs: Number(performance.now().toFixed(3)) };
@@ -1660,6 +1662,13 @@ function connectWS() {
       if (msg.page >= 1 && msg.page <= 8 && Array.isArray(msg.pitches)) {
         noteViewPitches[msg.page] = msg.pitches;
         if (msg.page === currentPage) renderNoteScrollbar();
+      }
+    } else if (msg.type === "midi_config") {
+      if (msg.page >= 1 && msg.page <= 8 && msg.cfg) {
+        if (midiSettings[msg.page]?.outId !== msg.cfg.outId) panicAll();
+        midiSettings[msg.page] = msg.cfg;
+        lastSentState.midiSettings[msg.page] = msg.cfg;
+        if (msg.page === currentPage) applyPageMidi();
       }
     } else if (msg.type === "seq_type") {
       if (typeof msg.page === "number" && msg.seqType) {
@@ -2008,7 +2017,14 @@ function refreshMIDIDevices() {
   updateTd3ExportVisibility();
   if (midiStatus) midiStatus.textContent = `MIDI: ${midiAccess ? midiAccess.outputs.size : 0} outputs`;
   if (outs.length) log(`Available MIDI outs: ${outs.join(", ")}`);
+  sendNiMidiOutputs();
   // keep user-selected clock source; do not auto-force external here
+}
+
+function sendNiMidiOutputs() {
+  if (ws?.readyState !== WebSocket.OPEN) return;
+  const outputs = Array.from(midiAccess?.outputs.values() || [], ({ id, name }) => ({ id, name: name || id }));
+  ws.send(JSON.stringify({ type: "ni_midi_outputs", outputs }));
 }
 
 function start() {

@@ -85,6 +85,8 @@ export function startNiBridge({
       socket.send(JSON.stringify({ type: "ni_pattern_launcher", pressed: data.pressed }));
     } else if (kind === "edit") {
       socket.send(JSON.stringify({ type: "ni_edit", action: data.action }));
+    } else if (kind === "note_edit") {
+      socket.send(JSON.stringify({ type: "ni_note_edit", action: data.action }));
     }
   });
 

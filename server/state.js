@@ -373,8 +373,7 @@ export class SGridState {
   }
 
   microtimingRowForNoteRow(y) {
-    const STEP_ROWS = 7;
-    const safeRow = Number.isFinite(y) ? Math.max(0, Math.min(STEP_ROWS - 1, Math.round(y))) : 0;
+    const safeRow = Number.isFinite(y) ? clamp(Math.round(y), 0, MICRO_ROW_BOTTOM) : MICRO_ROW_TOP;
     return safeRow <= MICRO_ROW_THRESHOLD ? MICRO_ROW_BOTTOM : MICRO_ROW_TOP;
   }
 
@@ -1390,14 +1389,16 @@ export class SGridState {
     const seqTypeHeld = page?.sequencerType || "mono";
     const heldDeg = this.holdTargetDegree != null
       ? clamp(this.holdTargetDegree, 0, 6)
-      : clamp(6 - held.y, 0, 6);
+      : this.getRowInfo(held.y, opts).degree;
     const currentMicro = this.getNoteMicroOffset(step, heldDeg, seqTypeHeld);
     const targetValue = this.microtimingValueForColumn(x);
     let delta = targetValue - currentMicro;
     if (targetValue !== 0 && targetValue === currentMicro) {
       delta = -currentMicro;
     }
-    const res = this.setStepMicroOffset(held.x, held.y, delta, { uiMode: opts.uiMode, abs: held.abs });
+    const res = this.setStepMicroOffset(held.x, held.y, delta, {
+      uiMode: opts.uiMode, abs: held.abs, sourceOctave: this.getHeldNoteEdit()?.options.sourceOctave
+    });
     const microValue = res ? res.microOffset : this.getNoteMicroOffset(step, heldDeg, seqTypeHeld);
     this.updateMicrotimingValue(microValue, { forceRefresh: true });
     this.heldStepModified = true;
@@ -1762,7 +1763,7 @@ export class SGridState {
         if (!heldInfo?.editMode && this.getOctaveOrigin(step, targetDegree, seqType) === targetOctave) {
           if (this.keyHolds.size) return null;
           const heldStep = { x, y, bar: pat.barView || 0, abs };
-          const hold = { editMode: false, octaveAnchor: true, pattern: pat };
+          const hold = { editMode: false, octaveAnchor: true, pattern: pat, uiMode };
           this.heldStep = heldStep;
           this.holdTargetDegree = targetDegree;
           this.heldStepModified = true;
@@ -1932,6 +1933,7 @@ export class SGridState {
             actionDone: false,
             microEdit: false,
             uiMode,
+            pattern: pat,
             abs: holdAbs
           });
           this.holdStart = now;
@@ -2180,6 +2182,10 @@ export class SGridState {
           this.heldStepModified = false;
           return null;
         }
+        if (holdInfo.pattern !== pat2 || holdInfo.niEdited) {
+          this.heldStepModified = false;
+          return null;
+        }
         const targetDeg = rowInfo.degree;
         // long press toggles accent (as long as no other edit action was taken)
         if (duration >= NOTE_EDIT_HOLD_MS && holdInfo?.wasOn && step2.on && !hasEditAction) {
@@ -2307,6 +2313,7 @@ export class SGridState {
   getStepInfo(x, y, opts = {}) {
     const rowInfo = this.getRowInfo(y, opts);
     if (!rowInfo.stepRow) return { exists: false, on: false };
+    if (Number.isInteger(opts.sourceOctave)) rowInfo.octaveOffset = opts.sourceOctave;
     const page = this.pages[this.currentPage];
     const pat = this.getPattern();
     if (!pat) return { exists: false, on: false };
@@ -2344,6 +2351,50 @@ export class SGridState {
     };
   }
 
+  getHeldNoteEdit() {
+    const held = this.heldStep;
+    if (!held || this.patternControlMode || this.isIsomorphicMode() || this.keyHolds.size !== 1) return null;
+    const key = `${held.x},${held.y}`;
+    const hold = this.keyHolds.get(key);
+    const pattern = this.getPattern();
+    if (!hold?.editMode || hold.pattern !== pattern || held.bar !== pattern?.barView) return null;
+    const row = this.getRowInfo(held.y, { uiMode: hold.uiMode });
+    const seqType = this.pages[this.currentPage]?.sequencerType;
+    const step = pattern.steps[held.abs];
+    if (!row.stepRow || !step?.on) return null;
+    const sourceOctave = this.getNoteOctave(step, row.degree);
+    if (!this.noteMatchesRow(step, row.degree, seqType, row)
+        && this.getOctaveOrigin(step, row.degree, seqType) !== row.octaveOffset) return null;
+    const options = { uiMode: hold.uiMode, abs: held.abs, sourceOctave };
+    const info = this.getStepInfo(held.x, held.y, options);
+    return { held, hold, options, info, canSlide: info.canSlide || (info.seqType === "poly" && info.on) };
+  }
+
+  editHeldNote(action) {
+    const target = this.getHeldNoteEdit();
+    if (!target) return null;
+    const { held: { x, y }, hold, options, info, canSlide } = target;
+    if (action === "accent" && info.canAccent) {
+      const result = this.setStepAccent(x, y, !info.accent, options);
+      if (!result) return null;
+      hold.niEdited = true;
+      return { type: "accent", x, y, accent: result.accent };
+    }
+    if (action === "slide" && canSlide) {
+      const result = this.setStepSlide(x, y, !info.slide, options);
+      if (!result) return null;
+      hold.niEdited = true;
+      return { type: "slide", x, y, slide: result.slide };
+    }
+    if (action !== "octave_up" && action !== "octave_down") return null;
+    const result = this.setStepOctave(x, y, action === "octave_up" ? 1 : -1, options);
+    if (!result) return null;
+    hold.niEdited = true;
+    hold.octaveChanged = true;
+    hold.shiftedOctave = result.octave;
+    return { type: "octave", x, y, octave: result.octave, delta: result.delta };
+  }
+
   setStepAccent(x, y, value, opts = {}) {
     const info = this.getStepInfo(x, y, opts);
     if (!info.exists || !info.on || !info.canAccent) return null;
@@ -2371,6 +2422,7 @@ export class SGridState {
     const seqType = page?.sequencerType || "mono";
     const rowInfo = this.getRowInfo(y, opts);
     if (!pat || !rowInfo.stepRow) return null;
+    if (Number.isInteger(opts.sourceOctave)) rowInfo.octaveOffset = opts.sourceOctave;
     const abs = x + (pat.barView || 0) * 16;
     if (abs < 0 || abs >= pat.steps.length) return null;
     const step = pat.steps[abs];
@@ -2520,6 +2572,7 @@ export class SGridState {
     const seqType = page?.sequencerType || "mono";
     const rowInfo = this.getRowInfo(y, opts);
     if (!pat || !rowInfo.stepRow) return null;
+    if (Number.isInteger(opts.sourceOctave)) rowInfo.octaveOffset = opts.sourceOctave;
     const abs = Number.isFinite(opts.abs)
       ? opts.abs
       : (x + (pat.barView || 0) * 16);
@@ -3178,6 +3231,19 @@ export class SGridState {
     const pat = this.pages[pageIdx]?.patterns?.[patternIdx];
     if (!pat || !Array.isArray(pat.steps)) return false;
     return pat.steps.some((s) => s?.on);
+  }
+
+  patternSelectorLevel(pageIdx, patternIdx) {
+    const page = this.pages[pageIdx];
+    const pattern = page.patterns[patternIdx];
+    const { pattern_active: active, pattern_inactive: inactive, pattern_pending: pending } = this.ledLevels;
+    const occupied = this.patternHasData(pageIdx, patternIdx);
+    const dataLevel = Math.max(inactive + 2, Math.min(15, Math.round(active * 0.75)));
+    if (page.pending_pattern === patternIdx) return this.pulse ? active : pending;
+    if (page.active_pattern === patternIdx) return this.pulse || !occupied ? active : dataLevel;
+    if (!occupied) return inactive;
+    const bars = Math.max(1, Math.ceil((pattern?.length_steps || 16) / 16));
+    return bars > 1 ? Math.min(15, dataLevel + (bars - 1) * 2) : dataLevel;
   }
 
   deviceHasData(pageIdx) {
@@ -4648,6 +4714,7 @@ export class SGridState {
     const HEIGHT = 8;
     const STEP_ROWS = 7;
     const ignorePatternControl = !!opts.ignorePatternControl;
+    if (this.microtiming.active) return this.renderMicrotimingFrame(slideTimeMs, { ...opts, uiMode: true });
     const prevPatternControl = this.patternControlMode;
     if (ignorePatternControl && prevPatternControl) {
       this.patternControlMode = false;
@@ -4660,7 +4727,7 @@ export class SGridState {
       return frame;
     }
     const baseFrame = this.renderLED(slideTimeMs, {
-      includeOctaveHint: opts.includeOctaveHint,
+      includeOctaveHint: false,
       includeMicroHint: opts.includeMicroHint,
       includeOctaveAnchors: false,
       ignorePatternHoldDim: opts.ignorePatternHoldDim
@@ -4694,7 +4761,7 @@ export class SGridState {
       if (ignorePatternControl && prevPatternControlMode) this.patternControlMode = false;
       try {
         topFrame = this.renderLED(slideTimeMs, {
-          includeOctaveHint: opts.includeOctaveHint,
+          includeOctaveHint: false,
           includeMicroHint: opts.includeMicroHint,
           includeOctaveAnchors: false,
           ignorePatternHoldDim: opts.ignorePatternHoldDim
@@ -4728,7 +4795,59 @@ export class SGridState {
         }
       }
     }
+    if (opts.includeOctaveHint !== false && this.getHeldNoteEdit()) {
+      this.renderOctaveEditFrame(uiFrame, page, pat);
+    }
     return uiFrame;
+  }
+
+  renderOctaveEditFrame(frame, page, pat) {
+    if (!this.isOctaveShiftingEnabled() || !pat || !this.heldStep || page?.sequencerType === "drum") return;
+    const WIDTH = 16;
+    const STEP_ON = this.ledLevels.step_on;
+    const STEP_MICRO = this.ledLevels.step_micro;
+    const bar = pat.barView || 0;
+    const editDim = Math.max(1, Math.min(15, Math.round((STEP_ON || 10) * 0.2)));
+    const heldIdx = this.heldStep.y * WIDTH + this.heldStep.x;
+    for (let idx = 0; idx < frame.length; idx++) {
+      if (idx === heldIdx) continue;
+      const current = frame[idx] || 0;
+      if (current > 0) frame[idx] = Math.min(current, editDim);
+    }
+    frame[heldIdx] = Math.max(frame[heldIdx] || 0, STEP_ON || 10);
+
+    const seqTypeHint = page?.sequencerType || "mono";
+    const indicatorCol = this.heldStep.x < WIDTH / 2 ? (WIDTH - 1) : 0;
+    const indicatorDim = Math.max(1, Math.round(STEP_MICRO * 0.45) - 2);
+    const indicatorLevel = page?.sequencerStopped
+      ? Math.max(1, Math.round(indicatorDim * 0.4))
+      : indicatorDim;
+    OCTAVE_INDICATOR_ROWS.forEach((row) => {
+      const idx = row * WIDTH + indicatorCol;
+      frame[idx] = Math.max(frame[idx] || 0, indicatorLevel);
+    });
+    const hx = this.heldStep.x;
+    const hy = this.heldStep.y;
+    const absHeld = Number.isFinite(this.heldStep?.abs)
+      ? this.heldStep.abs
+      : (hx + bar * 16);
+    const heldStepObj = pat.steps[absHeld];
+    const targetDegree = this.holdTargetDegree != null
+      ? clamp(this.holdTargetDegree, 0, 6)
+      : clamp(6 - hy, 0, 6);
+    let octaveShift = heldStepObj?.octave || 0;
+    if (seqTypeHint === "poly" && Array.isArray(heldStepObj?.notes) && heldStepObj.notes.includes(targetDegree)) {
+      octaveShift = this.getNoteOctave(heldStepObj, targetDegree);
+    }
+    const normalizedShift = clamp(Math.round(Number(octaveShift) || 0), -2, 2);
+    const shiftRow = OCTAVE_SHIFT_ROW_MAP[String(normalizedShift)];
+    if (shiftRow != null) {
+      const highlightLevel = page?.sequencerStopped
+        ? Math.max(1, Math.round((STEP_ON || 10) * 0.35))
+        : (STEP_ON || 10);
+      const idx = shiftRow * WIDTH + indicatorCol;
+      frame[idx] = Math.max(frame[idx] || 0, highlightLevel);
+    }
   }
 
   renderMicrotimingFrame(slideTimeMs, opts = {}) {
@@ -4749,13 +4868,14 @@ export class SGridState {
     if (prevMicroActive) {
       try {
         this.microtiming.active = false;
-        baseFrame = this.renderLED(slideTimeMs, {
+        const baseOptions = {
           includeOctaveHint: false,
           includeMicroHint: false,
           includeOctaveAnchors: opts.includeOctaveAnchors,
           ignorePatternHoldDim: true,
           ignoreIsomorphic: true
-        });
+        };
+        baseFrame = opts.uiMode ? this.renderUIFrame(slideTimeMs, baseOptions) : this.renderLED(slideTimeMs, baseOptions);
       } finally {
         this.microtiming.active = prevMicroActive;
       }
@@ -4780,10 +4900,7 @@ export class SGridState {
         : heldBase;
       frame[heldIdx] = Math.max(frame[heldIdx] || 0, heldLevel);
     }
-    const bottomRow = HEIGHT - 1;
-    for (let x = 0; x < WIDTH; x += 1) {
-      frame[bottomRow * WIDTH + x] = 0;
-    }
+    if (!opts.uiMode) frame.fill(0, (HEIGHT - 1) * WIDTH);
     const midCols = new Set([7, 8]);
     for (let x = 0; x < WIDTH; x += 1) {
       const idx = activeRow * WIDTH + x;
@@ -5058,48 +5175,8 @@ export class SGridState {
         if (index % WIDTH !== playheadColumn) frame[index] = OCTAVE_ANCHOR_LEVEL;
       });
     }
-    if (includeOctaveHint && this.isOctaveShiftingEnabled() && pat && inEditMode && this.heldStep && page?.sequencerType !== "drum") {
-      const editDim = Math.max(1, Math.min(15, Math.round((STEP_ON || 10) * 0.2)));
-      const heldIdx = this.heldStep.y * WIDTH + this.heldStep.x;
-      for (let idx = 0; idx < frame.length; idx++) {
-        if (idx === heldIdx) continue;
-        const current = frame[idx] || 0;
-        if (current > 0) frame[idx] = Math.min(current, editDim);
-      }
-      frame[heldIdx] = Math.max(frame[heldIdx] || 0, STEP_ON || 10);
-
-      const seqTypeHint = page?.sequencerType || "mono";
-      const indicatorCol = this.heldStep.x < WIDTH / 2 ? (WIDTH - 1) : 0;
-      const indicatorDim = Math.max(1, Math.round(STEP_MICRO * 0.45) - 2);
-      const indicatorLevel = page?.sequencerStopped
-        ? Math.max(1, Math.round(indicatorDim * 0.4))
-        : indicatorDim;
-      OCTAVE_INDICATOR_ROWS.forEach((row) => {
-        const idx = row * WIDTH + indicatorCol;
-        frame[idx] = Math.max(frame[idx] || 0, indicatorLevel);
-      });
-      const hx = this.heldStep.x;
-      const hy = this.heldStep.y;
-      const absHeld = Number.isFinite(this.heldStep?.abs)
-        ? this.heldStep.abs
-        : (hx + bar * 16);
-      const heldStepObj = pat.steps[absHeld];
-      const targetDegree = this.holdTargetDegree != null
-        ? clamp(this.holdTargetDegree, 0, 6)
-        : clamp(6 - hy, 0, 6);
-      let octaveShift = heldStepObj?.octave || 0;
-      if (seqTypeHint === "poly" && Array.isArray(heldStepObj?.notes) && heldStepObj.notes.includes(targetDegree)) {
-        octaveShift = this.getNoteOctave(heldStepObj, targetDegree);
-      }
-      const normalizedShift = clamp(Math.round(Number(octaveShift) || 0), -2, 2);
-      const shiftRow = OCTAVE_SHIFT_ROW_MAP[String(normalizedShift)];
-      if (shiftRow != null) {
-        const highlightLevel = page?.sequencerStopped
-          ? Math.max(1, Math.round((STEP_ON || 10) * 0.35))
-          : (STEP_ON || 10);
-        const idx = shiftRow * WIDTH + indicatorCol;
-        frame[idx] = Math.max(frame[idx] || 0, highlightLevel);
-      }
+    if (includeOctaveHint && inEditMode) {
+      this.renderOctaveEditFrame(frame, page, pat);
     }
     if (this.patternHeld && !ignorePatternHoldDim) {
       for (let yy = 0; yy < STEP_ROWS; yy++) {
@@ -5118,26 +5195,7 @@ export class SGridState {
     if ((this.patternControlMode || this.patternControlHeld || this.patternHeld) && page) {
       // show patterns when holding pattern button
       for (let i = 0; i < 8; i++) {
-        const patIdx = i + 1;
-        const pat = page.patterns[patIdx];
-        const hasData = pat?.steps?.some((s) => s.on);
-        const isActive = page.active_pattern === patIdx;
-        const isPending = page.pending_pattern === patIdx;
-        const bars = Math.max(1, Math.ceil((pat?.length_steps || 16) / 16));
-        let level = PATTERN_INACTIVE;
-        if (hasData) {
-          level = PATTERN_HAS_DATA;
-          if (bars > 1 && !isActive && !isPending) {
-            level = Math.min(15, PATTERN_HAS_DATA + (bars - 1) * 2);
-          }
-        }
-        if (isPending) {
-          level = this.pulse ? PATTERN_ACTIVE : PATTERN_PENDING;
-        } else if (isActive) {
-          // active should light even when empty; keep pulsing if it has data
-          level = this.pulse ? PATTERN_ACTIVE : (hasData ? PATTERN_HAS_DATA : PATTERN_ACTIVE);
-        }
-        frame[7 * WIDTH + i] = level;
+        frame[7 * WIDTH + i] = this.patternSelectorLevel(this.currentPage, i + 1);
       }
       // visualize bars of current pattern on subsequent buttons
       const activePat = page.patterns[page.active_pattern];

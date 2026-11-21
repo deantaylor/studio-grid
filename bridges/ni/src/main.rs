@@ -72,6 +72,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut lamps = HashMap::new();
     let mut knob_remainders = [0.0; 8];
     let mut state = Value::Null;
+    let mut active_page = 0;
+    let mut active_slot = None;
     let mut display_lamps = [LedValue::Off; 8];
     let mut dirty = false;
     eprintln!("Waiting for {controller} (17cc:{product:04x})");
@@ -92,6 +94,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             }
             controls = Controls::default();
             controls.launcher_active = state["patternLauncherActive"] == true;
+            controls.update_note_edit(&state["noteEdit"]);
             lamps.clear();
             knob_remainders.fill(0.0);
             device = connected;
@@ -116,7 +119,21 @@ fn main() -> Result<(), Box<dyn Error>> {
                         || profile.dial_button(name).is_some() =>
                 {
                     dirty = true;
-                    let Some(action) = controls.button(profile, name, pressed) else {
+                    let previous_setup = controls.track_setup_page();
+                    let action = controls.button(profile, name, pressed);
+                    let setup_pressed = action
+                        .as_ref()
+                        .and_then(|action| action["slot"].as_u64())
+                        .is_some_and(|slot| {
+                            controls.track_button_pressed(slot as usize, active_slot, active_page)
+                        });
+                    if previous_setup != controls.track_setup_page() {
+                        knob_remainders[..4].fill(0.0);
+                    }
+                    if setup_pressed {
+                        continue;
+                    }
+                    let Some(action) = action else {
                         continue;
                     };
                     action
@@ -132,15 +149,23 @@ fn main() -> Result<(), Box<dyn Error>> {
                     let Some(knob) = slot(name, profile.knob_prefix) else {
                         continue;
                     };
+                    let setup_page = controls.track_setup_page();
+                    if setup_page.is_some() && knob == 2 {
+                        continue;
+                    }
                     let remainder = &mut knob_remainders[knob - 1];
-                    let resolution = if knob <= 2 { 0.01 } else { 0.04 };
+                    let resolution = if knob <= 2 && setup_page.is_none() {
+                        0.01
+                    } else {
+                        0.04
+                    };
                     *remainder += f64::from(delta);
                     let steps = (*remainder / resolution).trunc() as i32;
                     if steps == 0 {
                         continue;
                     }
                     *remainder -= f64::from(steps) * resolution;
-                    json!({ "kind": "knob", "knob": knob, "steps": steps.clamp(-64, 64) })
+                    json!({ "kind": "knob", "knob": knob, "steps": steps.clamp(-64, 64), "setupPage": setup_page })
                 }
                 _ => continue,
             };
@@ -160,19 +185,34 @@ fn main() -> Result<(), Box<dyn Error>> {
                         controls.clear_confirm = false;
                     }
                     controls.launcher_active = launcher_active;
+                    controls.update_note_edit(&payload["noteEdit"]);
+                    active_page = payload["page"].as_u64().unwrap_or(0);
+                    active_slot = payload["slots"]
+                        .as_array()
+                        .and_then(|slots| {
+                            slots
+                                .iter()
+                                .position(|slot| slot["page"].as_u64() == Some(active_page))
+                        })
+                        .map(|index| index + 1);
                     state = payload;
                 }
                 Err(mpsc::TryRecvError::Empty) => break,
                 Err(mpsc::TryRecvError::Disconnected) => return false,
             }
         }
+        if controls.update_track_setup(profile, active_page, active_slot) {
+            knob_remainders[..4].fill(0.0);
+            dirty = true;
+        }
         if (owns_device || visible) && dirty && !state.is_null() {
             let colors = controls.display_button_colors(profile, &state);
             display_lamps = std::array::from_fn(|index| {
-                controls.display_lamp(profile, DISPLAY_BUTTONS[index], colors[index])
+                controls.display_lamp(profile, index, colors[index], &state)
             });
             let mut view = state.clone();
             view["selector"] = json!(controls.mode(profile));
+            view["trackSetup"] = json!(controls.track_setup_page().is_some());
             view["buttonColors"] = json!(colors);
             view["clearHeld"] = json!(controls.clear_held(profile));
             view["clearConfirm"] = json!(controls.clear_confirm);
