@@ -1,0 +1,44 @@
+--- a/src/usb/device_thread.rs
++++ b/src/usb/device_thread.rs
+@@ -194,5 +194,7 @@
+         let led_ctl_tx = led_tx.clone();
+         let screen_ctl_tx = screen_tx.clone();
+-        let has_control = Arc::new(AtomicBool::new(true));
++        let service_required = descriptor.quirks.ni_service.is_some()
++            && std::env::var_os("ENCDR_FORCE_SERVICE").is_some();
++        let has_control = Arc::new(AtomicBool::new(!service_required));
+         let thread_has_control = has_control.clone();
+         let is_connected = Arc::new(AtomicBool::new(true));
+@@ -352,5 +354,5 @@
+     }
+ 
+-    if interfaces.is_empty() {
++    if interfaces.is_empty() && !(force_service && service_screen_iface.is_some()) {
+         tracing::error!("No interfaces of '{}' could be claimed; device thread exiting", descriptor.name);
+         return;
+@@ -502,10 +504,19 @@
+                     );
+                     interfaces.insert(quirk.screen_interface.clone(), Iface::Service(Arc::new(session)));
+-                }
+-                Err(e) => tracing::warn!(
+-                    "Interface '{}' is unavailable over USB and the NI hardware service route failed: {}; its screens are unavailable",
+-                    quirk.screen_interface,
+-                    e
+-                ),
++                    if force_service {
++                        has_control.store(true, Ordering::SeqCst);
++                    }
++                }
++                Err(e) => {
++                    tracing::warn!(
++                        "Interface '{}' is unavailable over USB and the NI hardware service route failed: {}; its screens are unavailable",
++                        quirk.screen_interface,
++                        e
++                    );
++                    if force_service {
++                        is_connected.store(false, Ordering::SeqCst);
++                        return;
++                    }
++                }
+             }
+         }

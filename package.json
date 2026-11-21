@@ -3,7 +3,7 @@
   "name": "studio-grid",
   "productName": "studio-grid",
   "description": "multi-sequencer and composer for monome devices (and not).",
-  "version": "0.1.2-beta.1",
+  "version": "0.1.2-beta.4",
   "type": "module",
   "private": true,
   "main": "electron/main.cjs",
@@ -11,6 +11,9 @@
     "start": "node server/index.js",
     "dev": "node server/index.js",
     "electron": "electron .",
+    "electron:ni": "STUDIO_GRID_NI=1 electron .",
+    "ni:build": "node bridges/ni/build.mjs",
+    "ni:bridge": "node bridges/ni/bridge.mjs",
     "dist": "electron-builder -mwl",
     "lint": "eslint . --max-warnings=0",
     "lint:syntax": "node --check electron/main.cjs && node --check electron/preload.cjs && node --check server/*.js && node --check public/*.js && node --check tests/*.test.js",
@@ -39,12 +42,26 @@
       "public/**/*",
       "fixtures/**/*",
       "node_modules/**/*",
-      "package.json"
+      "package.json",
+      "bridges/ni/bridge.mjs"
     ],
     "mac": {
       "target": [
         "dmg",
         "zip"
+      ],
+      "extraResources": [
+        {
+          "from": "bridges/ni/target/packaged/${arch}",
+          "to": "ni",
+          "filter": [
+            "studio-grid-ni",
+            "studio-grid-ni-source.tar.gz"
+          ]
+        }
+      ],
+      "binaries": [
+        "Contents/Resources/ni/studio-grid-ni"
       ]
     },
     "win": {
@@ -58,6 +75,7 @@
     "linux": {
       "target": "AppImage",
       "category": "AudioVideo"
-    }
+    },
+    "beforePack": "./electron/package-ni.cjs"
   }
 }

@@ -1,38 +1,18 @@
 # studio:grid
 
-`studio:grid` is a grid-based multi-sequencer and composer for monome grids (or without).
+studio:grid is a MIDI step sequencer for hardware synths and drum machines. Build patterns on the desktop grid or a Monome, and use an optional Native Instruments controller as a second interface.
 
-## Quick Start
-- Dev server: `npm start` (http://localhost:3000)
-- Electron app: `npm run electron`
-- Lint/syntax checks: `npm run lint`
-- Test suite: `npm test`
-- Manual probes: `npm run test:manual`
-- Full local gate: `npm run check`
-- Build installers: `npm run dist`
+- Sequence up to eight tracks in Mono, Poly, Drum, CC or Machinedrum tonal mode.
+- Build and launch patterns, copy bars, and edit per-note accent, slide, octave and timing.
+- Set MIDI routing per track, sync to internal or external MIDI clock, and import or export TD-3 patterns.
+- Use the NI bridge to view the grid and control tracks, patterns and parameters from the controller’s two displays.
 
-## Dependency Install Modes
-- Full development install (includes lint/build/test tooling): `npm ci`
-- Runtime-only install (smaller footprint, excludes dev dependencies): `npm ci --omit=dev`
+[User manual](docs/manual/README.md) · [NI controller guide](docs/manual/ni-controller.md) · [Development and builds](docs/manual/development.md)
 
-## Beta Releases
-- Bump to next beta version (creates commit + tag): `npm version prerelease --preid=beta`
-- Push commit + tag: `git push origin main --follow-tags`
-- Pushing tags like `v0.1.2-beta.0` triggers `.github/workflows/beta-release.yml`
-- Workflow publishes a GitHub pre-release with `.dmg` and `.exe` assets
+## Screens
 
-## Documentation
-- Docs index: `docs/README.md`
-- User manual: `docs/manual/README.md`
-- Runtime code map: `AGENTS.md`
-- Feature ownership: `docs/reference/app-features.md`
-- UI standards: `docs/standards/ui-standards.md`
-- Specs: `docs/specs/`
+![Desktop sequencer playing measure two of a 303 pattern, with measure progress under each track](docs/screens/sequencer.png)
 
-## Project Layout
-- `electron/`: desktop shell/bootstrap
-- `server/`: HTTP, WebSocket, transport, sequencing state integration
-- `public/`: browser UI and WebMIDI logic
-- `tests/`: canonical regression tests
-- `tests/manual/`: archived/manual behavior probes
-- `fixtures/`: static fixtures and sample payloads
+![Desktop Pattern Launcher showing active patterns across eight tracks during playback](docs/screens/pattern-launcher.png)
+
+![Dual NI controller displays showing the SH-101 pattern, root-note dot, playhead, and active measure](docs/screens/ni-controller.png)

@@ -1,9 +1,8 @@
 # studio:grid manual
 
-This manual is split into focused pages so it is easier to scan and maintain.
-
-## Contents
-- `getting-started.md`
-- `sequencing.md`
-- `projects-and-io.md`
-- `hardware-and-troubleshooting.md`
+- [Getting started](getting-started.md)
+- [Sequencing](sequencing.md)
+- [Projects and I/O](projects-and-io.md)
+- [Monome and troubleshooting](hardware-and-troubleshooting.md)
+- [Native Instruments controller setup and controls](ni-controller.md)
+- [Development and builds](development.md)

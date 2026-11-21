@@ -4,11 +4,15 @@
 // - opens the BrowserWindow pointed at the local server
 // - on quit, closes the server and clears the monome LEDs
 
-const { app, BrowserWindow, dialog, screen, ipcMain, Menu } = require("electron");
+const { app, BrowserWindow, dialog, screen, ipcMain, Menu, powerSaveBlocker } = require("electron");
 const fs = require("node:fs/promises");
 const net = require("node:net");
 const path = require("node:path");
 const { pathToFileURL } = require("node:url");
+const { createNiSettings } = require("./ni-settings.cjs");
+
+// The renderer owns Web MIDI and the internal clock, even when its window is hidden.
+app.commandLine.appendSwitch("disable-renderer-backgrounding");
 
 let chosenPort = 3000;
 let httpServer = null;
@@ -18,6 +22,9 @@ let isQuitting = false;
 let allowQuit = false;
 let rendererDirty = false;
 let cleaningUp = false;
+const niSettings = createNiSettings(app);
+const niServerUrl = () => `ws://127.0.0.1:${chosenPort}`;
+let playbackBlocker = null;
 let pauseLedOutput = () => {};
 const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const BASE_WIDTH = 1080;
@@ -204,7 +211,16 @@ async function ensureServer() {
 
   chosenPort = await findFreePort(3000);
   process.env.PORT = String(chosenPort);
-  httpServer = await startServerFn(chosenPort);
+  httpServer = await startServerFn(chosenPort, { onTransportChange: keepPlaybackActive });
+}
+
+function keepPlaybackActive(running) {
+  if (running && playbackBlocker === null) {
+    playbackBlocker = powerSaveBlocker.start("prevent-app-suspension");
+  } else if (!running && playbackBlocker !== null) {
+    powerSaveBlocker.stop(playbackBlocker);
+    playbackBlocker = null;
+  }
 }
 
 function createWindow() {
@@ -312,6 +328,7 @@ function createWindow() {
 app.whenReady().then(async () => {
   await ensureServer();
   Menu.setApplicationMenu(buildAppMenu());
+  await niSettings.start(niServerUrl());
   createWindow();
 
   app.on("activate", () => {
@@ -340,6 +357,11 @@ ipcMain.on("dirty-changed", (_event, payload) => {
   rendererDirty = !!payload?.dirty;
 });
 
+ipcMain.handle("get-ni-bridge-setting", () => niSettings.status());
+ipcMain.handle("set-ni-bridge-setting", (_event, enabled) =>
+  cleaningUp ? niSettings.status() : niSettings.setEnabled(niServerUrl(), enabled)
+);
+
 ipcMain.handle("save-set", async (_event, payload) => {
   const data = payload?.data;
   if (!data || typeof data !== "object") {
@@ -357,6 +379,8 @@ ipcMain.handle("save-set", async (_event, payload) => {
 async function cleanupAndQuit() {
   if (cleaningUp) return;
   cleaningUp = true;
+  await niSettings.stop();
+  keepPlaybackActive(false);
   try {
     pauseLedOutput(true);
     serialRef?.clearAll?.();

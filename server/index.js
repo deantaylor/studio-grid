@@ -15,6 +15,7 @@ import {
   deriveTd3PatternFromState
 } from "./td3.js";
 import { SGridState } from "./state.js";
+import { niControlCommand, niSurfaceSnapshot } from "./ni-surface.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = path.join(__dirname, "..", "public");
@@ -69,6 +70,16 @@ const server = http.createServer(async (req, res) => {
 });
 
 const wss = new WebSocketServer({ server });
+const niSurfaces = new Map();
+const activeNiSurfaces = new Map();
+let niLauncherHolder = null;
+const localNiClients = new WeakSet();
+const niUiClients = new Map();
+const NI_EDIT_ACTIONS = new Set(["copy_bar", "copy_pattern", "paste", "clear_bar", "clear_pattern"]);
+function getNiUiClient() {
+  const available = [...niUiClients].filter(([client]) => client.readyState === client.OPEN);
+  return available.findLast(([, ui]) => ui.desktop) || available.at(-1) || [];
+}
 const serial = new SerialOSCBridge({ prefix: "sgrid" });
 const state = new SGridState();
 state.requestRender = () => renderAndPush();
@@ -86,6 +97,7 @@ let transport = {
   bpm: state.tempo,
   tick: 0
 };
+let onTransportChange;
 let eventListeners = new Set(); // track ws subscribed to musical events
 let lastBroadcastPage = state.currentPage;
 let followEnabled = false;
@@ -93,6 +105,7 @@ let autoFillBars = true;
 let gridConnected = false;
 let fullScaleMode = true;
 let showMonomeControls = true;
+const monomeControlsEnabled = () => showMonomeControls && activeNiSurfaces.size === 0;
 let clockOutEnabled = false;
 let clockOutDevice = ""; // MIDI clock out target (id/name hint)
 let lastGridDevices = serial.deviceList?.() || [];
@@ -105,6 +118,7 @@ const SMALL_DIFF_THRESHOLD = 8; // <=8 LEDs can use diff packets
 let frontFrame = new Array(GRID_SIZE).fill(0);
 let backFrame = frontFrame.slice();
 let dirtyFrame = false;
+let lastNoteViewPitches = null;
 let forceNextSend = false;
 let ledPaused = false;
 let slideAnimTimer = null;
@@ -138,10 +152,59 @@ function hasConnectedGrid(devices = null) {
 
 function updateFullScaleMode(devices = null) {
   const list = devices || lastGridDevices;
-  const next = hasConnectedGrid(list) ? !showMonomeControls : true;
+  const next = !hasConnectedGrid(list) || !monomeControlsEnabled();
   if (next === fullScaleMode) return false;
   fullScaleMode = next;
+  if (state.resetGridInput()) dispatchGridEvents([{ type: "pattern_control", enabled: false }]);
   return true;
+}
+
+function hasNiOwnership(ws, device) {
+  return activeNiSurfaces.get(ws)?.has(device) === true;
+}
+
+function updateNiOwnership(ws, device, active) {
+  const previouslyActive = activeNiSurfaces.size > 0;
+  let devices = activeNiSurfaces.get(ws);
+  if (active) {
+    if (!devices) activeNiSurfaces.set(ws, devices = new Set());
+    devices.add(device);
+  } else {
+    if (device === null) activeNiSurfaces.delete(ws);
+    else if (devices?.delete(device) && devices.size === 0) activeNiSurfaces.delete(ws);
+    if (niLauncherHolder?.ws === ws && (device === null || niLauncherHolder.device === device)) {
+      setNiPatternLauncherPressed(ws, niLauncherHolder.device, false);
+    }
+  }
+  if (previouslyActive === (activeNiSurfaces.size > 0)) return;
+  updateFullScaleMode();
+  broadcastGridStatus();
+  renderAndPush(true);
+}
+
+function setNiPatternLauncherPressed(ws, device, pressed) {
+  if (pressed) {
+    if (!hasNiOwnership(ws, device) || niLauncherHolder) return;
+    if (!state.patternControlLatch) niLauncherHolder = { ws, device };
+  } else {
+    if (niLauncherHolder?.ws !== ws || niLauncherHolder.device !== device) return;
+    niLauncherHolder = null;
+    if (!state.patternControlHeld) return;
+  }
+  handleClientMessage(ws, {
+    type: "grid_key", x: PATTERN_CONTROL_GRID_X, y: PATTERN_CONTROL_GRID_Y,
+    s: pressed ? 1 : 0, patternLauncher: true
+  });
+}
+
+function gridLayoutStatus() {
+  return {
+    fullScaleMode,
+    showMonomeControls: monomeControlsEnabled(),
+    monomeControlsPreference: showMonomeControls,
+    monomeRotation: serial.rotation,
+    niControllerActive: activeNiSurfaces.size > 0
+  };
 }
 
 function cropFrame(frame, cols, rows, sourceWidth = 16) {
@@ -218,7 +281,7 @@ function dispatchGridEvents(events) {
   events.forEach((ev) => {
     if (!ev) return;
     if (ev.type === "octave") {
-      broadcast({ type: "octave_overlay", page: state.currentPage, ...ev });
+      broadcast({ type: "octave_overlay", page: state.currentPage, ...ev, changed: true });
     } else if (ev.type === "micro") {
       broadcast({ type: "micro_overlay", page: state.currentPage, ...ev });
     } else if (ev.type === "accent") {
@@ -243,7 +306,7 @@ function dispatchGridEvents(events) {
         broadcast({ type: "octave_overlay", page: state.currentPage, clearAll: true });
         broadcast({ type: "pattern_control", enabled: true });
       } else {
-        broadcast({ type: "pattern_control", enabled: false, octaveOverlays: state.octaveOverlaySnapshot() });
+        broadcast({ type: "pattern_control", enabled: false, octaveOverlays: state.octaveOverlaySnapshot({ uiMode: fullScaleMode }) });
         broadcastPatternStatus(state.currentPage);
       }
     } else if (ev.type === "pattern_length") {
@@ -260,9 +323,17 @@ function dispatchGridEvents(events) {
   });
 }
 
-wss.on("connection", (ws) => {
+wss.on("connection", (ws, request) => {
+  if (["127.0.0.1", "::1", "::ffff:127.0.0.1"].includes(request.socket.remoteAddress)) {
+    localNiClients.add(ws);
+  }
   ws.send(JSON.stringify({ type: "hello", message: "sgrid web" }));
   broadcastState(ws);
+  ws.on("close", () => {
+    niSurfaces.delete(ws);
+    niUiClients.delete(ws);
+    updateNiOwnership(ws, null, false);
+  });
 
   ws.on("message", (msg) => {
     try {
@@ -284,23 +355,9 @@ serial.on("grid_key", (evt) => {
   const forcePatternControl = (!supportsLevels) || ((cols <= 8 && rows <= 8) && evt.deviceId !== primaryId);
   const isPrimary = !primaryId || evt.deviceId === primaryId;
   const isLarge = (cols > 8 || rows > 8);
-  const useUiMode = isPrimary && isLarge && !showMonomeControls;
+  const useUiMode = isPrimary && isLarge && !monomeControlsEnabled();
   const resp = state.handleGridKey(evt.x, evt.y, evt.s, { forcePatternControl, uiMode: useUiMode });
   const events = Array.isArray(resp) ? resp : (resp ? [resp] : []);
-  // When a held note is entered from the monome, show the octave arrows in the UI
-  if (state.isOctaveShiftingEnabled?.() && evt.s === 1) {
-    const info = state.getStepInfo(evt.x, evt.y, { uiMode: useUiMode });
-    if (info?.on && info.seqType !== "drum" && info.seqType !== "cc") {
-      events.push({
-        type: "octave",
-        x: evt.x,
-        y: evt.y,
-        octave: info.octave || 0,
-        delta: 0,
-        fromHold: true
-      });
-    }
-  }
   dispatchGridEvents(events);
   renderAndPush();
 });
@@ -356,7 +413,7 @@ function broadcastState(ws = null) {
     if (idx === 0 || !p) return null;
     return p.patterns.map((pat, pi) => (pi === 0 || !pat ? null : pat.time_scale || 1));
   });
-  const octaveOverlays = state.octaveOverlaySnapshot();
+  const octaveOverlays = state.octaveOverlaySnapshot({ uiMode: fullScaleMode });
   const barPlayheads = state.pages.map((p, idx) => {
     if (idx === 0 || !p) return null;
     const pat = p.patterns?.[p.active_pattern];
@@ -385,6 +442,7 @@ function broadcastState(ws = null) {
     setName: state.setName,
     transposes,
     noteViewOffsets,
+    noteViewPitches: state.noteViewPitches(),
     names,
     notes,
     colors,
@@ -412,8 +470,7 @@ function broadcastState(ws = null) {
     monoSlidePad: state.monoSlidePad,
     patternControlLatch: state.patternControlLatch,
     gridConnected,
-    fullScaleMode,
-    showMonomeControls,
+    ...gridLayoutStatus(),
     devices: lastGridDevices,
     isomorphicModes: state.isomorphicModes,
     isomorphicLayout: state.isomorphicLayout
@@ -434,14 +491,69 @@ function normalizeTd3OctaveApplyMode(raw) {
 function handleClientMessage(ws, data) {
   if (!data || typeof data !== "object") return;
   switch (data.type) {
+    case "subscribe_ni_surface":
+      if (!localNiClients.has(ws)) break;
+      niSurfaces.set(ws, null);
+      pushNiSurface();
+      break;
+    case "ni_ownership":
+      if (niSurfaces.has(ws) && typeof data.active === "boolean"
+        && (data.device === undefined || (typeof data.device === "string" && data.device.length <= 64))) {
+        updateNiOwnership(ws, data.device, data.active);
+      }
+      break;
+    case "ni_pattern_launcher":
+      if (typeof data.pressed === "boolean") setNiPatternLauncherPressed(ws, data.device, data.pressed);
+      break;
+    case "register_ni_ui":
+      if (localNiClients.has(ws)) niUiClients.set(ws, { desktop: data.desktop === true, midiOutputs: [] });
+      break;
+    case "ni_midi_outputs": {
+      const ui = niUiClients.get(ws);
+      if (!ui || !Array.isArray(data.outputs)) break;
+      ui.midiOutputs = data.outputs.slice(0, 128).filter((port) =>
+        typeof port?.id === "string" && port.id.length > 0 && port.id.length <= 256 && typeof port.name === "string"
+      ).map(({ id, name }) => ({ id, name: name.slice(0, 256) || id }));
+      break;
+    }
+    case "ni_edit": {
+      if (!niSurfaces.has(ws) || state.patternControlMode || !NI_EDIT_ACTIONS.has(data.action)) break;
+      if (data.device !== undefined && !hasNiOwnership(ws, data.device)) break;
+      const [renderer] = getNiUiClient();
+      if (renderer) renderer.send(JSON.stringify({ type: "ni_edit", action: data.action }));
+      else ws.send(JSON.stringify({ type: "ni_toast", text: "Open Studio Grid to edit" }));
+      break;
+    }
+    case "ni_note_edit": {
+      if (!hasNiOwnership(ws, data.device)) break;
+      const event = state.editHeldNote(data.action);
+      if (event) dispatchGridEvents([event]);
+      renderAndPush();
+      break;
+    }
+    case "ni_ui_toast":
+      if (!niUiClients.has(ws) || typeof data.text !== "string" || !data.text.trim()) break;
+      for (const client of niSurfaces.keys()) {
+        if (client.readyState === client.OPEN) client.send(JSON.stringify({ type: "ni_toast", text: data.text.slice(0, 160) }));
+      }
+      break;
+    case "ni_control": {
+      if (!niSurfaces.has(ws) || state.patternControlMode) break;
+      if ((Number.isInteger(data.slot) || Number.isInteger(data.pattern)) && state.getHeldNoteEdit()) break;
+      if ((data.device !== undefined || data.setupPage != null) && !hasNiOwnership(ws, data.device)) break;
+      if (data.setupPage != null && state.getHeldNoteEdit()) break;
+      const [, ui] = getNiUiClient();
+      const command = niControlCommand(state, data, clockSource, ui?.midiOutputs);
+      if (command) handleClientMessage(ws, command);
+      break;
+    }
     case "led_frame":
       serial.sendLEDFrame(data.frame);
       break;
     case "grid_key":
       {
-        const isPatternControlKey = data.x === PATTERN_CONTROL_GRID_X && data.y === PATTERN_CONTROL_GRID_Y;
-        const uiMode = isPatternControlKey ? false : fullScaleMode;
-        const resp = state.handleGridKey(data.x, data.y, data.s, { uiMode });
+        const patternLauncher = data.patternLauncher === true && data.x === PATTERN_CONTROL_GRID_X && data.y === PATTERN_CONTROL_GRID_Y;
+        const resp = state.handleGridKey(data.x, data.y, data.s, { uiMode: fullScaleMode, patternLauncher });
         const events = Array.isArray(resp) ? resp : (resp ? [resp] : []);
         dispatchGridEvents(events);
       }
@@ -530,7 +642,7 @@ function handleClientMessage(ws, data) {
       {
         const res = state.setStepOctave(data.x, data.y, data.delta, { uiMode: fullScaleMode });
         if (res) {
-          broadcast({ type: "octave_overlay", page: state.currentPage, x: data.x, y: data.y, octave: res.octave, delta: res.delta });
+          broadcast({ type: "octave_overlay", page: state.currentPage, x: data.x, y: data.y, octave: res.octave, delta: res.delta, changed: true });
           renderAndPush();
         }
       }
@@ -583,6 +695,7 @@ function handleClientMessage(ws, data) {
       }
       break;
     case "set_pattern_control_latch":
+      if (data.enabled && niLauncherHolder) setNiPatternLauncherPressed(niLauncherHolder.ws, niLauncherHolder.device, false);
       state.patternControlLatch = !!data.enabled;
       broadcast({ type: "pattern_control_latch", enabled: state.patternControlLatch });
       renderAndPush();
@@ -594,6 +707,9 @@ function handleClientMessage(ws, data) {
         broadcastGridStatus(gridConnected, lastGridDevices);
         renderAndPush(true);
       }
+      break;
+    case "set_monome_rotation":
+      if (serial.setRotation(data.degrees)) broadcastGridStatus();
       break;
     case "tempo":
       state.setTempo(data.bpm);
@@ -620,9 +736,13 @@ function handleClientMessage(ws, data) {
       broadcast({ type: "transpose", page: data.page, transpose: state.pages[data.page]?.transpose || 0 });
       break;
     case "shift_note_view":
+    case "set_note_view_offset":
       {
         const page = Number.isFinite(data.page) ? data.page : state.currentPage;
-        const offset = state.shiftNoteView(page, data.delta);
+        const offset = data.type === "shift_note_view"
+          ? state.shiftNoteView(page, data.delta)
+          : (Number.isFinite(data.offset) && state.setNoteViewOffset(page, data.offset)
+            ? state.getNoteViewOffset(page) : null);
         if (offset != null) {
           broadcast({ type: "note_view_offset", page, offset });
           broadcast({ type: "octave_overlay", page, clearAll: true });
@@ -770,6 +890,7 @@ function handleClientMessage(ws, data) {
       if (page >= 1 && page <= 8 && (seq === "mono" || seq === "poly" || seq === "drum" || seq === "cc" || seq === "mdtonal")) {
         state.setSequencerType(page, seq);
         broadcast({ type: "seq_type", page, seqType: seq });
+        renderAndPush();
       }
       break;
     }
@@ -1069,13 +1190,13 @@ function broadcast(obj) {
 }
 
 function broadcastGridStatus(connected = gridConnected, devices = lastGridDevices) {
-  broadcast({ type: "grid_status", connected, devices: devices || [], fullScaleMode, showMonomeControls });
+  broadcast({ type: "grid_status", connected, devices: devices || [], ...gridLayoutStatus() });
 }
 
 function maybeBroadcastPage() {
   if (state.currentPage !== lastBroadcastPage) {
     lastBroadcastPage = state.currentPage;
-    broadcast({ type: "page_change", page: state.currentPage, octaveOverlays: state.octaveOverlaySnapshot() });
+    broadcast({ type: "page_change", page: state.currentPage, octaveOverlays: state.octaveOverlaySnapshot({ uiMode: fullScaleMode }) });
   }
 }
 
@@ -1091,7 +1212,7 @@ function renderAndPush(force = false) {
   if (ledPaused) return;
   manageLedAnimation();
   maybeBroadcastPage();
-  const ignorePatternControl = !showMonomeControls && !state.patternControlMode;
+  const ignorePatternControl = !monomeControlsEnabled() && !state.patternControlMode;
   const frame = fullScaleMode
     ? state.renderUIFrame(Date.now(), { ignorePatternControl })
     : state.renderLED(Date.now(), { ignorePatternControl, includeMicroHint: false });
@@ -1155,7 +1276,7 @@ function broadcastEvents(events) {
 
 function processTick({ tick, externalStepMs = null }) {
   const { midiEvents, patternSwitches, barChanges, barPlayheadChanges } = state.tick(followEnabled, externalStepMs, tick);
-  const ignorePatternControl = !showMonomeControls && !state.patternControlMode;
+  const ignorePatternControl = !monomeControlsEnabled() && !state.patternControlMode;
   const frame = fullScaleMode
     ? state.renderUIFrame(Date.now(), { ignorePatternControl })
     : state.renderLED(Date.now(), { ignorePatternControl, includeMicroHint: false });
@@ -1173,8 +1294,14 @@ function processTick({ tick, externalStepMs = null }) {
   broadcastEvents(buildMusicalEvents({ tick: tickInt, midiEvents }));
 }
 
+function setTransportRunning(running) {
+  if (transport.running === running) return;
+  transport.running = running;
+  onTransportChange?.(running);
+}
+
 function startTick({ tick = 0 } = {}) {
-  transport.running = true;
+  setTransportRunning(true);
   transport.tick = Math.max(0, Math.floor(tick || 0));
   lastExternalTickIntervalMs = null;
   lastReceivedTick = null;
@@ -1212,7 +1339,7 @@ function syncStateToTransport() {
 }
 
 function stopTick() {
-  transport.running = false;
+  setTransportRunning(false);
   transport.tick = 0;
   lastExternalTickIntervalMs = null;
   lastReceivedTick = null;
@@ -1223,7 +1350,7 @@ function stopTick() {
 }
 
 function continueTick({ tick = null } = {}) {
-  transport.running = true;
+  setTransportRunning(true);
   if (Number.isFinite(tick)) {
     transport.tick = Math.max(0, Math.floor(tick));
     state.syncPlayheads(Math.floor(transport.tick / TICKS_PER_STEP_EXT));
@@ -1263,7 +1390,7 @@ function broadcastPatternStatus(page) {
     page,
     active: p.active_pattern,
     pending: p.pending_pattern || null,
-    octaveOverlays: state.octaveOverlaySnapshot()
+    octaveOverlays: state.octaveOverlaySnapshot({ uiMode: fullScaleMode })
   });
 }
 
@@ -1291,7 +1418,7 @@ function broadcastBarView(page, pattern, bar) {
     page,
     pattern,
     bar: barVal,
-    octaveOverlays: state.octaveOverlaySnapshot()
+    octaveOverlays: state.octaveOverlaySnapshot({ uiMode: fullScaleMode })
   });
 }
 
@@ -1310,7 +1437,7 @@ function manageLedAnimation(forceStop = false) {
         manageLedAnimation(true);
         return;
       }
-      const ignorePatternControl = !showMonomeControls && !state.patternControlMode;
+      const ignorePatternControl = !monomeControlsEnabled() && !state.patternControlMode;
       const frame = fullScaleMode
         ? state.renderUIFrame(Date.now(), { ignorePatternControl })
         : state.renderLED(Date.now());
@@ -1340,15 +1467,33 @@ function enqueueLedFrame(frame, force = false) {
   dirtyFrame = true;
 }
 
-function broadcastLedUIFrame() {
-  const uiFrame = fullScaleMode
+function getLedUIFrame() {
+  return fullScaleMode
     ? state.renderUIFrame(Date.now(), { includeOctaveHint: false, includeMicroHint: false, ignorePatternHoldDim: true })
     : state.renderLED(Date.now(), { includeOctaveHint: false, includeMicroHint: false, ignorePatternHoldDim: true });
+}
+
+function pushNiSurface() {
+  if (!niSurfaces.size) return;
+  const frame = state.patternControlMode ? state.renderPatternControlLED() : getLedUIFrame();
+  const [, ui] = getNiUiClient();
+  const payload = JSON.stringify({ type: "ni_surface", ...niSurfaceSnapshot(state, frame, clockSource, {
+    uiMode: fullScaleMode, midiOutputs: ui?.midiOutputs
+  }) });
+  for (const [ws, previous] of niSurfaces) {
+    if (previous === payload || ws.readyState !== ws.OPEN || ws.bufferedAmount > 16384) continue;
+    ws.send(payload);
+    niSurfaces.set(ws, payload);
+  }
+}
+
+function broadcastLedUIFrame() {
   const inPatternControl = state.patternControlMode || state.patternControlHeld || state.patternHeld;
   broadcast({
     type: "led_frame",
-    frame: uiFrame,
-    octaveOverlays: inPatternControl ? Array.from({ length: 9 }, () => []) : state.octaveOverlaySnapshot(),
+    frame: getLedUIFrame(),
+    octaveAnchors: inPatternControl ? [] : state.octaveAnchorCells({ uiMode: fullScaleMode }),
+    octaveOverlays: inPatternControl ? Array.from({ length: 9 }, () => []) : state.octaveOverlaySnapshot({ uiMode: fullScaleMode }),
     deviceHasData: state.pages.map((p, idx) => (idx === 0 ? null : state.deviceHasData(idx))),
     deviceStopped: state.pages.map((p, idx) => (idx === 0 ? null : !!p?.sequencerStopped))
   });
@@ -1356,6 +1501,13 @@ function broadcastLedUIFrame() {
 
 function frameTick() {
   if (ledPaused || !dirtyFrame || !backFrame) return;
+  const page = state.currentPage;
+  const pitches = state.noteViewPitches(page);
+  const pitchKey = `${page}:${pitches.join(",")}`;
+  if (pitchKey !== lastNoteViewPitches) {
+    lastNoteViewPitches = pitchKey;
+    broadcast({ type: "note_view_pitches", page, pitches });
+  }
   if (framesEqual(backFrame, frontFrame) && !forceNextSend) {
     dirtyFrame = false;
     return;
@@ -1389,6 +1541,7 @@ function frameTick() {
 }
 
 setInterval(frameTick, FRAME_INTERVAL_MS);
+setInterval(pushNiSurface, 33).unref();
 
 function pauseLEDOutput(flag = true) {
   ledPaused = !!flag;
@@ -1420,7 +1573,8 @@ function midiInputsList() {
   return [];
 }
 
-export function startServer(port = PORT) {
+export function startServer(port = PORT, options = {}) {
+  onTransportChange = options.onTransportChange;
   return new Promise((resolve) => {
     server.listen(port, () => {
       console.log(`sgrid web listening on http://localhost:${port}`);

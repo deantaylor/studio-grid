@@ -9,19 +9,13 @@
 - Export/import supports `.studiogrid`, `.sgridset`, and TD-3 `.seq`.
 
 ## Prerequisites
-- Node.js 18+ (for development)
 - `serialosc` running locally if using monome hardware
 - WebMIDI-capable browser (Chrome/Chromium) or Electron app
 - OS-visible MIDI destinations
 
-## Start Commands
-- Dev server: `npm start` (http://localhost:3000)
-- Electron app: `npm run electron`
-- Lint/syntax checks: `npm run lint`
-- Tests: `npm test`
-- Manual probes: `npm run test:manual`
-- Full local gate: `npm run check`
-- Build installers: `npm run dist`
+## Starting Studio Grid
+
+Open the desktop app or run the browser version from the source checkout. See [Development and builds](development.md) for commands and dependencies.
 
 ## Interface Tour
 - Top bar: transport, set actions, settings

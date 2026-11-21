@@ -1,0 +1,81 @@
+--- a/src/webview_macos.rs
++++ b/src/webview_macos.rs
+@@ -12,2 +12,4 @@
+ use crate::bridge;
++
++pub type WindowTarget = tao::event_loop::EventLoopWindowTarget<()>;
+ 
+@@ -62,2 +64,8 @@
+     pub fn new(width: u32, height: u32, html: &str, visible: bool) -> Result<Self, String> {
++        with_event_loop(|event_loop| Self::new_on_target(event_loop, width, height, html, visible))
++    }
++
++    pub fn new_on_target(
++        target: &WindowTarget, width: u32, height: u32, html: &str, visible: bool,
++    ) -> Result<Self, String> {
+         let frame_ready = Arc::new(Mutex::new(false));
+@@ -74,13 +82,10 @@
+ 
+-        // Tao supports creating windows before run(). Do not enter/exit NSApplication
+-        // to construct each view: Exit is sticky on macOS, making later run_return
+-        // calls unreliable and leaving the caller trapped in AppKit's event wait.
+-        let window = with_event_loop(|event_loop| {
+-            WindowBuilder::new()
+-                .with_visible(visible)
+-                .with_inner_size(tao::dpi::LogicalSize::new(width as f64,height as f64))
+-                .with_decorations(visible).with_resizable(false)
+-                .with_title(if visible {"encdr-view"} else {""})
+-                .build(&*event_loop).map_err(|e|format!("Failed to create window: {e}"))
+-        })?;
++        let window = WindowBuilder::new()
++            .with_visible(visible)
++            .with_inner_size(tao::dpi::LogicalSize::new(width as f64, height as f64))
++            .with_decorations(visible)
++            .with_resizable(false)
++            .with_title(if visible { "encdr-view" } else { "" })
++            .build(target)
++            .map_err(|e| format!("Failed to create window: {e}"))?;
+         let fr = frame_ready_ipc.clone();
+@@ -200,5 +205,10 @@
+ pub fn run_event_loop(mut tick: impl FnMut()->bool) {
++    run_event_loop_with_target(|_| tick());
++}
++
++/// Provide Tao's window target so hotplugged devices can create WebViews.
++pub fn run_event_loop_with_target(mut tick: impl FnMut(&WindowTarget) -> bool) {
+     CLOSE_REQUESTED.with(|closed|closed.set(false));
+     with_event_loop(|event_loop| {
+-        event_loop.run_return(|event,_,control_flow| {
++        event_loop.run_return(|event,target,control_flow| {
+             match event {
+@@ -209,3 +219,3 @@
+                 Event::MainEventsCleared => {
+-                    if objc2::rc::autoreleasepool(|_|tick()){*control_flow=ControlFlow::WaitUntil(std::time::Instant::now()+std::time::Duration::from_millis(2));}
++                    if objc2::rc::autoreleasepool(|_|tick(target)){*control_flow=ControlFlow::WaitUntil(std::time::Instant::now()+std::time::Duration::from_millis(2));}
+                     else{*control_flow=ControlFlow::Exit;}
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -106,2 +106,23 @@
+     }
++    /// Create a screen from the active AppKit event loop after hotplug.
++    #[cfg(target_os = "macos")]
++    pub fn new_on_target(
++        target: &webview_macos::WindowTarget,
++        device_id: DeviceId,
++        screen_name: &str,
++        (width, height): (u32, u32),
++        content: ScreenContent,
++        visible: bool,
++    ) -> Result<Self, String> {
++        let inner = webview_macos::ManagedWebView::new_on_target(
++            target, width, height, &content.to_html()?, visible,
++        )?;
++        Ok(Self {
++            inner,
++            capture: std::cell::RefCell::new(capture_macos::AsyncCapture::default()),
++            device_id,
++            screen_name: screen_name.to_string(),
++        })
++    }
++
+     fn with_size(device_id:DeviceId,screen_name:&str,(width,height):(u32,u32),content:ScreenContent,visible:bool)->Result<Self,String>{

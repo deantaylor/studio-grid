@@ -3,7 +3,9 @@
 ## Hardware Grid
 - Monome discovery is handled through `serialosc`.
 - Hardware key presses mirror UI interactions.
+- Use **Settings → General → Rotate Monome 180°** to flip the grid's keys and LEDs. Use **Save Config** to keep the orientation across app launches.
 - Pattern-control latch behavior is configurable in settings.
+- To scroll the note rows on a 16-column Monome, enable **Show monome controls**. Hold the second key from the right on the bottom row. Press the rightmost key to scroll up or the third key from the right to scroll down.
 - LED clear is triggered on app quit and can be invoked via API paths.
 
 ## Appearance and Usability

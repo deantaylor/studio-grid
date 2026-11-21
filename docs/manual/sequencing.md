@@ -3,7 +3,10 @@
 ## Editing the Grid
 - Toggle a step by clicking or pressing a cell.
 - Remove an active step by pressing it again.
-- Hold or hover an active step for octave controls (mono/poly/mdtonal).
+- Hover over an active step and click ↑ or ↓ to shift its octave (Mono, Poly, and MDTonal).
+- The original cell stays dim after a shift. Hold it to adjust the same note again. The Monome control row is hidden while the dim key is in note edit.
+- On a Monome with the control row enabled, hold a note and press a lit octave button on the opposite edge of the grid. With the control row hidden, hold the note and press the cell immediately above or below it.
+- Use ↑ and ↓ on the keyboard to scroll to notes that move outside the visible grid.
 - Right-click active steps for accent/slide options where supported.
 - Hold an active note and press the step to the right to set slide.
 

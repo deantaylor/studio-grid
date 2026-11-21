@@ -206,6 +206,12 @@
             </div>
             <div class="scale-notes hidden" id="scale-notes" aria-hidden="true"></div>
             <canvas id="grid" width="640" height="320"></canvas>
+            <div id="note-scrollbar" class="note-scrollbar hidden" role="scrollbar" tabindex="0"
+              aria-label="Note rows" aria-controls="grid" aria-orientation="vertical"
+              aria-valuemin="-14" aria-valuemax="14" aria-valuenow="0">
+              <span class="note-scrollbar-stripes" id="note-scrollbar-stripes" aria-hidden="true"></span>
+              <span class="note-scrollbar-thumb" id="note-scrollbar-thumb" aria-hidden="true"></span>
+            </div>
             <div id="selection-rect" class="selection-rect hidden" aria-hidden="true"></div>
             <div id="toast" class="toast hidden"></div>
           </div>
@@ -310,6 +316,15 @@
                   <input type="checkbox" id="show-monome-controls" checked />
                   <span class="label-text">Show monome controls</span>
                 </label>
+                <label class="switch-option">
+                  <input type="checkbox" id="rotate-monome" />
+                  <span class="label-text">Rotate Monome 180°</span>
+                </label>
+                <label class="switch-option hidden" id="ni-bridge-setting">
+                  <input type="checkbox" id="ni-bridge-enabled" aria-describedby="ni-bridge-error" />
+                  <span class="label-text">Native Instruments bridge</span>
+                </label>
+                <p id="ni-bridge-error" class="settings-error hidden" role="status"></p>
                 <label><span class="label-text">Gate length</span>
                   <div class="select-wrap">
                     <select id="gate-length">
