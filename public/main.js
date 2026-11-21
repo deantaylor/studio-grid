@@ -168,6 +168,7 @@ let playheads = Array(9).fill(0);
 let deviceHeld = false;
 let draggedDevicePage = null;
 let deviceHasData = Array(9).fill(null);
+let trackActivity = 0;
 let deviceStopped = Array(9).fill(null);
 let midiSettings = Array.from({ length: 9 }, () => ({ outId: "", channel: 1 }));
 let lastTabsRenderKey = "";
@@ -1422,6 +1423,7 @@ function connectWS() {
   };
   ws.onclose = () => {
     if (wsStatus) wsStatus.textContent = "WS: closed";
+    applyTrackActivity(0);
     log("WS closed; retrying");
     setTimeout(connectWS, 2000);
   };
@@ -1462,6 +1464,8 @@ function connectWS() {
       log(text);
       showToast(text);
       pendingTd3SysexExport = null;
+    } else if (msg.type === "track_activity") {
+      applyTrackActivity(msg.mask);
     } else if (msg.type === "led_frame") {
       const incoming = msg.frame;
       let targetPage = serverCurrentPage;
@@ -1537,6 +1541,7 @@ function connectWS() {
       if (msg.pendingPatterns) pendingPatterns = msg.pendingPatterns;
       if (msg.patternLengths) patternLengths = msg.patternLengths;
       if (msg.patternTimeScales) patternTimeScales = msg.patternTimeScales;
+      applyTrackActivity(msg.trackActivity);
       if (msg.barViews) barViews = msg.barViews;
       if (msg.barPlayheads) barPlayheads = msg.barPlayheads;
       if (Array.isArray(msg.isomorphicModes)) {
@@ -4481,6 +4486,14 @@ function buildTabsRenderKey() {
   return `${order.join(",")}|${activePage}|${activeColor || ""}|${nameKey}|${patternKey}|${configKey}`;
 }
 
+function applyTrackActivity(mask) {
+  if (!Number.isInteger(mask) || mask === trackActivity) return;
+  trackActivity = mask;
+  tabs.querySelectorAll("button[data-page]").forEach((button) => {
+    button.classList.toggle("gate-flash", !!(mask & (1 << (Number(button.dataset.page) - 1))));
+  });
+}
+
 function renderTabs({ force = false } = {}) {
   const nextKey = buildTabsRenderKey();
   if (!force && nextKey === lastTabsRenderKey) return;
@@ -4492,6 +4505,7 @@ function renderTabs({ force = false } = {}) {
     const label = deviceNames[page] && deviceNames[page].trim().length ? deviceNames[page] : `${page}`;
     btn.textContent = label;
     btn.dataset.page = page;
+    btn.classList.toggle("gate-flash", !!(trackActivity & (1 << (page - 1))));
     const isActive = activeUiPage === page;
     const activeBg = getDeviceDisplayColor(page);
     const patIdx = activePatterns[page] || 1;

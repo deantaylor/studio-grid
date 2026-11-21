@@ -44,6 +44,30 @@ test("NI patterns mirror the Monome selector levels including queued pulses and 
   }
 });
 
+test("track activity pulses for 10 ms at the start of scheduled and live notes", (t) => {
+  let now = 1000;
+  t.mock.method(Date, "now", () => now);
+  const state = new SGridState();
+  state.pushMidiNote([], { page: 3, pitch: 48, delayMs: 20, durMs: 250 });
+  state.setLiveNote(2, 60, true);
+
+  assert.deepEqual(state.trackActivity(), { mask: 0b10, nextAt: 1010 });
+  now += 10;
+  assert.deepEqual(state.trackActivity(), { mask: 0, nextAt: 1020 });
+  now += 10;
+  assert.deepEqual(state.trackActivity(), { mask: 0b100, nextAt: 1030 });
+  assert.equal(state.isDeviceGateActive(3), false);
+  state.gateLedBoost = true;
+  assert.equal(state.isDeviceGateActive(3), true);
+  assert.equal(state.isDeviceGateActive(2), false);
+  now += 9;
+  assert.equal(state.trackActivity().mask, 0b100);
+  now += 1;
+  assert.deepEqual(state.trackActivity(), { mask: 0, nextAt: Infinity });
+  assert.equal(state.isDeviceGateActive(3), true);
+  assert.equal(niSurfaceSnapshot(state, [], "internal").slots.some((slot) => "gateFlash" in slot), false);
+});
+
 test("NI dial directions shift notes in the current bar without scrolling", () => {
   const state = new SGridState();
   state.setPage(3);

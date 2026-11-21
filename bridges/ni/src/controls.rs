@@ -245,6 +245,7 @@ impl Controls {
         index: usize,
         color: Option<&str>,
         state: &Value,
+        track_activity: u8,
     ) -> LedValue {
         let Some(color) = color else {
             return LedValue::Off;
@@ -270,8 +271,18 @@ impl Controls {
                 (false, false, _) => LedValue::Dim,
             };
         }
+        let page = state["slots"][index]["page"].as_u64();
+        let gate_flash = !bright
+            && !self.clear_held(profile)
+            && page
+                .filter(|page| (1..=8).contains(page))
+                .is_some_and(|page| track_activity & (1 << (page - 1)) != 0);
         if profile.product != 0x1610 {
-            return profile.lamp(name, bright);
+            return if gate_flash {
+                LedValue::single_percent(37)
+            } else {
+                profile.lamp(name, bright)
+            };
         }
         let value = color
             .strip_prefix('#')
@@ -288,15 +299,13 @@ impl Controls {
         } else {
             LedValue::to_ni_palette_byte(r - floor, g - floor, b - floor) & !3
         };
-        LedValue::Single(
-            hue | if bright {
-                3
-            } else if neutral {
-                0
-            } else {
-                1
-            },
-        )
+        let idle_level = u8::from(!neutral);
+        let level = if bright {
+            3
+        } else {
+            idle_level + u8::from(gate_flash)
+        };
+        LedValue::Single(hue | level)
     }
 
     pub fn button(&mut self, profile: Profile, name: &'static str, pressed: bool) -> Option<Value> {
@@ -564,7 +573,7 @@ mod tests {
             "patterns": [{ "level": 12 }, { "level": 6 }, { "level": 4 }, { "level": 0 }] });
         let track_colors = controls.display_button_colors(profile, &state);
         assert_eq!(&track_colors[..2], &[Some("#ff786e"), Some("#393939")]);
-        let track = controls.display_lamp(profile, 0, track_colors[0], &state);
+        let track = controls.display_lamp(profile, 0, track_colors[0], &state, 0);
         assert_eq!(track, LedValue::Single(5));
         controls.button(profile, "pattern", true);
         let patterns = controls.display_button_colors(profile, &state);
@@ -573,7 +582,8 @@ mod tests {
                 profile,
                 index,
                 patterns[index],
-                &state
+                &state,
+                0
             )),
             [
                 LedValue::Single(71),
@@ -584,12 +594,47 @@ mod tests {
         );
         controls.button(profile, "top_3", true);
         assert_eq!(
-            controls.display_lamp(profile, 2, patterns[2], &state),
+            controls.display_lamp(profile, 2, patterns[2], &state, 0),
             LedValue::Single(71)
         );
         let maschine = Profile::for_name("maschine-mk3").unwrap();
         assert_eq!(
-            controls.display_lamp(maschine, 1, patterns[1], &state),
+            controls.display_lamp(maschine, 1, patterns[1], &state, 0),
+            LedValue::Dim
+        );
+    }
+
+    #[test]
+    fn track_gate_flashes_are_dim_and_scoped_to_track_buttons() {
+        let profile = Profile::for_name("s49").unwrap();
+        let maschine = Profile::for_name("maschine-mk3").unwrap();
+        let state = json!({
+            "page": 1,
+            "slots": [
+                { "page": 1, "color": "#ff786e" },
+                { "page": 2 }
+            ],
+            "patterns": [{}, { "level": 4 }]
+        });
+        let mut controls = Controls::default();
+        let color = Some(DEFAULT_BUTTON_COLOR);
+        assert_eq!(
+            controls.display_lamp(profile, 1, color, &state, 0b10),
+            LedValue::Single(69)
+        );
+        assert_eq!(
+            controls.display_lamp(maschine, 1, color, &state, 0b10),
+            LedValue::single_percent(37)
+        );
+        controls.button(profile, "top_2", true);
+        assert_eq!(
+            controls.display_lamp(profile, 1, color, &state, 0b10),
+            LedValue::Single(71)
+        );
+        controls.button(profile, "top_2", false);
+        controls.button(profile, "pattern", true);
+        assert_eq!(
+            controls.display_lamp(maschine, 1, color, &state, 0b10),
             LedValue::Dim
         );
     }
