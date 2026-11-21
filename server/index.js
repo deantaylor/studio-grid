@@ -72,6 +72,9 @@ const server = http.createServer(async (req, res) => {
 const wss = new WebSocketServer({ server });
 const niSurfaces = new Map();
 const activeNiSurfaces = new Map();
+let lastTrackActivityMask = 0;
+let trackActivityTimer;
+let trackActivityQueued = false;
 let niLauncherHolder = null;
 const localNiClients = new WeakSet();
 const niUiClients = new Map();
@@ -83,6 +86,14 @@ function getNiUiClient() {
 const serial = new SerialOSCBridge({ prefix: "sgrid" });
 const state = new SGridState();
 state.requestRender = () => renderAndPush();
+state.requestTrackActivity = () => {
+  if (trackActivityQueued) return;
+  trackActivityQueued = true;
+  queueMicrotask(() => {
+    trackActivityQueued = false;
+    pushTrackActivity();
+  });
+};
 const PPQN_EXT = 24;
 const PPQN_INT = 96;
 const INT_MULT = PPQN_INT / PPQN_EXT;
@@ -463,6 +474,7 @@ function broadcastState(ws = null) {
     barPlayheads,
     deviceHasData,
     deviceStopped,
+    trackActivity: lastTrackActivityMask,
     mdTracks,
     octaveOverlays,
     follow: followEnabled,
@@ -495,6 +507,7 @@ function handleClientMessage(ws, data) {
       if (!localNiClients.has(ws)) break;
       niSurfaces.set(ws, null);
       pushNiSurface();
+      ws.send(JSON.stringify({ type: "track_activity", mask: lastTrackActivityMask }));
       break;
     case "ni_ownership":
       if (niSurfaces.has(ws) && typeof data.active === "boolean"
@@ -1499,8 +1512,23 @@ function broadcastLedUIFrame() {
   });
 }
 
+function pushTrackActivity() {
+  clearTimeout(trackActivityTimer);
+  const now = Date.now();
+  const { mask, nextAt } = state.trackActivity(now);
+  if (lastTrackActivityMask !== mask) {
+    lastTrackActivityMask = mask;
+    broadcast({ type: "track_activity", mask });
+  }
+  if (Number.isFinite(nextAt)) {
+    trackActivityTimer = setTimeout(pushTrackActivity, Math.ceil(nextAt - now));
+    trackActivityTimer.unref();
+  }
+}
+
 function frameTick() {
-  if (ledPaused || !dirtyFrame || !backFrame) return;
+  if (ledPaused) return;
+  if (!dirtyFrame || !backFrame) return;
   const page = state.currentPage;
   const pitches = state.noteViewPitches(page);
   const pitchKey = `${page}:${pitches.join(",")}`;

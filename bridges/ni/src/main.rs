@@ -160,6 +160,31 @@ impl Surface {
         self.controls.update_note_edit(&state["noteEdit"]);
     }
 
+    fn update_lamps(
+        &mut self,
+        encdr: &Encdr,
+        id: DeviceId,
+        profile: Profile,
+        state: &Value,
+        track_activity: u8,
+    ) {
+        let controls = &self.controls;
+        let colors = controls.display_button_colors(profile, state);
+        for name in profile.lamp_buttons() {
+            let value =
+                if let Some(index) = DISPLAY_BUTTONS.iter().position(|button| *button == name) {
+                    controls.display_lamp(profile, index, colors[index], state, track_activity)
+                } else if profile.launcher == Some(name) && controls.launcher_active {
+                    profile.lamp(name, true)
+                } else {
+                    controls.lamp(profile, name)
+                };
+            if self.lamps.insert(name, value) != Some(value) {
+                encdr.set_led(id, name, value);
+            }
+        }
+    }
+
     fn render(
         &mut self,
         encdr: &Encdr,
@@ -167,6 +192,7 @@ impl Surface {
         state: &Value,
         active_page: u64,
         active_slot: Option<usize>,
+        track_activity: u8,
     ) {
         let Some(displays) = &self.displays else {
             return;
@@ -181,34 +207,22 @@ impl Surface {
             }
             if self.dirty && !state.is_null() {
                 let controls = &self.controls;
-                let colors = controls.display_button_colors(profile, state);
                 let mut view = state.clone();
                 view["selector"] = json!(controls.mode(profile));
                 view["trackSetup"] = json!(controls.track_setup_page().is_some());
-                view["buttonColors"] = json!(colors);
+                view["buttonColors"] = json!(controls.display_button_colors(profile, state));
                 view["clearHeld"] = json!(controls.clear_held(profile));
                 view["clearConfirm"] = json!(controls.clear_confirm);
                 displays.send(view);
-                for name in profile.lamp_buttons() {
-                    let value = if let Some(index) =
-                        DISPLAY_BUTTONS.iter().position(|button| *button == name)
-                    {
-                        controls.display_lamp(profile, index, colors[index], state)
-                    } else if profile.launcher == Some(name) && controls.launcher_active {
-                        profile.lamp(name, true)
-                    } else {
-                        controls.lamp(profile, name)
-                    };
-                    if self.lamps.insert(name, value) != Some(value) {
-                        encdr.set_led(id, name, value);
-                    }
-                }
+                self.update_lamps(encdr, id, profile, state, track_activity);
             }
         } else if self.dirty && !state.is_null() {
             send_track_view(displays, state);
         }
         self.dirty = false;
-        displays.poll(encdr);
+        if let Some(displays) = &self.displays {
+            displays.poll(encdr);
+        }
     }
 }
 
@@ -262,6 +276,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let events = encdr.events().clone();
     let mut surfaces = HashMap::<DeviceId, Surface>::new();
     let mut state = Value::Null;
+    let mut track_activity = 0;
     let mut active_page = 0;
     let mut active_slot = None;
     eprintln!("Waiting for compatible NI controllers ({controller})");
@@ -327,6 +342,25 @@ fn main() -> Result<(), Box<dyn Error>> {
         loop {
             match updates.try_recv() {
                 Ok(payload) => {
+                    if payload["type"] == "track_activity" {
+                        track_activity = payload["mask"].as_u64().unwrap_or(0) as u8;
+                        if !state.is_null() {
+                            for (&id, surface) in
+                                surfaces.iter_mut().filter(|(_, surface)| surface.owned)
+                            {
+                                if let Some(profile) = Profile::for_product(id.product_id()) {
+                                    surface.update_lamps(
+                                        &encdr,
+                                        id,
+                                        profile,
+                                        &state,
+                                        track_activity,
+                                    );
+                                }
+                            }
+                        }
+                        continue;
+                    }
                     state_changed |= payload != state;
                     for surface in surfaces.values_mut().filter(|surface| surface.owned) {
                         surface.update(&state, &payload);
@@ -347,7 +381,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             }
         }
         for (&id, surface) in surfaces.iter_mut().filter(|(_, surface)| surface.owned) {
-            surface.render(&encdr, id, &state, active_page, active_slot);
+            surface.render(&encdr, id, &state, active_page, active_slot, track_activity);
         }
         if visible && !surfaces.values().any(|surface| surface.displays.is_some()) {
             if preview.is_none() {

@@ -1,5 +1,6 @@
 // Base pitch for degree 0, octave 0 (C3). Raised one octave.
 const BASE_PITCH = 48;
+const TRACK_ACTIVITY_FLASH_MS = 10;
 const DEFAULT_CC = 1;
 const PPQN_EXT = 24;
 const PPQN_INT = 96;
@@ -199,22 +200,25 @@ export class SGridState {
     this.setName = clean || "default";
   }
 
-  registerDeviceGate(page, delayMs, durMs) {
+  registerDeviceGate(page, delayMs, { live = false } = {}) {
     const pageIdx = Math.round(Number(page) || 0);
     if (pageIdx < 1 || pageIdx > 8) return;
     const now = Date.now();
     const startMs = now + Math.max(0, Number(delayMs) || 0);
     const flashMs = Math.max(10, Math.round(Number(this.gateLedFlashMs) || 80));
-    const endMs = startMs + flashMs;
+    const trackEndMs = startMs + TRACK_ACTIVITY_FLASH_MS;
+    const gateEndMs = live ? startMs : startMs + flashMs;
+    const endMs = Math.max(trackEndMs, gateEndMs);
     if (!Number.isFinite(endMs) || endMs <= now) return;
     if (!Array.isArray(this.deviceGateWindows[pageIdx])) {
       this.deviceGateWindows[pageIdx] = [];
     }
-    this.deviceGateWindows[pageIdx].push({ startMs, endMs });
+    this.deviceGateWindows[pageIdx].push({ startMs, endMs, trackEndMs, gateEndMs });
     this.pruneDeviceGateWindows(pageIdx, now);
-    if (typeof this.requestRender === "function") {
+    this.requestTrackActivity?.();
+    if (!live && typeof this.requestRender === "function") {
       const startDelay = Math.max(0, startMs - now);
-      const endDelay = Math.max(0, endMs - now);
+      const endDelay = Math.max(0, gateEndMs - now);
       setTimeout(() => this.requestRender?.(), startDelay);
       setTimeout(() => this.requestRender?.(), endDelay);
     }
@@ -269,6 +273,7 @@ export class SGridState {
     const safePitch = clamp(Math.round(pitch ?? 0), 0, 127);
     if (!Number.isFinite(safePitch)) return;
     if (on) {
+      if (!this.liveNoteHolds[pageIdx].has(safePitch)) this.registerDeviceGate(pageIdx, 0, { live: true });
       this.liveNoteHolds[pageIdx].add(safePitch);
     } else {
       this.liveNoteHolds[pageIdx].delete(safePitch);
@@ -284,26 +289,31 @@ export class SGridState {
 
   isDeviceGateActive(pageIdx, now = Date.now()) {
     if (!this.gateLedBoost) return false;
-    const windows = this.deviceGateWindows[pageIdx];
-    if (!Array.isArray(windows) || !windows.length) return false;
-    let active = false;
-    const remaining = [];
-    windows.forEach((win) => {
-      if (!win || !Number.isFinite(win.endMs)) return;
-      if (win.endMs > now) {
-        remaining.push(win);
-        if (win.startMs <= now) active = true;
+    this.pruneDeviceGateWindows(pageIdx, now);
+    return this.deviceGateWindows[pageIdx]?.some(({ startMs, gateEndMs }) => startMs <= now && now < gateEndMs) === true;
+  }
+
+  trackActivity(now = Date.now()) {
+    let mask = 0;
+    let nextAt = Infinity;
+    for (let page = 1; page <= 8; page += 1) {
+      this.pruneDeviceGateWindows(page, now);
+      for (const { startMs, trackEndMs } of this.deviceGateWindows[page]) {
+        if (now >= trackEndMs) continue;
+        if (now < startMs) {
+          nextAt = Math.min(nextAt, startMs);
+        } else {
+          mask |= 1 << (page - 1);
+          nextAt = Math.min(nextAt, trackEndMs);
+        }
       }
-    });
-    if (remaining.length !== windows.length) {
-      this.deviceGateWindows[pageIdx] = remaining;
     }
-    return active;
+    return { mask, nextAt };
   }
 
   pushMidiNote(midiEvents, payload) {
     midiEvents.push(payload);
-    this.registerDeviceGate(payload?.page, payload?.delayMs, payload?.durMs);
+    this.registerDeviceGate(payload?.page, payload?.delayMs);
     this.registerActiveNote(payload?.page, payload?.pitch, payload?.delayMs, payload?.durMs);
   }
 

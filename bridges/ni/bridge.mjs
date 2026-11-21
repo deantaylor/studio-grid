@@ -37,10 +37,12 @@ export function startNiBridge({
   let toastTimer;
   const activeDevices = new Set();
 
+  function sendToNative(event) {
+    if (child.stdin.writable) child.stdin.write(JSON.stringify(event) + "\n");
+  }
+
   function updateScreens() {
-    if (latest && child.stdin.writable) {
-      child.stdin.write(JSON.stringify({ ...latest, toast }) + "\n");
-    }
+    if (latest) sendToNative({ ...latest, toast });
   }
 
   function connect() {
@@ -57,6 +59,8 @@ export function startNiBridge({
       if (event.type === "ni_surface") {
         latest = event;
         updateScreens();
+      } else if (event.type === "track_activity") {
+        sendToNative(event);
       } else if (event.type === "ni_toast") {
         toast = event.text;
         clearTimeout(toastTimer);
@@ -71,7 +75,10 @@ export function startNiBridge({
       // A local server restart is handled by the close listener.
     });
     socket.on("close", () => {
-      if (!stopped) retry = setTimeout(connect, 750);
+      if (!stopped) {
+        sendToNative({ type: "track_activity", mask: 0 });
+        retry = setTimeout(connect, 750);
+      }
     });
   }
 
