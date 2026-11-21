@@ -16,6 +16,7 @@ export class SerialOSCBridge extends EventEmitter {
     this.rediscoverTimer = null;
     this.lastRediscover = 0;
     this.connected = false; // any device connected
+    this.rotation = 0;
     this._lastDeviceSignature = "";
     this.portMap = new Map(); // deviceId -> listen port
     this.nextPort = DEVICE_LISTEN_PORT;
@@ -38,6 +39,20 @@ export class SerialOSCBridge extends EventEmitter {
 
   hasConnectedDevices() {
     return Array.from(this.devices.values()).some((d) => !!d.devicePort);
+  }
+
+  setRotation(degrees) {
+    if ((degrees !== 0 && degrees !== 180) || degrees === this.rotation) return false;
+    this.rotation = degrees;
+    for (const device of this.devices.values()) this.applyRotation(device);
+    return true;
+  }
+
+  applyRotation(device) {
+    if (!device.connected || device.rotation === this.rotation || device.heldKeys.size || /\barc\b/i.test(device.type)) return;
+    device.devicePort.send({ address: "/sys/rotation", args: [{ type: "i", value: this.rotation }] });
+    device.rotation = this.rotation;
+    if (device.lastFrame) this.fullResync({ deviceId: device.id });
   }
 
   start() {
@@ -147,6 +162,8 @@ export class SerialOSCBridge extends EventEmitter {
       backBuffer: null,
       frontBuffer: null,
       lastFrame: null,
+      rotation: null,
+      heldKeys: new Set(),
       connected: false
     };
     this.devices.set(key, device);
@@ -185,10 +202,8 @@ export class SerialOSCBridge extends EventEmitter {
         address: "/sys/prefix",
         args: [{ type: "s", value: `/${this.prefix}` }]
       });
-      portRef.send({
-        address: "/sys/rotation",
-        args: [{ type: "i", value: 0 }]
-      });
+      device.connected = true;
+      this.applyRotation(device);
       portRef.send({ address: `/${this.prefix}/grid/led/all`, args: [{ type: "i", value: 0 }] });
       portRef.send({ address: "/sys/info", args: [] });
       setTimeout(() => {
@@ -226,9 +241,15 @@ export class SerialOSCBridge extends EventEmitter {
     });
 
     portRef.on("message", (msg) => {
+      if (device.devicePort !== portRef || this.devices.get(device.id) !== device) return;
       if (msg.address === `/${this.prefix}/grid/key`) {
         const [x, y, s] = msg.args.map((a) => a.value ?? a);
+        const key = `${x},${y}`;
+        if (s === 1) device.heldKeys.add(key);
+        else if (s === 0) device.heldKeys.delete(key);
         this.emit("grid_key", { deviceId: device.id, x, y, s, cols: device.gridCols, rows: device.gridRows, supportsLevels: device.supportsLevels });
+        // Let releases reach the sequencer in the same coordinates as their presses.
+        if (s === 0) this.applyRotation(device);
       } else if (msg.address === "/sys/size") {
         const [w, h] = msg.args.map((a) => a.value ?? a);
         device.gridCols = w || device.gridCols;

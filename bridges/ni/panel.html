@@ -1,0 +1,229 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root { color-scheme: dark; font-family: -apple-system, system-ui, sans-serif; color: #eceae5; background: #171717; }
+  * { box-sizing: border-box; }
+  body { margin: 0; width: 100vw; height: 100vh; overflow: hidden; }
+  .tabs { position: absolute; top: -28px; inset-inline: 8px; display: grid; gap: 8px; grid-template-columns: repeat(4, minmax(0, 1fr)); }
+  .tab { height: 32px; display: grid; place-items: center; border-radius: 2px; background: #393939; color: #e9e3d8; font-size: 13px; }
+  .tab.active { color: #161616; background: var(--track-color, #ff786e); }
+  .tab.pattern.occupied { background: #4b5962; }
+  .tab.pattern.active { color: #161616; background: #bacfda; }
+  .tab.pattern.pending { color: #161616; background: #ffc185; }
+  .tab.edit svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+  .tab.edit.cancel { background: #292929; }
+  .tab.edit.danger { color: #ff9890; }
+  .details, .grid { position: absolute; inset: 12px 8px 30px; }
+  .details { padding-top: 8px; }
+  .name, .type { margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; letter-spacing: -.045em; }
+  .name { font-size: 60px; font-weight: 730; }
+  .type { font-size: 54px; font-weight: 400; margin-top: 4px; }
+  .launcher .tabs, .launcher .name, .launcher .row-labels, .launcher[data-side="left"] .parameters { display: none; }
+  .grid, .row-labels { height: 228px; display: grid; grid-template-rows: repeat(7, minmax(0, 1fr)) 22px; }
+  .grid { bottom: auto; grid-template-columns: repeat(15, minmax(0, 1fr)) 22px; }
+  .row-labels { position: absolute; top: 12px; right: 8px; width: 32px; text-align: right; color: #a0a09e; font-size: 12px; }
+  .row-label { height: 22px; line-height: 22px; }
+  .details.with-row-labels { padding-right: 40px; }
+  .cell { width: 22px; height: 22px; border-radius: 3px; background: #393939; }
+  .parameters { position: absolute; bottom: 6px; inset-inline: 8px; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; font-size: 12px; }
+  .parameter { display: flex; align-items: baseline; gap: 6px; min-width: 0; white-space: nowrap; }
+  .label { color: #a0a09e; text-transform: uppercase; }
+  .value { overflow: hidden; text-overflow: ellipsis; }
+  .disabled .value { color: #999; }
+  .pending { color: #ffad91; }
+  .bar { color: #999; margin-right: 4px; }
+  .bar.active { color: #eceae5; font-weight: bold; }
+  .toast { position: absolute; inset: 0; display: grid; place-items: center; pointer-events: none; }
+  .toast[hidden] { display: none; }
+  .toast span { max-width: 85%; padding: 16px; border-radius: 4px; background: #000; color: #eceae5; font-size: 12px; text-align: center; }
+</style>
+<body data-side="__SIDE__">
+  <div class="tabs"></div>
+  <main></main>
+  <div class="parameters"></div>
+  <div class="toast" role="status" hidden><span></span></div>
+  <script>
+    const side = document.body.dataset.side;
+    const right = side === "right";
+    const root = document.querySelector("main");
+    const tabs = document.querySelector(".tabs");
+    const footer = document.querySelector(".parameters");
+    const toast = document.querySelector(".toast");
+    const make = (tag, className, parent) => {
+      const element = document.createElement(tag);
+      element.className = className;
+      parent.append(element);
+      return element;
+    };
+    const slots = Array.from({ length: 4 }, () => make("div", "tab", tabs));
+    const parameters = Array.from({ length: 4 }, () => {
+      const element = make("div", "parameter", footer);
+      return { element, label: make("span", "label", element), value: make("span", "value", element) };
+    });
+    root.className = right ? "grid" : "details";
+    const cells = right ? Array.from({ length: 128 }, () => make("span", "cell", root)) : [];
+    const name = right ? null : make("h1", "name", root);
+    const type = right ? null : make("p", "type", root);
+    const rowLabels = right ? null : make("div", "row-labels", document.body);
+    const noteLabels = right ? [] : Array.from({ length: 8 }, () => make("span", "row-label", rowLabels));
+    const editActions = [
+      ["Copy Bar", '<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 9h18M3 14h18"/>'],
+      ["Copy Pattern", '<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 9h18M3 14h18M9 4v16M15 4v16"/>'],
+      ["Paste", '<rect x="6" y="5" width="13" height="16" rx="2"/><rect x="9" y="3" width="7" height="4" rx="1"/><path d="M9 11h7m-7 4h7"/>'],
+      ["Clear", '<path d="m6 6 12 12M18 6 6 18"/>']
+    ];
+    const levels = Array.from({ length: 16 }, (_, level) => {
+      const t = (level / 15) ** 1.45;
+      return `rgb(${Math.round(57 + 169 * t)}, ${Math.round(57 + 165 * t)}, ${Math.round(57 + 151 * t)})`;
+    });
+    let lastPaint = "";
+    let expanded = false;
+    let slide = 0;
+    let motion;
+    let labelSlide = 0;
+    let labelsExpanded = false;
+    let labelMotion;
+    let footerOpacity = 1;
+    let footerFade;
+    let launcherActive = false;
+    let previewFrame = null;
+    window.encdr = window.encdr || {};
+    const slideProgress = (motion, now) => Math.min(1, (now - motion.start) / 160);
+    const slidePosition = (motion, progress) => motion.to - (motion.to - motion.from) * (1 - progress) ** 3;
+    // The hidden WebView advances this immediately before each hardware capture.
+    window.encdr.advanceAnimation = () => {
+      const now = performance.now();
+      if (motion) {
+        const progress = slideProgress(motion, now);
+        slide = slidePosition(motion, progress);
+        tabs.style.top = `${-28 + slide}px`;
+        root.style.top = `${12 + slide}px`;
+        if (right) root.style.height = `${228 - slide / 3}px`;
+        footer.style.transform = `translateY(${slide}px)`;
+        if (progress === 1) motion = null;
+      }
+      if (labelMotion) {
+        const progress = slideProgress(labelMotion, now);
+        labelSlide = slidePosition(labelMotion, progress);
+        rowLabels.style.top = `${12 + labelSlide}px`;
+        rowLabels.style.height = `${228 - labelSlide / 3}px`;
+        if (progress === 1) labelMotion = null;
+      }
+      if (footerFade) {
+        const progress = Math.min(1, (now - footerFade.start) / 160);
+        footerOpacity = footerFade.from + (footerFade.to - footerFade.from) * progress;
+        footer.style.opacity = String(footerOpacity);
+        if (progress === 1) footerFade = null;
+      }
+    };
+    function previewAnimation() {
+      previewFrame = null;
+      window.encdr.advanceAnimation();
+      if (motion || labelMotion || footerFade) previewFrame = requestAnimationFrame(previewAnimation);
+    }
+
+    window.encdr.onMessage = (channel, view) => {
+      if (channel !== "state") return false;
+      const start = right ? 4 : 0;
+      const patternMode = view.selector === "pattern";
+      const showLauncher = view.patternLauncherActive === true;
+      const editing = right && !!view.clearHeld;
+      const selectedSlots = patternMode ? view.patterns : view.slots;
+      const localSlots = selectedSlots.slice(start, start + 4);
+      const localButtonColors = view.buttonColors?.slice(start, start + 4);
+      const localParameters = view.parameters.slice(start, start + 4);
+      const showButtons = !showLauncher && (view.selector === "track" || patternMode || editing);
+      const alignLabelsToExpandedGrid = !showLauncher && (showButtons || !!view.clearHeld);
+      const rightState = right ? [view.frame, view.toast, editing, editing && view.clearConfirm] : null;
+      const paint = JSON.stringify([showButtons, patternMode, showLauncher, view.page, localSlots, localButtonColors,
+        rightState || [view.name, view.sequencer, view.rowLabels, alignLabelsToExpandedGrid], localParameters]);
+      if (paint === lastPaint) return false;
+      lastPaint = paint;
+      const slideChanged = expanded !== showButtons;
+      const labelSlideChanged = !right && labelsExpanded !== alignLabelsToExpandedGrid;
+      const fadeChanged = right && launcherActive !== showLauncher;
+      launcherActive = showLauncher;
+      document.body.classList.toggle("launcher", showLauncher);
+      if (slideChanged || labelSlideChanged || fadeChanged) {
+        window.encdr.advanceAnimation();
+        const animationStart = performance.now();
+        if (slideChanged) {
+          expanded = showButtons;
+          motion = { start: animationStart, from: slide, to: expanded ? 36 : 0 };
+        }
+        if (labelSlideChanged) {
+          labelsExpanded = alignLabelsToExpandedGrid;
+          labelMotion = { start: animationStart, from: labelSlide, to: labelsExpanded ? 36 : 0 };
+        }
+        if (fadeChanged) {
+          footerFade = { start: animationStart, from: footerOpacity, to: showLauncher ? 0 : 1 };
+          footer.setAttribute("aria-hidden", String(showLauncher));
+        }
+        if (window.ipc) window.ipc.postMessage("__encdr_animate:210");
+        else if (previewFrame == null) previewFrame = requestAnimationFrame(previewAnimation);
+      }
+      slots.forEach((element, index) => {
+        const slot = localSlots[index];
+        const color = localButtonColors?.[index] || "";
+        element.className = "tab";
+        element.style.backgroundColor = "";
+        element.style.color = "";
+        if (editing) {
+          element.classList.add("edit");
+          if (view.clearConfirm) {
+            const label = ["Cancel", "", "Clear Bar", "Clear Pattern"][index];
+            element.textContent = label;
+            element.setAttribute("aria-label", label);
+            element.classList.toggle("cancel", index === 0);
+            element.classList.toggle("danger", index > 1);
+            if (index > 1) element.style.color = color;
+            else element.style.backgroundColor = color;
+          } else {
+            const [label, icon] = editActions[index];
+            element.setAttribute("aria-label", label);
+            element.innerHTML = `<svg viewBox="0 0 24 24" aria-hidden="true">${icon}</svg>`;
+            element.style.backgroundColor = color;
+          }
+          return;
+        }
+        element.textContent = slot?.number ?? "";
+        element.style.backgroundColor = color;
+        element.setAttribute("aria-label", `${patternMode ? "Pattern" : "Track"} ${slot?.number ?? ""}`);
+        element.classList.toggle("pattern", patternMode);
+        element.classList.toggle("active", patternMode ? !!slot?.active : slot?.page === view.page);
+        element.classList.toggle("occupied", patternMode && !!slot?.occupied);
+        element.classList.toggle("pending", patternMode && !!slot?.pending);
+        element.style.setProperty("--track-color", slot?.color || "#ff786e");
+      });
+      if (right) {
+        cells.forEach((cell, index) => { cell.style.background = levels[view.frame[index]] ?? levels[0]; });
+        toast.hidden = !view.toast;
+        toast.firstElementChild.textContent = view.toast || "";
+      } else {
+        name.textContent = view.name;
+        type.textContent = showLauncher ? "Pattern Launcher" : view.sequencer;
+        const labels = view.rowLabels || [];
+        root.classList.toggle("with-row-labels", !showLauncher && labels.some(Boolean));
+        noteLabels.forEach((label, row) => { label.textContent = labels[row] || ""; });
+      }
+      parameters.forEach(({ element, label, value }, index) => {
+        const parameter = localParameters[index];
+        label.textContent = parameter?.label ?? "";
+        value.textContent = parameter?.value ?? "";
+        element.classList.toggle("disabled", !!parameter?.disabled);
+        value.classList.toggle("pending", !!parameter?.pending);
+        if (parameter?.pending) value.textContent = `${parameter.value} → ${parameter.pending}`;
+        if (parameter?.count) {
+          value.textContent = "";
+          for (let bar = 1; bar <= parameter.count; bar += 1) {
+            const item = make("span", "bar", value);
+            item.textContent = bar;
+            item.classList.toggle("active", String(bar) === parameter.value);
+          }
+        }
+      });
+      return true;
+    };
+  </script>
+</body>

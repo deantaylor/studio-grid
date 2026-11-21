@@ -7,12 +7,14 @@ const INT_MULT = PPQN_INT / PPQN_EXT;
 const TICKS_PER_STEP_EXT = PPQN_EXT / 4;
 const TICKS_PER_STEP_INT = TICKS_PER_STEP_EXT * INT_MULT;
 const PATTERN_CONTROL_BUTTON = 15; // bottom-row button to enter pattern control view (x index)
+const PATTERN_MODIFIER_BUTTON = 14;
 const NOTE_VIEW_UP_BUTTON = PATTERN_CONTROL_BUTTON;
 const NOTE_VIEW_DOWN_BUTTON = 13;
 const NOTE_VIEW_ROW_SHIFT_MIN = -14;
 const NOTE_VIEW_ROW_SHIFT_MAX = 14;
 const ENABLE_OCTAVE_SHIFTING = true;
 const OCTAVE_ANCHOR_LEVEL = 2;
+const NOTE_EDIT_HOLD_MS = 150;
 const MICRO_ROW_TOP = 0;
 const MICRO_ROW_BOTTOM = 7;
 const MICRO_ROW_THRESHOLD = 3;
@@ -114,7 +116,8 @@ export class SGridState {
     this.heldStepPendingOff = false;
     this.midi = this.buildDefaultMidi();
     this.deviceHeld = false;
-    this.patternHeld = false; // pattern switch modifier (button 14)
+    this.patternHeld = false;
+    this.consumedControlKeys = new Set();
     this.patternControlHeld = false; // holding launcher in non-latch mode
     this.pulse = false;
     this.noteOffEpsilonMs = 6; // shave a few ms to avoid zero-length clips in DAWs
@@ -438,10 +441,11 @@ export class SGridState {
       const bar = pat.barView || 0;
       const seqType = page.sequencerType || "mono";
       if (seqType !== "mono" && seqType !== "poly" && seqType !== "mdtonal") continue;
-      const addNote = (x, degree, octave) => {
-        if (!octave) return;
+      const addNote = (step, x, degree, octave) => {
+        const origin = this.getOctaveOrigin(step, degree, seqType);
+        if (origin == null) return;
         const y = this.rowForNote(degree, octave, { ...opts, page: p });
-        if (y != null) pages[p].push({ x, y, octave });
+        if (y != null) pages[p].push({ x, y, octave: octave - origin });
       };
       for (let x = 0; x < 16; x++) {
         const abs = x + bar * 16;
@@ -449,9 +453,9 @@ export class SGridState {
         const step = pat.steps[abs];
         if (!step?.on) continue;
         if (seqType === "poly") {
-          step.notes?.forEach((degree) => addNote(x, degree, this.getNoteOctave(step, degree)));
+          step.notes?.forEach((degree) => addNote(step, x, degree, this.getNoteOctave(step, degree)));
         } else {
-          addNote(x, step.degree || 0, step.octave || 0);
+          addNote(step, x, step.degree || 0, step.octave || 0);
         }
       }
     }
@@ -656,6 +660,7 @@ export class SGridState {
     this.heldStepPendingOff = false;
     this.deviceHeld = false;
     this.patternHeld = false;
+    this.consumedControlKeys.clear();
     this.patternControlHeld = false;
     this.resetTickCounters();
     this.pageTickPos = Array(9).fill(-1);
@@ -855,6 +860,27 @@ export class SGridState {
     return Math.round(Number(raw) || 0);
   }
 
+  noteViewPitches(page = this.currentPage) {
+    const device = this.pages[page];
+    const type = device?.sequencerType || "mono";
+    const pattern = device?.patterns?.[device.active_pattern];
+    if (!pattern || type === "cc" || this.isIsomorphicMode(page)) return [];
+    const pitches = new Set();
+    const start = (pattern.barView || 0) * 16;
+    const end = Math.min(start + 16, pattern.length_steps, pattern.steps.length);
+    const isPoly = type === "poly" || type === "drum";
+    for (let index = start; index < end; index++) {
+      const step = pattern.steps[index];
+      if (!step?.on) continue;
+      const degrees = isPoly && step.notes?.length ? step.notes : [step.degree || 0];
+      for (const degree of degrees) {
+        const octave = isPoly ? this.getNoteOctave(step, degree) : (step.octave || 0);
+        pitches.add(octave * 7 + degree);
+      }
+    }
+    return [...pitches].sort((a, b) => a - b);
+  }
+
   setNoteViewOffset(page = this.currentPage, nextOffset = 0) {
     const idx = clamp(Math.round(page || this.currentPage), 1, 8);
     const pg = this.pages[idx];
@@ -877,6 +903,28 @@ export class SGridState {
     }
     if (typeof this.requestRender === "function") this.requestRender();
     return true;
+  }
+
+  resetGridInput() {
+    this.heldStep = null;
+    this.heldStepModified = false;
+    this.heldStepPendingOff = false;
+    this.holdTargetDegree = null;
+    this.holdStart = 0;
+    this.keyHolds.clear();
+    this.holdTimers.forEach(clearTimeout);
+    this.holdTimers.clear();
+    this.deviceTabHoldTimers.forEach(clearTimeout);
+    this.deviceTabHoldTimers.fill(null);
+    this.deviceTabHoldFired.fill(false);
+    this.patternHeld = false;
+    this.consumedControlKeys.clear();
+    const closeLauncher = this.patternControlHeld && this.patternControlMode;
+    this.patternControlHeld = false;
+    if (closeLauncher) this.patternControlMode = false;
+    this.exitMicrotimingMode();
+    this.enqueueOctaveOverlay({ page: this.currentPage, clearAll: true });
+    return closeLauncher;
   }
 
   shiftNoteView(page = this.currentPage, delta = 0) {
@@ -1468,24 +1516,54 @@ export class SGridState {
   }
 
   handleGridKey(x, y, s, opts = {}) {
-    const forcePatternControl = !!opts.forcePatternControl;
+    if (opts.forcePatternControl) return this.handlePatternControlKey(x, y, s);
     const uiMode = !!opts.uiMode;
+    const patternLauncher = !!opts.patternLauncher;
     const WIDTH = 16;
     const page = this.pages[this.currentPage];
     const pat = this.getPattern();
     const heldKey = this.heldStep ? `${this.heldStep.x},${this.heldStep.y}` : null;
     const heldInfo = heldKey ? this.keyHolds.get(heldKey) : null;
+    if (!patternLauncher && heldInfo?.octaveAnchor && heldKey === `${x},${y}`) {
+      if (s === 0) {
+        clearTimeout(this.holdTimers.get(heldKey));
+        this.holdTimers.delete(heldKey);
+        this.keyHolds.delete(heldKey);
+        this.heldStep = null;
+        this.holdTargetDegree = null;
+        this.heldStepModified = false;
+        if (heldInfo.editMode) {
+          this.forceLedRefresh = true;
+          this.enqueueOctaveOverlay({ page: this.currentPage, clear: true });
+        }
+      }
+      return null;
+    }
+    if (!patternLauncher && !uiMode && y === 7) {
+      if (s === 0 && this.consumedControlKeys.delete(x)) return null;
+      if (s === 0 && x === PATTERN_MODIFIER_BUTTON && this.patternHeld) {
+        this.patternHeld = false;
+        return null;
+      }
+      if (heldInfo?.octaveAnchor && heldInfo.editMode) {
+        if (s === 1) this.consumedControlKeys.add(x);
+        return null;
+      }
+      if (s === 1 && this.patternHeld && (x === NOTE_VIEW_UP_BUTTON || x === NOTE_VIEW_DOWN_BUTTON)) {
+        this.consumedControlKeys.add(x);
+        const delta = x === NOTE_VIEW_UP_BUTTON ? 1 : -1;
+        const offset = this.shiftNoteView(this.currentPage, delta);
+        return offset == null ? null : { type: "note_view_offset", page: this.currentPage, offset };
+      }
+    }
     const microModeActive = !!(this.microtiming.active && heldKey && heldKey === this.microtiming.heldKey);
-    if (microModeActive && y === this.microtiming.row) {
+    if (!patternLauncher && microModeActive && y === this.microtiming.row) {
       if (s === 1) {
         return this.handleMicroGridPress(x, y, { page, pat, heldInfo, uiMode });
       }
       if (s === 0) {
         return this.handleMicroGridRelease(x, y, { page, pat, heldInfo, uiMode });
       }
-    }
-    if (forcePatternControl) {
-      return this.handlePatternControlKey(x, y, s);
     }
     if (!uiMode && this.isIsomorphicMode(this.currentPage)) {
       if (y >= 0 && y < 7) {
@@ -1497,15 +1575,7 @@ export class SGridState {
         return null;
       }
     }
-    // Pattern control toggle (pattern launcher) is always handled first
-    const allowPatternControlKey = !uiMode || this.patternControlMode;
-    if (!uiMode && y === 7 && this.patternHeld && (x === NOTE_VIEW_UP_BUTTON || x === NOTE_VIEW_DOWN_BUTTON)) {
-      if (s !== 1) return null;
-      const delta = x === NOTE_VIEW_UP_BUTTON ? 1 : -1;
-      const nextOffset = this.shiftNoteView(this.currentPage, delta);
-      if (nextOffset == null) return null;
-      return { type: "note_view_offset", page: this.currentPage, offset: nextOffset };
-    }
+    const allowPatternControlKey = patternLauncher || !uiMode || this.patternControlMode;
     if (allowPatternControlKey && y === 7 && x === PATTERN_CONTROL_BUTTON) {
       if (this.patternControlLatch) {
         if (s === 1) {
@@ -1545,6 +1615,7 @@ export class SGridState {
     if (this.patternControlMode) {
       return this.handlePatternControlKey(x, y, s);
     }
+    if (heldInfo?.octaveAnchor && heldInfo.pattern !== pat) return null;
 
     const indicatorCol = this.heldStep
       ? (this.heldStep.x < WIDTH / 2 ? (WIDTH - 1) : 0)
@@ -1593,6 +1664,13 @@ export class SGridState {
       return null;
     }
 
+    if (heldInfo?.octaveAnchor && (y < 7 || uiMode)) {
+      if (s === 1 && uiMode && heldInfo.editMode && x === this.heldStep.x && Math.abs(y - this.heldStep.y) === 1) {
+        return this.handleNeighborGesture(x, y, { uiMode });
+      }
+      return null;
+    }
+
     // bottom row y=7 for controls
     if (!uiMode && y === 7) {
       if (x >= 9 && x <= 12) {
@@ -1615,7 +1693,7 @@ export class SGridState {
         this.setBarView(this.currentPage, patIdx, target);
         return { type: "bar_view", page: this.currentPage, pattern: patIdx, bar: target };
       }
-      if (x === 14) {
+      if (x === PATTERN_MODIFIER_BUTTON) {
         // pattern switch modifier (immediate)
         this.patternHeld = s === 1;
         return null;
@@ -1683,11 +1761,21 @@ export class SGridState {
         const now = Date.now();
         if (!heldInfo?.editMode && this.getOctaveOrigin(step, targetDegree, seqType) === targetOctave) {
           if (this.keyHolds.size) return null;
-          this.heldStep = { x, y, bar: pat.barView || 0, abs };
+          const heldStep = { x, y, bar: pat.barView || 0, abs };
+          const hold = { editMode: false, octaveAnchor: true, pattern: pat };
+          this.heldStep = heldStep;
           this.holdTargetDegree = targetDegree;
           this.heldStepModified = true;
-          this.keyHolds.set(key, { start: now, editMode: true, wasOn: true, octaveAnchor: true, action: "octave" });
-          this.enqueueOctaveOverlay({ page: this.currentPage, x, y, uiMode, fromHold: true, octaveAnchor: true });
+          this.keyHolds.set(key, hold);
+          this.holdTimers.set(key, setTimeout(() => {
+            this.holdTimers.delete(key);
+            if (this.heldStep !== heldStep || this.patternControlMode || this.getPattern() !== pat || pat.barView !== heldStep.bar) return;
+            if (this.getOctaveOrigin(pat.steps[abs], targetDegree, seqType) !== targetOctave) return;
+            hold.editMode = true;
+            this.enqueueOctaveOverlay({ page: this.currentPage, x, y, uiMode, fromHold: true, octaveAnchor: true });
+            this.forceLedRefresh = true;
+            this.requestRender?.();
+          }, NOTE_EDIT_HOLD_MS));
           return null;
         }
         const heldAbs = this.heldStep && pat
@@ -1748,8 +1836,8 @@ export class SGridState {
           return null;
         }
         const multiRecent = now - (this.lastMultiSelectTime || 0) < 150;
-        let inEdit = this.heldStep && !multiHoldAny && (heldInfo?.editMode || (heldDuration >= 150 && !multiRecent));
-        if (this.heldStep && heldInfo && !heldInfo.editMode && heldDuration >= 150 && !multiHoldAny && !multiRecent) {
+        let inEdit = this.heldStep && !multiHoldAny && (heldInfo?.editMode || (heldDuration >= NOTE_EDIT_HOLD_MS && !multiRecent));
+        if (this.heldStep && heldInfo && !heldInfo.editMode && heldDuration >= NOTE_EDIT_HOLD_MS && !multiHoldAny && !multiRecent) {
           heldInfo.editMode = true;
           this.keyHolds.set(heldKey, heldInfo);
           inEdit = true;
@@ -1787,9 +1875,9 @@ export class SGridState {
           return null;
         }
         const seqTypeSlide = page?.sequencerType || "mono";
-        const slideAllowed = seqTypeSlide === "mono" && !heldInfo?.octaveAnchor &&
+        const slideAllowed = seqTypeSlide === "mono" &&
           inEdit && rightDiagonal && heldStepObj?.on;
-        const mdSlideAllowed = seqTypeSlide === "mdtonal" && !heldInfo?.octaveAnchor &&
+        const mdSlideAllowed = seqTypeSlide === "mdtonal" &&
           inEdit && rightDiagonal && heldStepObj?.on;
         if (slideAllowed) {
           heldStepObj.slide = !heldStepObj.slide;
@@ -1885,7 +1973,7 @@ export class SGridState {
               this.heldStepModified = true;
               }
             }
-          }, 150);
+          }, NOTE_EDIT_HOLD_MS);
             this.holdTimers.set(key, timer);
           }
         }
@@ -2092,13 +2180,9 @@ export class SGridState {
           this.heldStepModified = false;
           return null;
         }
-        if (holdInfo.octaveAnchor) {
-          this.heldStepModified = false;
-          return null;
-        }
         const targetDeg = rowInfo.degree;
         // long press toggles accent (as long as no other edit action was taken)
-        if (duration >= 150 && holdInfo?.wasOn && step2.on && !hasEditAction) {
+        if (duration >= NOTE_EDIT_HOLD_MS && holdInfo?.wasOn && step2.on && !hasEditAction) {
           if (seqType === "poly" || seqType === "drum") {
             if (!Array.isArray(step2.accented)) step2.accented = [];
             const idx = step2.accented.indexOf(targetDeg);
@@ -4336,19 +4420,8 @@ export class SGridState {
       const abs = x + bar * 16;
       if (abs >= pat.steps.length) break;
       const step = pat.steps[abs];
-      if (!step?.on) continue;
-      if (seqType === "poly") {
-        if (step.noteOctaves && typeof step.noteOctaves === "object") {
-          const hasShift = Object.entries(step.noteOctaves).some(([deg, val]) => {
-            if (!Array.isArray(step.notes) || !step.notes.includes(Number(deg))) return false;
-            return (Number(val) || 0) !== 0;
-          });
-          if (hasShift) return true;
-        }
-        if ((step.octave || 0) !== 0) return true;
-      } else if (seqType === "mono" || seqType === "mdtonal") {
-        if ((step.octave || 0) !== 0) return true;
-      }
+      if (!step?.on || !step.octaveOrigins) continue;
+      if (Object.keys(step.octaveOrigins).some((degree) => this.getOctaveOrigin(step, Number(degree), seqType) != null)) return true;
     }
     return false;
   }
@@ -4613,9 +4686,8 @@ export class SGridState {
     if (this.patternControlMode && !ignorePatternControl) {
       return baseFrame;
     }
-    const viewOffset = this.getNoteViewOffset(this.currentPage);
     let topFrame = null;
-    if ((page?.sequencerType || "mono") !== "cc" && viewOffset < NOTE_VIEW_ROW_SHIFT_MAX) {
+    if (currentSeqType !== "cc") {
       const prevOffset = this.getNoteViewOffset(this.currentPage);
       const prevPatternControlMode = this.patternControlMode;
       this.pages[this.currentPage].noteViewOffset = prevOffset + 7;
@@ -4638,6 +4710,9 @@ export class SGridState {
         uiFrame[x] = topFrame ? (topFrame[6 * WIDTH + x] || 0) : 0;
       }
     }
+    this.octaveAnchorCells({ uiMode: true }).forEach((index) => {
+      uiFrame[index] = OCTAVE_ANCHOR_LEVEL;
+    });
     const bar = pat.barView || 0;
     if (!page.sequencerStopped) {
       const len = Math.max(1, pat.length_steps);
@@ -4653,9 +4728,6 @@ export class SGridState {
         }
       }
     }
-    this.octaveAnchorCells({ uiMode: true }).forEach((index) => {
-      uiFrame[index] = OCTAVE_ANCHOR_LEVEL;
-    });
     return uiFrame;
   }
 
@@ -4805,7 +4877,8 @@ export class SGridState {
     const multiHoldAny = this.keyHolds.size > 1;
     const multiRecent = Date.now() - (this.lastMultiSelectTime || 0) < 150;
     const inEditMode = this.heldStep && heldInfo && !multiHoldAny
-      && (heldInfo.editMode || (!multiRecent && heldInfo.start && (Date.now() - heldInfo.start) >= 150));
+      && (heldInfo.editMode || (!multiRecent && heldInfo.start && (Date.now() - heldInfo.start) >= NOTE_EDIT_HOLD_MS));
+    let playheadColumn = null;
     if (pat) {
       const slideStarts = [];
       for (let x = 0; x < 16; x++) {
@@ -4826,7 +4899,7 @@ export class SGridState {
             const row = this.rowForNote(step.degree || 0, step.octave || 0, { uiMode: false });
             if (row == null) continue;
             const baseLevel = step.accent ? STEP_ACCENT : STEP_ON;
-            const hasOctShift = (step.octave || 0) !== 0;
+            const hasOctShift = this.getOctaveOrigin(step, step.degree || 0, seqType) != null;
             const pulsed = applyOctavePulse(baseLevel, hasOctShift);
             // const level = page?.muted ? Math.max(1, Math.round(pulsed * 0.4)) : pulsed;
             const level = page?.sequencerStopped ? Math.max(1, Math.round(pulsed * 0.4)) : pulsed;
@@ -4852,9 +4925,7 @@ export class SGridState {
               const level = (page.sequencerType === "poly" || page.sequencerType === "drum")
                 ? (Array.isArray(step.accented) && step.accented.includes(deg) ? STEP_ACCENT : STEP_ON)
                 : (step.accent ? STEP_ACCENT : STEP_ON);
-              const hasOctShift = (page.sequencerType === "poly")
-                ? (noteOctave || 0) !== 0
-                : (page.sequencerType === "mono" || page.sequencerType === "mdtonal") && (step.octave || 0) !== 0;
+              const hasOctShift = this.getOctaveOrigin(step, deg, seqType) != null;
               const pulsed = applyOctavePulse(level, hasOctShift);
               // if (page?.muted) {
               if (page?.sequencerStopped) {
@@ -4883,9 +4954,9 @@ export class SGridState {
         const ph = Math.max(0, Math.floor(this.playheads[this.currentPage] ?? 0)) % len;
         const phBar = Math.floor(ph / 16);
         if (phBar === bar) {
-          const phX = ph % 16;
+          playheadColumn = ph % WIDTH;
           for (let yy = 0; yy < STEP_ROWS; yy++) {
-            frame[yy * WIDTH + phX] = PLAYHEAD;
+            frame[yy * WIDTH + playheadColumn] = PLAYHEAD;
           }
         }
       }
@@ -4984,7 +5055,7 @@ export class SGridState {
     }
     if (opts.includeOctaveAnchors !== false) {
       this.octaveAnchorCells().forEach((index) => {
-        frame[index] = OCTAVE_ANCHOR_LEVEL;
+        if (index % WIDTH !== playheadColumn) frame[index] = OCTAVE_ANCHOR_LEVEL;
       });
     }
     if (includeOctaveHint && this.isOctaveShiftingEnabled() && pat && inEditMode && this.heldStep && page?.sequencerType !== "drum") {
@@ -5039,6 +5110,10 @@ export class SGridState {
           }
         }
       }
+    }
+    if (heldInfo?.octaveAnchor && heldInfo.editMode) {
+      frame.fill(OFF, STEP_ROWS * WIDTH);
+      return frame;
     }
     if ((this.patternControlMode || this.patternControlHeld || this.patternHeld) && page) {
       // show patterns when holding pattern button
@@ -5149,22 +5224,8 @@ export class SGridState {
       }
     }
     if (!this.patternControlMode && !this.patternControlHeld && this.patternHeld) {
-      const navUpIdx = 7 * WIDTH + NOTE_VIEW_UP_BUTTON;
-      const navDownIdx = 7 * WIDTH + NOTE_VIEW_DOWN_BUTTON;
-      // Navigation buttons stay dark by default while pattern-modifier is held.
-      // Show exactly one dim hint when "home" (note index 0) is outside the visible note rows.
-      frame[navUpIdx] = OFF;
-      frame[navDownIdx] = OFF;
-
-      const viewOffset = this.getNoteViewOffset(this.currentPage);
-      const minVisibleIndex = viewOffset;
-      const maxVisibleIndex = viewOffset + (STEP_ROWS - 1);
-      const hintLevel = Math.max(1, Math.round(PATTERN_INACTIVE * 0.5));
-      if (0 > maxVisibleIndex) {
-        frame[navUpIdx] = hintLevel;
-      } else if (0 < minVisibleIndex) {
-        frame[navDownIdx] = hintLevel;
-      }
+      frame[7 * WIDTH + NOTE_VIEW_UP_BUTTON] = OFF;
+      frame[7 * WIDTH + NOTE_VIEW_DOWN_BUTTON] = OFF;
     }
     return frame;
   }

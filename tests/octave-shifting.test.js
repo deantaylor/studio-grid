@@ -5,6 +5,7 @@ import { SGridState } from "../server/state.js";
 
 test("the UI keeps the original key dim and uses it to edit the shifted note", () => {
   const state = new SGridState();
+  state.playheads[1] = 1;
   const step = state.getPattern().steps[0];
   Object.assign(step, { on: true, degree: 0, accent: true, micro: -3 });
 
@@ -23,6 +24,23 @@ test("the UI keeps the original key dim and uses it to edit the shifted note", (
   assert.equal(state.setStepOctave(0, 7, -2, { uiMode: true })?.octave, 0);
   assert.deepEqual(state.octaveAnchorCells({ uiMode: true }), []);
   assert.equal(state.getStepInfo(0, 7, { uiMode: true }).on, true);
+});
+
+test("the playhead keeps its configured brightness over a dim key in both layouts", () => {
+  const state = new SGridState();
+  Object.assign(state.getPattern().steps[1], { on: true, degree: 0 });
+  state.setStepOctave(1, 7, 1, { uiMode: true });
+
+  for (const playheadLevel of [15, 1]) {
+    state.ledLevels.playhead = playheadLevel;
+    state.playheads[1] = 1;
+    assert.equal(state.renderUIFrame()[7 * 16 + 1], playheadLevel);
+    assert.equal(state.renderLED()[6 * 16 + 1], playheadLevel);
+
+    state.playheads[1] = 2;
+    assert.equal(state.renderUIFrame()[7 * 16 + 1], 2);
+    assert.equal(state.renderLED()[6 * 16 + 1], 2);
+  }
 });
 
 test("a poly octave edit follows the scrolled row and changes only the target note", () => {
@@ -45,6 +63,24 @@ test("a poly octave edit follows the scrolled row and changes only the target no
   assert.equal(reloaded.getStepInfo(0, 0).octaveAnchor, false);
 });
 
+test("notes entered directly into another octave have no octave-shift indication", () => {
+  const state = new SGridState();
+  const layout = { uiMode: true };
+  state.handleGridKey(2, 0, 1, layout);
+  state.handleGridKey(2, 0, 0, layout);
+  const step = state.getPattern().steps[2];
+  assert.equal(step.octave, 1);
+  assert.equal(state.hasOctaveShifts(), false);
+  assert.deepEqual(state.octaveOverlaySnapshot(layout)[1], []);
+
+  assert.equal(state.setStepOctave(2, 0, -1, layout)?.octave, 0);
+  state.handleGridKey(3, 0, 1, layout);
+  state.handleGridKey(3, 0, 0, layout);
+  assert.equal(state.getPattern().steps[3].octave, 1);
+  assert.equal(state.hasOctaveShifts(), true);
+  assert.deepEqual(state.octaveOverlaySnapshot(layout)[1], [{ x: 2, y: 7, octave: -1 }]);
+});
+
 test("a shifted note plays once and deleting it removes the dim key", () => {
   const state = new SGridState();
   Object.assign(state.getPattern().steps[0], { on: true, degree: 0 });
@@ -58,6 +94,7 @@ test("a shifted note plays once and deleting it removes the dim key", () => {
 
 test("Monome octave buttons can shift the same held note more than once", async () => {
   const state = new SGridState();
+  state.playheads[1] = 1;
   const step = state.getPattern().steps[0];
   Object.assign(step, { on: true, degree: 4 });
   state.handleGridKey(0, 2, 1);
@@ -68,17 +105,33 @@ test("Monome octave buttons can shift the same held note more than once", async 
   state.handleGridKey(0, 2, 0);
   assert.equal(state.renderLED()[2 * 16], 2);
 
+  state.consumeOctaveOverlays();
   state.handleGridKey(0, 2, 1);
+  assert.equal(state.handleGridKey(15, 2, 1), null);
+  state.handleGridKey(15, 2, 0);
   state.handleGridKey(0, 2, 0);
   assert.equal(step.octave, 1);
   assert.equal(step.accent, false);
 
   state.handleGridKey(0, 2, 1);
+  assert.equal(state.renderLED()[7 * 16 + 15] > 0, true);
+  assert.equal(state.consumeOctaveOverlays().some((event) => event.octaveAnchor), false);
+  await setTimeout(175);
+  assert.equal(state.consumeOctaveOverlays().some((event) => event.octaveAnchor), true);
+  assert.deepEqual(state.renderLED().slice(7 * 16), Array(16).fill(0));
+  state.patternControlLatch = false;
+  assert.equal(state.handleGridKey(15, 7, 1), null);
+  assert.equal(state.patternControlMode, false);
+  assert.equal(state.handleGridKey(1, 7, 1), null);
+  assert.equal(state.currentPage, 1);
+  state.handleGridKey(1, 7, 0);
   assert.equal(state.handleGridKey(15, 2, 1)?.octave, 2);
   state.handleGridKey(15, 2, 0);
   assert.equal(state.handleGridKey(15, 2, 1)?.octave, 0);
   state.handleGridKey(15, 2, 0);
   state.handleGridKey(0, 2, 0);
+  assert.equal(state.handleGridKey(15, 7, 0), null);
+  assert.equal(state.renderLED()[7 * 16 + 15] > 0, true);
 
   assert.equal(step.on, true);
   assert.equal(step.octave, 0);

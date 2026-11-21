@@ -1,0 +1,18 @@
+[package]
+name = "studio-grid-ni"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+description = "Optional Native Instruments controller bridge for Studio Grid"
+
+[dependencies]
+encdr = "=0.8.5"
+encdr-view = "=0.8.5"
+serde_json = "1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[profile.dev.package.encdr]
+opt-level = 2
+
+[profile.dev.package.encdr-view]
+opt-level = 2

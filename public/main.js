@@ -36,6 +36,7 @@ const TAB_PROGRESS_BAR_X_PAD = 0;
 const PATTERN_CONTROL_GRID_X = 15;
 const PATTERN_CONTROL_GRID_Y = 7;
 const ENABLE_OCTAVE_SHIFTING = true;
+const NOTE_EDIT_HOLD_MS = 150;
 // TD-3 import octave application:
 // - "note_view_navigation": direct per-step octave assignment (works with shifted note-view navigation)
 // - "legacy_octave_shift": old setStepOctave-based path
@@ -172,6 +173,9 @@ let midiSettings = Array.from({ length: 9 }, () => ({ outId: "", channel: 1 }));
 let lastTabsRenderKey = "";
 
 const canvas = document.getElementById("grid");
+const noteScrollbar = document.getElementById("note-scrollbar");
+const noteScrollbarThumb = document.getElementById("note-scrollbar-thumb");
+const noteScrollbarStripes = document.getElementById("note-scrollbar-stripes");
 // fix canvas size for 40px cells with 16px gaps
 canvas.width = CANVAS_WIDTH;
 canvas.height = CANVAS_HEIGHT;
@@ -229,6 +233,7 @@ const autoFillToggle = document.getElementById("auto-fill");
 const autoLoadToggle = document.getElementById("auto-load-set");
 const patternControlLatchToggle = document.getElementById("pattern-control-latch");
 const showMonomeControlsToggle = document.getElementById("show-monome-controls");
+const rotateMonomeToggle = document.getElementById("rotate-monome");
 const gateLedBoostToggle = document.getElementById("gate-led-boost");
 const monomeControlsWrap = document.getElementById("monome-controls-wrap");
 const mdBaseSweepInput = document.getElementById("md-base-sweep");
@@ -670,6 +675,7 @@ document.addEventListener("click", (e) => {
 
 document.addEventListener("pointerdown", (e) => {
   if (e.button !== 0) return;
+  if (noteScrollbar.contains(e.target)) return;
   if (e.shiftKey || e.ctrlKey || e.metaKey) return;
   if (gridPointerActive || selectionBoxActive || selectionDragActive || dragPaintActive) return;
   const selection = selectionByPage[currentPage];
@@ -749,6 +755,7 @@ const microLeftBtn = microControls.querySelector('[data-delta="-1"]');
 const microRightBtn = microControls.querySelector('[data-delta="1"]');
 let hoveredStep = null;
 let octaveHoverTimer = null;
+let octaveAnchorPress = null;
 let isOverOctaveControls = false;
 let isOverMicroControls = false;
 let pendingOctaveHover = null;
@@ -876,7 +883,10 @@ const octaveAnchors = Array.from({ length: 9 }, () => new Set());
 let transposes = Array.from({ length: 9 }, () => 0);
 const NOTE_VIEW_ROW_SHIFT_MIN = -14;
 const NOTE_VIEW_ROW_SHIFT_MAX = 14;
+const NOTE_SCROLLBAR_THUMB_FRACTION = 1 / 5;
 let noteViewOffsets = Array.from({ length: 9 }, () => 0);
+const noteViewPitches = Array.from({ length: 9 }, () => []);
+let noteScrollbarDrag = null;
 
 function applyOctaveOverlaysSnapshot(snapshot) {
   if (!Array.isArray(snapshot)) return;
@@ -916,6 +926,8 @@ function clearNumericOverlays(pageIdx) {
 }
 
 function resetOctaveOverlayUI() {
+  if (octaveAnchorPress) clearTimeout(octaveAnchorPress.timer);
+  octaveAnchorPress = null;
   if (octaveHoverTimer) clearTimeout(octaveHoverTimer);
   octaveHoverTimer = null;
   pendingOctaveHover = null;
@@ -944,6 +956,8 @@ let currentSetFileHandle = null;
 const hasElectronSave = !!window.electronAPI?.saveSet;
 const NON_DIRTY_WS_TYPES = new Set([
   "subscribe_events",
+  "register_ni_ui",
+  "ni_ui_toast",
   "midi_log",
   "transport",
   "clockTicks",
@@ -967,6 +981,7 @@ const NON_DIRTY_WS_TYPES = new Set([
   "set_pattern_control_latch",
   "set_midi",
   "set_monome_controls",
+  "set_monome_rotation",
   "set_mono_slide_pad",
   "set_clock_source",
   "set_clock_input",
@@ -1057,6 +1072,8 @@ let sequencerTypes = Array.from({ length: 9 }, () => "mono");
 let gridConnected = false;
 let fullScaleMode = false;
 let showMonomeControls = true;
+let monomeRotation = 0;
+let niControllerActive = false;
 let gateLedBoost = false;
 let gridDevices = [];
 let monomeControlsAvailable = false;
@@ -1154,7 +1171,10 @@ function updateMonomeControlsAvailability(devices = null) {
 }
 
 function applyMonomeControlsUI() {
-  if (showMonomeControlsToggle) showMonomeControlsToggle.checked = !!showMonomeControls;
+  if (!showMonomeControlsToggle) return;
+  showMonomeControlsToggle.checked = showMonomeControls && !niControllerActive;
+  showMonomeControlsToggle.disabled = niControllerActive;
+  showMonomeControlsToggle.title = niControllerActive ? "The NI controller is using the full note grid" : "";
 }
 
 function applyGateLedBoostUI() {
@@ -1217,6 +1237,14 @@ function sendMonomeControlsIfChanged(enabled) {
   ws.send(JSON.stringify({ type: "set_monome_controls", enabled }));
 }
 
+function applyMonomeRotation(degrees, { send = false } = {}) {
+  monomeRotation = degrees === 180 ? 180 : 0;
+  if (rotateMonomeToggle) rotateMonomeToggle.checked = monomeRotation === 180;
+  if (send && ws?.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ type: "set_monome_rotation", degrees: monomeRotation }));
+  }
+}
+
 function sendGateLedBoostIfChanged(enabled) {
   if (!ws || ws.readyState !== WebSocket.OPEN) return;
   if (lastSentState.gateLedBoost === enabled) return;
@@ -1226,18 +1254,20 @@ function sendGateLedBoostIfChanged(enabled) {
 
 function sendPatternControlToggleFromUI(action) {
   if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  const sendLauncherKey = (s) => ws.send(JSON.stringify({
+    type: "grid_key", x: PATTERN_CONTROL_GRID_X, y: PATTERN_CONTROL_GRID_Y, s, patternLauncher: true
+  }));
   if (action === "enter") {
-    ws.send(JSON.stringify({ type: "grid_key", x: PATTERN_CONTROL_GRID_X, y: PATTERN_CONTROL_GRID_Y, s: 1 }));
+    sendLauncherKey(1);
     return;
   }
   if (action === "exit") {
     // Send both press+release so exit works regardless of latch setting.
-    ws.send(JSON.stringify({ type: "grid_key", x: PATTERN_CONTROL_GRID_X, y: PATTERN_CONTROL_GRID_Y, s: 1 }));
-    ws.send(JSON.stringify({ type: "grid_key", x: PATTERN_CONTROL_GRID_X, y: PATTERN_CONTROL_GRID_Y, s: 0 }));
+    sendLauncherKey(1);
+    sendLauncherKey(0);
     return;
   }
-  const s = patternControlLatch ? 1 : (patternControlActive ? 0 : 1);
-  ws.send(JSON.stringify({ type: "grid_key", x: PATTERN_CONTROL_GRID_X, y: PATTERN_CONTROL_GRID_Y, s }));
+  sendLauncherKey(patternControlLatch ? 1 : (patternControlActive ? 0 : 1));
 }
 
 function sendBaseDivisionIfChanged(division) {
@@ -1355,6 +1385,7 @@ function connectWS() {
     log("WS connected");
     resetLastSentState();
     ws.send(JSON.stringify({ type: "subscribe_events" }));
+    ws.send(JSON.stringify({ type: "register_ni_ui", desktop: !!window.electronAPI }));
     if (MIDI_LOG && !midiLogAnnounced) {
       midiLogAnnounced = true;
       const payload = { kind: "enabled", nowTs: Number(performance.now().toFixed(3)) };
@@ -1409,7 +1440,17 @@ function connectWS() {
         }
       }
     }
-    if (msg.type === "log") {
+    if (msg.type === "ni_edit") {
+      const buttons = {
+        copy_bar: copyBarBtn,
+        copy_pattern: copyPatternBtn,
+        paste: pasteBtn,
+        clear_bar: confirmClearBar,
+        clear_pattern: confirmClearPattern
+      };
+      if (msg.action === "paste" && !lastCopyType) showToast("Nothing to paste");
+      else if (Object.hasOwn(buttons, msg.action)) buttons[msg.action]?.click();
+    } else if (msg.type === "log") {
       log(msg.message);
     } else if (msg.type === "error") {
       const text = String(msg.message || "Server error");
@@ -1533,6 +1574,7 @@ function connectWS() {
       }
       if (typeof msg.currentPage === "number") {
         serverCurrentPage = msg.currentPage;
+        if (Array.isArray(msg.noteViewPitches)) noteViewPitches[serverCurrentPage] = msg.noteViewPitches;
       }
       updatePage(msg.currentPage || currentPage, { fromServer: true });
       updateTempo(tempo, { broadcast: false });
@@ -1550,7 +1592,7 @@ function connectWS() {
       applyPatternControlLatchUI();
       if (typeof msg.gridConnected === "boolean" || typeof msg.fullScaleMode === "boolean" || typeof msg.showMonomeControls === "boolean") {
         const nextConnected = typeof msg.gridConnected === "boolean" ? msg.gridConnected : gridConnected;
-        handleGridStatus(nextConnected, msg.fullScaleMode ?? null, msg.devices ?? null, msg.showMonomeControls ?? null);
+        handleGridStatus(nextConnected, msg);
       }
       if (!receivedStateOnce || pendingDirtyReset) {
         setDirty(false);
@@ -1575,6 +1617,7 @@ function connectWS() {
       const page = Number.isFinite(msg.page) ? msg.page : currentPage;
       if (page >= 1 && page <= 8) {
         isomorphicModes[page] = !!msg.enabled;
+        if (page === currentPage) renderNoteScrollbar();
       }
     } else if (msg.type === "isomorphic_layout") {
       if (msg.layout) {
@@ -1582,7 +1625,7 @@ function connectWS() {
         applyIsomorphicLayoutUI();
       }
     } else if (msg.type === "grid_status") {
-      handleGridStatus(!!msg.connected, msg.fullScaleMode, msg.devices, msg.showMonomeControls);
+      handleGridStatus(!!msg.connected, msg);
     } else if (msg.type === "tempo") {
       tempo = msg.bpm || tempo;
       updateTempo(tempo, { broadcast: false });
@@ -1612,6 +1655,11 @@ function connectWS() {
         const next = Math.max(NOTE_VIEW_ROW_SHIFT_MIN, Math.min(NOTE_VIEW_ROW_SHIFT_MAX, Math.round(Number(msg.offset) || 0)));
         noteViewOffsets[msg.page] = next;
         if (msg.page === currentPage) applyScaleNotesUI();
+      }
+    } else if (msg.type === "note_view_pitches") {
+      if (msg.page >= 1 && msg.page <= 8 && Array.isArray(msg.pitches)) {
+        noteViewPitches[msg.page] = msg.pitches;
+        if (msg.page === currentPage) renderNoteScrollbar();
       }
     } else if (msg.type === "seq_type") {
       if (typeof msg.page === "number" && msg.seqType) {
@@ -1676,11 +1724,13 @@ function connectWS() {
       applyClockOutUI();
     } else if (msg.type === "clock_status") {
       const status = msg.data || {};
-      if (typeof status.running === "boolean") setRunningState(status.running);
+      if (typeof status.running === "boolean" && status.running !== running) setRunningState(status.running);
+      const clockChanged = (status.clockSource && status.clockSource !== clockSource)
+        || (status.clockInput && status.clockInput !== clockInputId);
       if (status.clockSource) clockSource = status.clockSource;
       if (status.clockInput) clockInputId = status.clockInput;
       if (Number.isFinite(status.tick)) setTransportTickExt(status.tick);
-      applyClockSourceUI();
+      if (clockChanged) applyClockSourceUI();
     } else if (msg.type === "pattern_status") {
       if (typeof msg.page === "number") {
         const prevPattern = currentPattern;
@@ -2529,7 +2579,7 @@ function renderFrame(frame) {
       return;
     }
     if (microVal === 0 && octaveVal === 0) return;
-    const text = `${microText ?? "0"} | ${octaveText ?? "0"}`;
+    const text = microVal && octaveVal ? `${microText} | ${octaveText}` : (microVal ? microText : octaveText);
     const drawY = Number.isFinite(entry.octaveDrawY) ? entry.octaveDrawY : entry.microDrawY;
     if (!Number.isFinite(drawY)) return;
     overlayRenderList.push({ x: entry.x, drawY, text, useSurface: true });
@@ -3514,7 +3564,8 @@ function syncSettingsInputs() {
   if (autoFillToggle) autoFillToggle.checked = !!autoFillBars;
   if (autoLoadToggle) autoLoadToggle.checked = !!autoLoadSet;
   if (patternControlLatchToggle) patternControlLatchToggle.checked = !!patternControlLatch;
-  if (showMonomeControlsToggle) showMonomeControlsToggle.checked = !!showMonomeControls;
+  applyMonomeControlsUI();
+  applyMonomeRotation(monomeRotation);
   if (gateLedBoostToggle) gateLedBoostToggle.checked = !!gateLedBoost;
   if (mdBaseSweepInput) mdBaseSweepInput.value = mdBaseSweep;
   if (monoSlidePadInput) monoSlidePadInput.value = Math.round((monoSlidePad || 0) * 100);
@@ -3592,7 +3643,7 @@ function applySettingsFromInputs() {
       sendPatternControlLatchIfChanged(patternControlLatch);
     }
   }
-  if (showMonomeControlsToggle) {
+  if (showMonomeControlsToggle && !niControllerActive) {
     const next = !!showMonomeControlsToggle.checked;
     if (showMonomeControls !== next) {
       showMonomeControls = next;
@@ -3740,9 +3791,13 @@ function setSettingsTab(panelId) {
   }
   if (showMonomeControlsToggle) {
     showMonomeControlsToggle.onchange = () => {
+      if (niControllerActive) return;
       showMonomeControls = !!showMonomeControlsToggle.checked;
       sendMonomeControlsIfChanged(showMonomeControls);
     };
+  }
+  if (rotateMonomeToggle) {
+    rotateMonomeToggle.onchange = () => applyMonomeRotation(rotateMonomeToggle.checked ? 180 : 0, { send: true });
   }
   if (gateLedBoostToggle) {
     gateLedBoostToggle.onchange = () => {
@@ -3832,6 +3887,7 @@ if (settingsSaveCfg) {
         midiSettings,
         patternControlLatch,
         showMonomeControls,
+        monomeRotation,
         gateLedBoost,
         defaultDeviceColor,
         multiColorDefault,
@@ -3872,6 +3928,7 @@ if (settingsRestoreCfg) {
     showMonomeControls = true;
     applyMonomeControlsUI();
     sendMonomeControlsIfChanged(showMonomeControls);
+    applyMonomeRotation(0, { send: true });
     gateLedBoost = false;
     applyGateLedBoostUI();
     sendGateLedBoostIfChanged(gateLedBoost);
@@ -4944,6 +5001,7 @@ function applySeqTypeUI({ deferFrame = false } = {}) {
 
 function applyPatternLauncherTypeUI() {
   if (!seqTypeWrap || !patternLauncherType) return;
+  renderNoteScrollbar();
   const showLauncher = activeUiPage === 0;
   const type = sequencerTypes[currentPage] || "mono";
   seqTypeWrap.classList.toggle("hidden", showLauncher);
@@ -5035,6 +5093,7 @@ function applyDrumNotesUI() {
 }
 
 function applyScaleNotesUI() {
+  renderNoteScrollbar();
   if (!scaleNotesWrap) return;
   const type = sequencerTypes[currentPage] || "mono";
   const show = type === "mono" || type === "poly" || type === "mdtonal" || type === "cc";
@@ -5609,7 +5668,7 @@ function applySelectionSlide(nextVal) {
 }
 
 canvas.addEventListener("mousemove", (e) => {
-  if (gridPointerActive) return;
+  if (gridPointerActive || octaveAnchorPress) return;
   const rect = canvas.getBoundingClientRect();
   const scaleX = rect.width / CANVAS_WIDTH;
   const scaleY = rect.height / CANVAS_HEIGHT;
@@ -5689,16 +5748,20 @@ canvas.addEventListener("mousemove", (e) => {
 });
 
 canvas.addEventListener("pointerdown", (e) => {
-  if (e.button !== 0) return;
+  if (e.button !== 0 || octaveAnchorPress) return;
   const hit = getGridHit(e.clientX, e.clientY);
   if (!hit.inBounds) return;
   const playable = isPlayableCell(hit);
   if (playable && octaveAnchors[currentPage].has(hit.y * WIDTH + hit.x)) {
     resetOctaveOverlayUI();
-    showOctaveControls({
-      x: hit.x, y: hit.y, rectLeft: hit.rect.left, rectTop: hit.rect.top,
-      scaleX: hit.scaleX, scaleY: hit.scaleY, octaveAnchor: true
-    });
+    const page = currentPage;
+    const { x, y, rect, scaleX, scaleY } = hit;
+    const timer = setTimeout(() => {
+      if (currentPage !== page || !octaveAnchors[page].has(y * WIDTH + x)) return;
+      showOctaveControls({ x, y, rectLeft: rect.left, rectTop: rect.top, scaleX, scaleY, octaveAnchor: true });
+    }, NOTE_EDIT_HOLD_MS);
+    octaveAnchorPress = { pointerId: e.pointerId, timer };
+    canvas.setPointerCapture(e.pointerId);
     e.preventDefault();
     return;
   }
@@ -5755,6 +5818,14 @@ canvas.addEventListener("pointerdown", (e) => {
     e.preventDefault();
   }
 });
+
+for (const eventName of ["pointerup", "pointercancel", "lostpointercapture"]) {
+  canvas.addEventListener(eventName, (event) => {
+    if (octaveAnchorPress?.pointerId !== event.pointerId) return;
+    clearTimeout(octaveAnchorPress.timer);
+    octaveAnchorPress = null;
+  });
+}
 
 canvas.addEventListener("pointermove", (e) => {
   if (!gridPointerActive) return;
@@ -6419,17 +6490,104 @@ const adjustTranspose = (delta) => {
     ws.send(JSON.stringify({ type: "set_transpose", page: currentPage, transpose: semis }));
 };
 
-const shiftNoteView = (delta) => {
+function setNoteViewOffsetFromUI(offset) {
   const type = sequencerTypes[currentPage] || "mono";
   if (type === "cc") return;
-  const current = Number.isFinite(noteViewOffsets[currentPage]) ? noteViewOffsets[currentPage] : 0;
-  const next = Math.max(NOTE_VIEW_ROW_SHIFT_MIN, Math.min(NOTE_VIEW_ROW_SHIFT_MAX, current + Math.sign(Math.round(Number(delta) || 0))));
+  if (ws?.readyState !== WebSocket.OPEN) return;
+  const current = noteViewOffsets[currentPage] || 0;
+  const next = Math.max(NOTE_VIEW_ROW_SHIFT_MIN, Math.min(NOTE_VIEW_ROW_SHIFT_MAX, Math.round(offset)));
   if (next === current) return;
   noteViewOffsets[currentPage] = next;
   applyScaleNotesUI();
-  ws?.readyState === WebSocket.OPEN &&
-    ws.send(JSON.stringify({ type: "shift_note_view", page: currentPage, delta }));
-};
+  ws.send(JSON.stringify({ type: "set_note_view_offset", page: currentPage, offset: next }));
+}
+
+function shiftNoteView(delta) {
+  setNoteViewOffsetFromUI((noteViewOffsets[currentPage] || 0) + delta);
+}
+
+function renderNoteScrollbar() {
+  const offset = noteViewOffsets[currentPage] || 0;
+  const rows = getStepRows();
+  const offscreenPitches = noteViewPitches[currentPage].filter((pitch) => pitch < offset || pitch >= offset + rows);
+  const dragging = noteScrollbarDrag?.page === currentPage;
+  const hidden = activeUiPage === 0 || isomorphicModes[currentPage] || sequencerTypes[currentPage] === "cc"
+    || (!dragging && offscreenPitches.length === 0);
+  noteScrollbar.classList.toggle("hidden", hidden);
+  if (hidden) return;
+  const range = NOTE_VIEW_ROW_SHIFT_MAX - NOTE_VIEW_ROW_SHIFT_MIN;
+  const thumbPosition = (NOTE_VIEW_ROW_SHIFT_MAX - offset) / range;
+  noteScrollbar.setAttribute("aria-valuenow", offset);
+  noteScrollbarThumb.style.top = `${100 * (1 - NOTE_SCROLLBAR_THUMB_FRACTION) * thumbPosition}%`;
+
+  const highestPitch = NOTE_VIEW_ROW_SHIFT_MAX + rows - 1;
+  const pitchCount = range + rows;
+  noteScrollbarStripes.replaceChildren(...offscreenPitches.map((pitch) => {
+    const stripe = document.createElement("span");
+    const row = Math.max(0, Math.min(pitchCount - 1, highestPitch - pitch));
+    stripe.className = "note-scrollbar-stripe";
+    stripe.style.top = `${100 * (row + 0.5) / pitchCount}%`;
+    return stripe;
+  }));
+}
+
+function moveNoteScrollbar({ clientY, shiftKey }) {
+  const track = noteScrollbar.getBoundingClientRect();
+  const travel = track.height * (1 - NOTE_SCROLLBAR_THUMB_FRACTION);
+  const ratio = (clientY - track.top - noteScrollbarDrag.grabOffset) / travel;
+  const target = NOTE_VIEW_ROW_SHIFT_MAX - ratio * (NOTE_VIEW_ROW_SHIFT_MAX - NOTE_VIEW_ROW_SHIFT_MIN);
+  if (shiftKey || ratio <= 0 || ratio >= 1) {
+    setNoteViewOffsetFromUI(target);
+    return;
+  }
+  const startOffset = noteScrollbarDrag.startOffset;
+  const rows = getStepRows();
+  const delta = target - startOffset;
+  const views = Math.sign(delta) * Math.round(Math.abs(delta) / rows);
+  setNoteViewOffsetFromUI(startOffset + views * rows);
+}
+
+noteScrollbar.style.setProperty("--note-scrollbar-thumb-height", `${100 * NOTE_SCROLLBAR_THUMB_FRACTION}%`);
+noteScrollbar.addEventListener("pointerdown", (event) => {
+  if (event.button !== 0 || noteScrollbarDrag) return;
+  event.preventDefault();
+  event.stopPropagation();
+  noteScrollbar.focus();
+  const thumb = noteScrollbarThumb.getBoundingClientRect();
+  const onThumb = event.clientY >= thumb.top && event.clientY <= thumb.bottom;
+  noteScrollbarDrag = {
+    pointer: event.pointerId,
+    page: currentPage,
+    startOffset: noteViewOffsets[currentPage] || 0,
+    grabOffset: onThumb ? event.clientY - thumb.top : thumb.height / 2
+  };
+  noteScrollbar.setPointerCapture(event.pointerId);
+  if (!onThumb) moveNoteScrollbar(event);
+});
+noteScrollbar.addEventListener("pointermove", (event) => {
+  if (noteScrollbarDrag?.pointer === event.pointerId && noteScrollbarDrag.page === currentPage) {
+    moveNoteScrollbar(event);
+  }
+});
+noteScrollbar.addEventListener("lostpointercapture", (event) => {
+  if (noteScrollbarDrag?.pointer !== event.pointerId) return;
+  noteScrollbarDrag = null;
+  renderNoteScrollbar();
+});
+noteScrollbar.addEventListener("keydown", (event) => {
+  if (event.metaKey || event.ctrlKey || event.altKey) return;
+  const offset = noteViewOffsets[currentPage] || 0;
+  const step = event.shiftKey ? 1 : getStepRows();
+  const offsets = {
+    ArrowUp: offset + step, ArrowDown: offset - step,
+    PageUp: offset + step, PageDown: offset - step,
+    Home: NOTE_VIEW_ROW_SHIFT_MAX, End: NOTE_VIEW_ROW_SHIFT_MIN
+  };
+  if (!Object.hasOwn(offsets, event.key)) return;
+  event.preventDefault();
+  event.stopPropagation();
+  setNoteViewOffsetFromUI(offsets[event.key]);
+});
 
 if (transposeDec) transposeDec.addEventListener("click", () => adjustTranspose(-1));
 if (transposeInc) transposeInc.addEventListener("click", () => adjustTranspose(1));
@@ -6653,22 +6811,17 @@ if (confirmClearBar) {
   };
 }
 
-function handleGridStatus(connected, nextFullScaleMode = null, devices = null, nextShowMonomeControls = null) {
+function handleGridStatus(connected, status) {
   const prev = gridConnected;
   gridConnected = !!connected;
-  if (Array.isArray(devices)) {
-    gridDevices = devices;
-    updateMonomeControlsAvailability(gridDevices);
-  } else {
-    updateMonomeControlsAvailability();
-  }
-  if (typeof nextShowMonomeControls === "boolean") {
-    showMonomeControls = nextShowMonomeControls;
-    applyMonomeControlsUI();
-  }
-  if (typeof nextFullScaleMode === "boolean") {
-    setFullScaleMode(nextFullScaleMode);
-  }
+  if (Array.isArray(status.devices)) gridDevices = status.devices;
+  updateMonomeControlsAvailability();
+  const preference = status.monomeControlsPreference ?? status.showMonomeControls;
+  if (typeof preference === "boolean") showMonomeControls = preference;
+  if (status.monomeRotation === 0 || status.monomeRotation === 180) applyMonomeRotation(status.monomeRotation);
+  niControllerActive = status.niControllerActive === true;
+  applyMonomeControlsUI();
+  if (typeof status.fullScaleMode === "boolean") setFullScaleMode(status.fullScaleMode);
   if (gridConnected === prev) return;
   showToast(gridConnected ? "Grid connected" : "Grid disconnected");
 }
@@ -6717,6 +6870,9 @@ function setFullScaleMode(next) {
   const enabled = !!next;
   if (fullScaleMode === enabled) return;
   fullScaleMode = enabled;
+  cancelSelectionActions();
+  clearSelection();
+  resetOctaveOverlayUI();
   document.documentElement.classList.toggle("full-scale", fullScaleMode);
   applyScaleNotesUI();
   applyDrumNotesUI();
@@ -7019,6 +7175,7 @@ function loadSavedConfig() {
     showMonomeControls = parsed.showMonomeControls;
     applyMonomeControlsUI();
   }
+  if (parsed.monomeRotation === 0 || parsed.monomeRotation === 180) applyMonomeRotation(parsed.monomeRotation);
   if (typeof parsed.gateLedBoost === "boolean") {
     gateLedBoost = parsed.gateLedBoost;
     applyGateLedBoostUI();
@@ -7145,6 +7302,9 @@ function pushSavedConfigToServer(opts = {}) {
     showMonomeControls = !!cachedConfig.showMonomeControls;
     applyMonomeControlsUI();
     sendMonomeControlsIfChanged(showMonomeControls);
+  }
+  if (cachedConfig.monomeRotation === 0 || cachedConfig.monomeRotation === 180) {
+    applyMonomeRotation(cachedConfig.monomeRotation, { send: true });
   }
   if (typeof cachedConfig.gateLedBoost === "boolean") {
     gateLedBoost = !!cachedConfig.gateLedBoost;
@@ -7347,6 +7507,9 @@ let toastTimer = null;
 function showToast(text) {
   const el = document.getElementById("toast");
   if (!el) return;
+  if (text && ws?.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ type: "ni_ui_toast", text }));
+  }
   el.textContent = text || "";
   el.classList.remove("hidden");
   el.classList.remove("fade-out");

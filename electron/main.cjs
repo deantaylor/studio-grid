@@ -4,11 +4,14 @@
 // - opens the BrowserWindow pointed at the local server
 // - on quit, closes the server and clears the monome LEDs
 
-const { app, BrowserWindow, dialog, screen, ipcMain, Menu } = require("electron");
+const { app, BrowserWindow, dialog, screen, ipcMain, Menu, powerSaveBlocker } = require("electron");
 const fs = require("node:fs/promises");
 const net = require("node:net");
 const path = require("node:path");
 const { pathToFileURL } = require("node:url");
+
+// The renderer owns Web MIDI and the internal clock, even when its window is hidden.
+app.commandLine.appendSwitch("disable-renderer-backgrounding");
 
 let chosenPort = 3000;
 let httpServer = null;
@@ -18,6 +21,8 @@ let isQuitting = false;
 let allowQuit = false;
 let rendererDirty = false;
 let cleaningUp = false;
+let niBridge = null;
+let playbackBlocker = null;
 let pauseLedOutput = () => {};
 const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const BASE_WIDTH = 1080;
@@ -204,7 +209,16 @@ async function ensureServer() {
 
   chosenPort = await findFreePort(3000);
   process.env.PORT = String(chosenPort);
-  httpServer = await startServerFn(chosenPort);
+  httpServer = await startServerFn(chosenPort, { onTransportChange: keepPlaybackActive });
+}
+
+function keepPlaybackActive(running) {
+  if (running && playbackBlocker === null) {
+    playbackBlocker = powerSaveBlocker.start("prevent-app-suspension");
+  } else if (!running && playbackBlocker !== null) {
+    powerSaveBlocker.stop(playbackBlocker);
+    playbackBlocker = null;
+  }
 }
 
 function createWindow() {
@@ -313,6 +327,14 @@ app.whenReady().then(async () => {
   await ensureServer();
   Menu.setApplicationMenu(buildAppMenu());
   createWindow();
+  if (process.env.STUDIO_GRID_NI === "1") {
+    try {
+      const { startNiBridge } = await import(pathToFileURL(path.join(__dirname, "..", "bridges", "ni", "bridge.mjs")));
+      niBridge = startNiBridge({ url: `ws://127.0.0.1:${chosenPort}` });
+    } catch (error) {
+      console.error("NI bridge could not start:", error);
+    }
+  }
 
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
@@ -355,8 +377,10 @@ ipcMain.handle("save-set", async (_event, payload) => {
 });
 
 async function cleanupAndQuit() {
+  niBridge?.close();
   if (cleaningUp) return;
   cleaningUp = true;
+  keepPlaybackActive(false);
   try {
     pauseLedOutput(true);
     serialRef?.clearAll?.();
