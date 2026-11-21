@@ -2,23 +2,20 @@
 
 ## Setup
 
-The optional macOS bridge uses the patched Encdr and Encdr View from the
-[nord-modular-ni-interface](https://github.com/deantaylor/nord-modular-ni-interface)
-checkout. That implementation supplies the Native Instruments hardware-service
-transport, the two macOS WebViews, and bounded asynchronous screen capture.
-Leave the Native Instruments hardware service running.
+The macOS Studio Grid installer includes the bridge. In Studio Grid, open
+**Settings → General** and turn on **Native Instruments bridge**. The
+setting takes effect immediately and is saved for the next launch. Leave the
+Native Instruments hardware service running and select `studiogrid` from the
+controller's instance menu.
 
-From Studio Grid, run `npm run ni:build`, then `npm run electron:ni`.
-The build finds an adjacent `modular-machine-mk3` checkout. Set
-`STUDIO_GRID_ENCDR_SOURCE` to its path if it is elsewhere.
-For a running development server, use
-`npm run ni:bridge -- ws://127.0.0.1:3000` instead. The bridge uses the selected
-Studio Grid instance as its only source of sequencer state and is listed as
-`studiogrid` in the NI controller's instance menu.
+The bridge automatically registers `studiogrid` on every connected NI
+controller with two 480 × 272 displays and an Encdr instance route. You can
+connect controllers before or after startup. They share the same Studio Grid
+session, with independent button holds and display modes.
 
-The default device is the S49 MK2. Use `STUDIO_GRID_NI_CONTROLLER` to select
-`s61`, `s88`, `maschine-mk3`, or `maschine-plus`. Set `STUDIO_GRID_NI_PREVIEW=1`
-to open a desktop preview of both displays.
+- **Displays and mapped controls** on Komplete Kontrol S49, S61, and S88 MK2,
+  Maschine MK3, and Maschine Plus.
+- **Displays** on Maschine Studio and Traktor Kontrol S5 and S8.
 
 ## Controls
 
@@ -29,20 +26,22 @@ strip and select a pattern with the display buttons. Release it to return to the
 The calibrated S49 MK2 display-button LEDs use the closest hardware colors
 to the track and edit buttons. Pattern buttons use white brightness levels
 on both the screen and the hardware, following the Monome pattern selector.
-**Key Mode** on the S49 MK2 opens Studio Grid's pattern launcher and follows
-the app's **Latch pattern launch page** setting. Its LED stays bright while
-the launcher is open.
+**Key Mode** on the S49 MK2 and **Arranger** on Maschine MK3 and Maschine Plus
+open Studio Grid's Pattern Launcher. Both follow the app's **Latch pattern
+launch page** setting, and the button LED stays bright while the launcher is open.
 
-Turn the main dial to scroll the note grid one row at a time. Turn the eight
-display knobs to edit the values shown beneath the grid and track details.
+Press and hold the main dial while turning it to scroll the note grid. Tilt
+the dial left, right, up, or down to move the current bar's notes one step or
+scale row in that direction. Turn the eight display knobs to edit the values
+shown beneath the grid and track details.
 Hold the selected track's display button to show track setup immediately.
 Knobs 1, 3, and 4 control **Type**, **MIDI Out**, and **Ch** or **MD Track**.
 Release the display button to return to the regular parameters.
 Press **<** or **>** to lower or raise the current track's Octave setting.
 The tempo knob follows the app's external clock setting.
-While the bridge owns the NI controller, Studio Grid turns off the Monome
-control row and uses all eight rows for notes. The saved Monome preference
-returns when the controller hands off to another instance or disconnects.
+While Studio Grid is active on any NI controller, the Monome uses all eight
+rows for notes. The saved Monome control-row preference returns when the last
+active NI controller switches instances or disconnects.
 
 Hold **Clear** on Komplete Kontrol or **Erase** on Maschine to show
 **Copy Bar**, **Copy Pattern**, **Paste**, and **Clear** on the right, including
@@ -56,5 +55,7 @@ alerts on the right display.
 
 ## Distribution
 
-The development bridge is GPL-3.0-or-later and runs as a separate process.
-The Electron distribution does not bundle Encdr or the bridge executable.
+The macOS installer includes the bridge executable and its source archive in
+the app's `Contents/Resources/ni` directory. The bridge is GPL-3.0-or-later
+and runs as a separate process. See [Development and builds](development.md)
+for building or previewing it from a checkout.

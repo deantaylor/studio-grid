@@ -44,6 +44,31 @@ test("NI patterns mirror the Monome selector levels including queued pulses and 
   }
 });
 
+test("NI dial directions shift notes in the current bar without scrolling", () => {
+  const state = new SGridState();
+  state.setPage(3);
+  state.setPattern(2);
+  state.setPatternLength(3, 2, 32);
+  state.setBarView(3, 2, 1);
+  state.setNoteViewOffset(3, 2);
+  const pattern = state.getPattern();
+  Object.assign(pattern.steps[0], { on: true, degree: 2, notes: [2] });
+  const note = Object.assign(pattern.steps[31], { on: true, degree: 2, notes: [2], accent: true });
+
+  for (const [nudge, x, degree] of [["right", 16, 2], ["up", 16, 3], ["left", 31, 3], ["down", 31, 2]]) {
+    const command = niControlCommand(state, { nudge }, "internal");
+    assert.equal(command.type, "shift_pattern");
+    assert.equal(command.bar, 1);
+    assert.equal(state.shiftPattern(command.page, command.pattern, command), true);
+    assert.equal(pattern.steps[x], note);
+    assert.equal(note.degree, degree);
+    assert.equal(note.accent, true);
+    assert.equal(pattern.steps[0].degree, 2);
+    assert.equal(state.getNoteViewOffset(), 2);
+  }
+  assert.equal(niControlCommand(state, { nudge: "unknown" }, "internal"), null);
+});
+
 test("NI knob movement uses the existing app commands and respects the clock and bar bounds", () => {
   const state = new SGridState();
   const turn = (knob, steps = 1, clock = "internal") => niControlCommand(state, { knob, steps }, clock);
@@ -92,6 +117,25 @@ test("NI row labels follow the visible scale and drum grid and disappear in the 
   assert.deepEqual(labels(), [65, ...state.pages[1].drumNotes.slice(0, 7).reverse()].map(String));
   state.patternControlMode = true;
   assert.deepEqual(labels(), []);
+});
+
+test("NI marks the home root once, follows scrolling, and omits the marker in other modes", () => {
+  const state = new SGridState();
+  const root = (uiMode = true) => niSurfaceSnapshot(state, [], "internal", { uiMode }).rootNoteRow;
+  assert.equal(root(), 7);
+  assert.equal(root(false), 6);
+  state.setNoteViewOffset(1, -2);
+  assert.equal(root(), 5);
+  state.setNoteViewOffset(1, 1);
+  assert.equal(root(), null);
+  state.setNoteViewOffset(1, 0);
+  state.patternControlMode = true;
+  assert.equal(root(), null);
+  state.patternControlMode = false;
+  for (const type of ["drum", "cc"]) {
+    state.setSequencerType(1, type);
+    assert.equal(root(), null);
+  }
 });
 
 test("NI page arrows transpose the current track within the Octave selector's range", () => {

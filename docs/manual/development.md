@@ -14,7 +14,18 @@ Use Node.js 20.19+, 22.13+, or 24+, as supported by the repo’s development too
 | `npm run test:manual` | Run the manual timing and scheduler probes |
 | `npm run dist` | Build the desktop installers with Electron Builder |
 
-See the [NI controller guide](ni-controller.md) for the optional bridge build and preview.
+On macOS, install a current stable Rust toolchain to build the bundled
+Native Instruments bridge. Packaging builds it automatically from the Encdr
+sources included in the repository. For an unpackaged app, run
+`npm run ni:build` once, then `npm run electron` and turn on the bridge in
+**Settings → General**. The [NI controller guide](ni-controller.md) lists the
+supported models.
+
+For a standalone preview against a development server, run
+`STUDIO_GRID_NI_PREVIEW=1 npm run ni:bridge -- ws://127.0.0.1:3000`.
+Set `STUDIO_GRID_NI_CONTROLLER` to limit discovery to one model
+(`s49`, `s61`, `s88`, `maschine-mk3`, `maschine-plus`, `maschine-studio`,
+`kontrol-s5`, or `kontrol-s8`).
 
 ## Beta releases
 

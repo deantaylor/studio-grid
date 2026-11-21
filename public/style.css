@@ -1,6 +1,6 @@
 :root {
   /* Neutrals */
-  --bg: #2E2E2E;
+  --bg: #151515;
   --surface: #3C3C3C;
   --muted: #6F6F75;
   --label: #8F8F8F;
@@ -1797,6 +1797,11 @@ canvas#grid {
 }
 #settings-modal .settings-panel .switch-option {
   flex-direction: row-reverse;
+}
+.settings-error {
+  margin: 0;
+  color: var(--label);
+  font-size: 12px;
 }
 #settings-modal .settings-panel input[type="checkbox"] {
   appearance: none;

@@ -31,12 +31,24 @@ impl Profile {
             "maschine-plus" => 0x1820,
             _ => return None,
         };
-        let komplete = matches!(name, "s49" | "s61" | "s88");
+        Self::for_product(product)
+    }
+
+    pub fn for_product(product: u16) -> Option<Self> {
+        let komplete = match product {
+            0x1610 | 0x1620 | 0x1630 => true,
+            0x1600 | 0x1820 => false,
+            _ => return None,
+        };
         Some(Self {
             product,
             track: if komplete { "track" } else { "channel" },
             pattern: "pattern",
-            launcher: (name == "s49").then_some("key_mode"),
+            launcher: match product {
+                0x1610 => Some("key_mode"),
+                0x1600 | 0x1820 => Some("arranger"),
+                _ => None,
+            },
             clear: if komplete { "clear" } else { "erase" },
             octave_buttons: if komplete {
                 ["page_left", "page_right"]
@@ -75,17 +87,35 @@ impl Profile {
             })
             .chain(
                 (!self.indexed_buttons)
-                    .then_some(["encoder_up", "encoder_down"])
+                    .then_some(self.dial_directions())
                     .into_iter()
                     .flatten(),
             )
     }
 
-    pub fn dial_button(self, name: &str) -> Option<i32> {
-        match (self.indexed_buttons, name) {
-            (true, "encoder_main_up") | (false, "encoder_up") => Some(1),
-            (true, "encoder_main_down") | (false, "encoder_down") => Some(-1),
-            _ => None,
+    pub fn dial_press(self) -> &'static str {
+        if self.indexed_buttons {
+            "encoder_main_press"
+        } else {
+            "encoder_press"
+        }
+    }
+
+    pub fn dial_directions(self) -> [&'static str; 4] {
+        if self.indexed_buttons {
+            [
+                "encoder_main_left",
+                "encoder_main_right",
+                "encoder_main_up",
+                "encoder_main_down",
+            ]
+        } else {
+            [
+                "encoder_left",
+                "encoder_right",
+                "encoder_up",
+                "encoder_down",
+            ]
         }
     }
 
@@ -305,8 +335,14 @@ impl Controls {
             self.clear_confirm = false;
             return None;
         }
-        if let Some(dial) = profile.dial_button(name) {
-            return Some(json!({ "kind": "dial", "dial": dial }));
+        if let Some(index) = profile
+            .dial_directions()
+            .iter()
+            .position(|button| *button == name)
+        {
+            let direction = ["left", "right", "up", "down"][index];
+            return (index < 2 || !self.pressed.contains(profile.dial_press()))
+                .then(|| json!({ "kind": "nudge", "nudge": direction }));
         }
         if let Some(index) = profile
             .octave_buttons
@@ -355,6 +391,11 @@ impl Controls {
         }
     }
 
+    pub fn dial_turn(&self, profile: Profile, delta: i32) -> Option<Value> {
+        (!self.launcher_active && self.pressed.contains(profile.dial_press()) && delta != 0)
+            .then(|| json!({ "kind": "dial", "dial": delta }))
+    }
+
     pub fn bright(&self, profile: Profile, name: &str) -> bool {
         self.pressed.contains(name) || (name == profile.track && !self.track_collapsed)
     }
@@ -373,6 +414,52 @@ impl Controls {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dial_turn_scrolls_while_held_and_direction_presses_nudge_notes() {
+        for controller in ["s49", "s61", "s88", "maschine-mk3", "maschine-plus"] {
+            let profile = Profile::for_name(controller).unwrap();
+            let mut controls = Controls::default();
+            assert!(controls.dial_turn(profile, 1).is_none());
+            for (button, direction) in profile
+                .dial_directions()
+                .into_iter()
+                .zip(["left", "right", "up", "down"])
+            {
+                assert_eq!(
+                    controls.button(profile, button, true),
+                    Some(json!({ "kind": "nudge", "nudge": direction }))
+                );
+                assert!(controls.button(profile, button, true).is_none());
+                assert!(controls.button(profile, button, false).is_none());
+            }
+
+            let press = profile.dial_press();
+            assert!(controls.button(profile, press, true).is_none());
+            for (button, direction) in profile.dial_directions()[..2].iter().zip(["left", "right"])
+            {
+                assert_eq!(
+                    controls.button(profile, button, true),
+                    Some(json!({ "kind": "nudge", "nudge": direction }))
+                );
+                assert!(controls.button(profile, button, false).is_none());
+            }
+            let up = profile.dial_directions()[2];
+            assert!(controls.button(profile, up, true).is_none());
+            assert!(controls.button(profile, up, false).is_none());
+            for delta in [-2, 1] {
+                assert_eq!(
+                    controls.dial_turn(profile, delta),
+                    Some(json!({ "kind": "dial", "dial": delta }))
+                );
+            }
+            controls.launcher_active = true;
+            assert!(controls.dial_turn(profile, 1).is_none());
+            assert!(controls.button(profile, press, false).is_none());
+            controls.launcher_active = false;
+            assert!(controls.dial_turn(profile, 1).is_none());
+        }
+    }
 
     #[test]
     fn track_setup_is_only_active_while_the_selected_slot_is_held() {
@@ -442,21 +529,31 @@ mod tests {
     }
 
     #[test]
-    fn key_mode_sends_launcher_edges_without_switching_selectors() {
-        let profile = Profile::for_name("s49").unwrap();
-        let mut controls = Controls::default();
-        assert!(profile.lamp_buttons().any(|name| name == "key_mode"));
-        assert_eq!(
-            controls.button(profile, "key_mode", true),
-            Some(json!({ "kind": "pattern_launcher", "pressed": true }))
-        );
-        assert!(controls.button(profile, "key_mode", true).is_none());
-        assert_eq!(controls.mode(profile), "track");
-        assert_eq!(
-            controls.button(profile, "key_mode", false),
-            Some(json!({ "kind": "pattern_launcher", "pressed": false }))
-        );
-        assert!(controls.button(profile, "key_mode", false).is_none());
+    fn launcher_buttons_send_edges_without_switching_selectors() {
+        for (controller, button) in [
+            ("s49", "key_mode"),
+            ("maschine-mk3", "arranger"),
+            ("maschine-plus", "arranger"),
+        ] {
+            let profile = Profile::for_name(controller).unwrap();
+            let mut controls = Controls::default();
+            assert!(profile.buttons().any(|name| name == button));
+            assert!(profile.lamp_buttons().any(|name| name == button));
+            assert_eq!(controls.lamp(profile, button), LedValue::Dim);
+            assert_eq!(
+                controls.button(profile, button, true),
+                Some(json!({ "kind": "pattern_launcher", "pressed": true }))
+            );
+            assert_eq!(controls.lamp(profile, button), LedValue::Bright);
+            assert!(controls.button(profile, button, true).is_none());
+            assert_eq!(controls.mode(profile), "track");
+            controls.launcher_active = true;
+            assert_eq!(
+                controls.button(profile, button, false),
+                Some(json!({ "kind": "pattern_launcher", "pressed": false }))
+            );
+            assert!(controls.button(profile, button, false).is_none());
+        }
     }
 
     #[test]

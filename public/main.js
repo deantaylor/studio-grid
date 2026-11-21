@@ -233,6 +233,9 @@ const autoFillToggle = document.getElementById("auto-fill");
 const autoLoadToggle = document.getElementById("auto-load-set");
 const patternControlLatchToggle = document.getElementById("pattern-control-latch");
 const showMonomeControlsToggle = document.getElementById("show-monome-controls");
+const niBridgeSetting = document.getElementById("ni-bridge-setting");
+const niBridgeToggle = document.getElementById("ni-bridge-enabled");
+const niBridgeError = document.getElementById("ni-bridge-error");
 const rotateMonomeToggle = document.getElementById("rotate-monome");
 const gateLedBoostToggle = document.getElementById("gate-led-boost");
 const monomeControlsWrap = document.getElementById("monome-controls-wrap");
@@ -3734,6 +3737,27 @@ function applySettingsFromInputs() {
   updateDefaultColorTrigger();
 }
 
+function showNiBridgeSetting(status) {
+  niBridgeSetting.classList.toggle("hidden", !status.supported);
+  niBridgeToggle.checked = status.enabled;
+  niBridgeError.textContent = status.error;
+  niBridgeError.classList.toggle("hidden", !status.error);
+}
+
+if (window.electronAPI?.getNiBridgeSetting && niBridgeToggle) {
+  niBridgeToggle.onchange = async () => {
+    const requested = niBridgeToggle.checked;
+    niBridgeToggle.disabled = true;
+    try {
+      showNiBridgeSetting(await window.electronAPI.setNiBridgeSetting(requested));
+    } catch {
+      showNiBridgeSetting({ supported: true, enabled: !requested, error: "The Native Instruments setting could not be changed." });
+    } finally {
+      niBridgeToggle.disabled = false;
+    }
+  };
+}
+
 function setSettingsTab(panelId) {
   settingsActiveTabId = panelId || settingsActiveTabId;
   settingsTabs.forEach((btn) => {
@@ -3749,6 +3773,9 @@ function setSettingsTab(panelId) {
   if (settingsBtn && settingsModal && settingsBackdrop) {
     const openSettings = () => {
     settingsOpen = true;
+    if (window.electronAPI?.getNiBridgeSetting && !niBridgeToggle.disabled) {
+      window.electronAPI.getNiBridgeSetting().then(showNiBridgeSetting).catch(console.error);
+    }
     syncSettingsInputs();
     setSettingsTab(settingsActiveTabId);
     settingsModal.classList.remove("hidden");

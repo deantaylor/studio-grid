@@ -3,7 +3,7 @@
   "name": "studio-grid",
   "productName": "studio-grid",
   "description": "multi-sequencer and composer for monome devices (and not).",
-  "version": "0.1.2-beta.1",
+  "version": "0.1.2-beta.4",
   "type": "module",
   "private": true,
   "main": "electron/main.cjs",
@@ -42,12 +42,26 @@
       "public/**/*",
       "fixtures/**/*",
       "node_modules/**/*",
-      "package.json"
+      "package.json",
+      "bridges/ni/bridge.mjs"
     ],
     "mac": {
       "target": [
         "dmg",
         "zip"
+      ],
+      "extraResources": [
+        {
+          "from": "bridges/ni/target/packaged/${arch}",
+          "to": "ni",
+          "filter": [
+            "studio-grid-ni",
+            "studio-grid-ni-source.tar.gz"
+          ]
+        }
+      ],
+      "binaries": [
+        "Contents/Resources/ni/studio-grid-ni"
       ]
     },
     "win": {
@@ -61,6 +75,7 @@
     "linux": {
       "target": "AppImage",
       "category": "AudioVideo"
-    }
+    },
+    "beforePack": "./electron/package-ni.cjs"
   }
 }

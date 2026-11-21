@@ -40,7 +40,8 @@
   }
   .grid { bottom: auto; grid-template-columns: repeat(16, var(--key-size)); justify-content: center; }
   .row-labels { position: absolute; top: calc(var(--content-top) + var(--label-slide, 0px)); right: 8px; width: 32px; text-align: right; color: #a0a09e; font-size: 12px; }
-  .row-label { display: grid; align-items: center; }
+  .row-label { display: flex; justify-content: flex-end; align-items: center; gap: 4px; }
+  .row-label.root-note::before { content: ""; width: 5px; height: 5px; border-radius: 50%; background: #eceae5; }
   .details.with-row-labels { padding-right: 40px; }
   .cell { border-radius: 3px; background: #393939; }
   .parameters { position: absolute; top: calc(var(--content-top) + var(--grid-height) + var(--section-gap)); inset-inline: 8px; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; font-size: 12px; }
@@ -159,7 +160,7 @@
       const alignLabelsToExpandedGrid = !showLauncher && (showButtons || !!view.clearHeld || !!noteEdit);
       const rightState = right ? [view.frame, view.toast, editing, editing && view.clearConfirm, editNote && noteEdit] : null;
       const paint = JSON.stringify([showButtons, patternMode, showLauncher, view.page, localSlots, localButtonColors,
-        rightState || [view.name, view.sequencer, view.rowLabels, alignLabelsToExpandedGrid, blankButtons, trackSetup], localParameters]);
+        rightState || [view.name, view.sequencer, view.rowLabels, view.rootNoteRow, alignLabelsToExpandedGrid, blankButtons, trackSetup], localParameters]);
       if (paint === lastPaint) return false;
       lastPaint = paint;
       const slideChanged = expanded !== showButtons;
@@ -250,7 +251,10 @@
         type.textContent = showLauncher ? "Pattern Launcher" : view.sequencer;
         const labels = view.rowLabels || [];
         root.classList.toggle("with-row-labels", !showLauncher && labels.some(Boolean));
-        noteLabels.forEach((label, row) => { label.textContent = labels[row] || ""; });
+        noteLabels.forEach((label, row) => {
+          label.textContent = labels[row] || "";
+          label.classList.toggle("root-note", row === view.rootNoteRow);
+        });
       }
       parameters.forEach(({ element, label, value }, index) => {
         const parameter = localParameters[index];

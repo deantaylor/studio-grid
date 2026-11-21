@@ -71,7 +71,7 @@ const server = http.createServer(async (req, res) => {
 
 const wss = new WebSocketServer({ server });
 const niSurfaces = new Map();
-const activeNiSurfaces = new Set();
+const activeNiSurfaces = new Map();
 let niLauncherHolder = null;
 const localNiClients = new WeakSet();
 const niUiClients = new Map();
@@ -159,12 +159,22 @@ function updateFullScaleMode(devices = null) {
   return true;
 }
 
-function updateNiOwnership(ws, active) {
+function hasNiOwnership(ws, device) {
+  return activeNiSurfaces.get(ws)?.has(device) === true;
+}
+
+function updateNiOwnership(ws, device, active) {
   const previouslyActive = activeNiSurfaces.size > 0;
-  if (active) activeNiSurfaces.add(ws);
-  else {
-    activeNiSurfaces.delete(ws);
-    if (niLauncherHolder === ws) setNiPatternLauncherPressed(ws, false);
+  let devices = activeNiSurfaces.get(ws);
+  if (active) {
+    if (!devices) activeNiSurfaces.set(ws, devices = new Set());
+    devices.add(device);
+  } else {
+    if (device === null) activeNiSurfaces.delete(ws);
+    else if (devices?.delete(device) && devices.size === 0) activeNiSurfaces.delete(ws);
+    if (niLauncherHolder?.ws === ws && (device === null || niLauncherHolder.device === device)) {
+      setNiPatternLauncherPressed(ws, niLauncherHolder.device, false);
+    }
   }
   if (previouslyActive === (activeNiSurfaces.size > 0)) return;
   updateFullScaleMode();
@@ -172,12 +182,12 @@ function updateNiOwnership(ws, active) {
   renderAndPush(true);
 }
 
-function setNiPatternLauncherPressed(ws, pressed) {
+function setNiPatternLauncherPressed(ws, device, pressed) {
   if (pressed) {
-    if (!activeNiSurfaces.has(ws) || niLauncherHolder) return;
-    if (!state.patternControlLatch) niLauncherHolder = ws;
+    if (!hasNiOwnership(ws, device) || niLauncherHolder) return;
+    if (!state.patternControlLatch) niLauncherHolder = { ws, device };
   } else {
-    if (niLauncherHolder !== ws) return;
+    if (niLauncherHolder?.ws !== ws || niLauncherHolder.device !== device) return;
     niLauncherHolder = null;
     if (!state.patternControlHeld) return;
   }
@@ -322,7 +332,7 @@ wss.on("connection", (ws, request) => {
   ws.on("close", () => {
     niSurfaces.delete(ws);
     niUiClients.delete(ws);
-    updateNiOwnership(ws, false);
+    updateNiOwnership(ws, null, false);
   });
 
   ws.on("message", (msg) => {
@@ -487,10 +497,13 @@ function handleClientMessage(ws, data) {
       pushNiSurface();
       break;
     case "ni_ownership":
-      if (niSurfaces.has(ws) && typeof data.active === "boolean") updateNiOwnership(ws, data.active);
+      if (niSurfaces.has(ws) && typeof data.active === "boolean"
+        && (data.device === undefined || (typeof data.device === "string" && data.device.length <= 64))) {
+        updateNiOwnership(ws, data.device, data.active);
+      }
       break;
     case "ni_pattern_launcher":
-      if (typeof data.pressed === "boolean") setNiPatternLauncherPressed(ws, data.pressed);
+      if (typeof data.pressed === "boolean") setNiPatternLauncherPressed(ws, data.device, data.pressed);
       break;
     case "register_ni_ui":
       if (localNiClients.has(ws)) niUiClients.set(ws, { desktop: data.desktop === true, midiOutputs: [] });
@@ -505,13 +518,14 @@ function handleClientMessage(ws, data) {
     }
     case "ni_edit": {
       if (!niSurfaces.has(ws) || state.patternControlMode || !NI_EDIT_ACTIONS.has(data.action)) break;
+      if (data.device !== undefined && !hasNiOwnership(ws, data.device)) break;
       const [renderer] = getNiUiClient();
       if (renderer) renderer.send(JSON.stringify({ type: "ni_edit", action: data.action }));
       else ws.send(JSON.stringify({ type: "ni_toast", text: "Open Studio Grid to edit" }));
       break;
     }
     case "ni_note_edit": {
-      if (!activeNiSurfaces.has(ws)) break;
+      if (!hasNiOwnership(ws, data.device)) break;
       const event = state.editHeldNote(data.action);
       if (event) dispatchGridEvents([event]);
       renderAndPush();
@@ -526,7 +540,8 @@ function handleClientMessage(ws, data) {
     case "ni_control": {
       if (!niSurfaces.has(ws) || state.patternControlMode) break;
       if ((Number.isInteger(data.slot) || Number.isInteger(data.pattern)) && state.getHeldNoteEdit()) break;
-      if (data.setupPage != null && (!activeNiSurfaces.has(ws) || state.getHeldNoteEdit())) break;
+      if ((data.device !== undefined || data.setupPage != null) && !hasNiOwnership(ws, data.device)) break;
+      if (data.setupPage != null && state.getHeldNoteEdit()) break;
       const [, ui] = getNiUiClient();
       const command = niControlCommand(state, data, clockSource, ui?.midiOutputs);
       if (command) handleClientMessage(ws, command);
@@ -680,7 +695,7 @@ function handleClientMessage(ws, data) {
       }
       break;
     case "set_pattern_control_latch":
-      if (data.enabled && niLauncherHolder) setNiPatternLauncherPressed(niLauncherHolder, false);
+      if (data.enabled && niLauncherHolder) setNiPatternLauncherPressed(niLauncherHolder.ws, niLauncherHolder.device, false);
       state.patternControlLatch = !!data.enabled;
       broadcast({ type: "pattern_control_latch", enabled: state.patternControlLatch });
       renderAndPush();

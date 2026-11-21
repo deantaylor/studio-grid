@@ -6,11 +6,12 @@ import { clearTimeout, setTimeout } from "node:timers";
 import { fileURLToPath, pathToFileURL, URL } from "node:url";
 import WebSocket from "ws";
 
-const binary = fileURLToPath(new URL("./target/debug/studio-grid-ni", import.meta.url));
+const debugBinary = fileURLToPath(new URL("./target/debug/studio-grid-ni", import.meta.url));
 
 export function startNiBridge({
   url = "ws://127.0.0.1:3000",
-  controller = process.env.STUDIO_GRID_NI_CONTROLLER || "s49",
+  binary = debugBinary,
+  controller = process.env.STUDIO_GRID_NI_CONTROLLER || "auto",
   visible = process.env.STUDIO_GRID_NI_PREVIEW === "1"
 } = {}) {
   const endpoint = new URL(url);
@@ -19,16 +20,22 @@ export function startNiBridge({
   }
 
   const child = spawn(binary, [controller, ...(visible ? ["--visible"] : [])], {
-    env: { ...process.env, NORD_MODULAR_NI_BACKGROUND: "1" },
+    env: { ...process.env, STUDIO_GRID_NI_BACKGROUND: "1" },
     stdio: ["pipe", "pipe", "inherit"]
   });
+  const ready = new Promise((resolve, reject) => {
+    child.once("spawn", resolve);
+    child.once("error", reject);
+  });
+  const closed = new Promise((resolve) => child.once("close", resolve));
   let socket;
+  let stopTimer;
   let retry;
   let stopped = false;
   let latest;
   let toast = "";
   let toastTimer;
-  let controllerActive = false;
+  const activeDevices = new Set();
 
   function updateScreens() {
     if (latest && child.stdin.writable) {
@@ -41,7 +48,9 @@ export function startNiBridge({
     socket = new WebSocket(endpoint);
     socket.on("open", () => {
       socket.send(JSON.stringify({ type: "subscribe_ni_surface" }));
-      if (controllerActive) socket.send(JSON.stringify({ type: "ni_ownership", active: true }));
+      for (const device of activeDevices) {
+        socket.send(JSON.stringify({ type: "ni_ownership", device, active: true }));
+      }
     });
     socket.on("message", (message) => {
       const event = JSON.parse(message.toString());
@@ -71,46 +80,58 @@ export function startNiBridge({
     let event;
     try { event = JSON.parse(line); } catch { return; }
     if (event.kind === "ownership") {
-      controllerActive = event.active === true;
+      const { device, active } = event;
+      if (active) activeDevices.add(device);
+      else activeDevices.delete(device);
       if (socket?.readyState === WebSocket.OPEN) {
-        socket.send(JSON.stringify({ type: "ni_ownership", active: controllerActive }));
+        socket.send(JSON.stringify({ type: "ni_ownership", device, active }));
       }
       return;
     }
     if (socket?.readyState !== WebSocket.OPEN) return;
     const { kind, ...data } = event;
-    if (["slot", "pattern", "dial", "knob", "octave"].includes(kind)) {
+    if (["slot", "pattern", "dial", "nudge", "knob", "octave"].includes(kind)) {
       socket.send(JSON.stringify({ type: "ni_control", ...data }));
     } else if (kind === "pattern_launcher") {
-      socket.send(JSON.stringify({ type: "ni_pattern_launcher", pressed: data.pressed }));
+      socket.send(JSON.stringify({ type: "ni_pattern_launcher", ...data }));
     } else if (kind === "edit") {
-      socket.send(JSON.stringify({ type: "ni_edit", action: data.action }));
+      socket.send(JSON.stringify({ type: "ni_edit", ...data }));
     } else if (kind === "note_edit") {
-      socket.send(JSON.stringify({ type: "ni_note_edit", action: data.action }));
+      socket.send(JSON.stringify({ type: "ni_note_edit", ...data }));
     }
   });
 
   function close() {
-    if (stopped) return;
-    stopped = true;
-    clearTimeout(retry);
-    clearTimeout(toastTimer);
-    socket?.close();
-    child.stdin.end();
+    if (!stopped) {
+      stopped = true;
+      clearTimeout(retry);
+      clearTimeout(toastTimer);
+      socket?.close();
+      child.stdin.end();
+      if (child.exitCode === null && child.signalCode === null && child.pid) {
+        stopTimer = setTimeout(() => child.kill("SIGKILL"), 5000);
+        stopTimer.unref();
+      }
+    }
+    return closed;
   }
 
   child.stdin.on("error", close);
-  child.on("error", (error) => {
-    console.error(`NI bridge could not start: ${error.message}. Run npm run ni:build first.`);
+  child.on("error", close);
+  child.once("close", () => {
+    clearTimeout(stopTimer);
     close();
   });
-  child.on("exit", close);
   connect();
-  return { close };
+  return { ready, closed, close };
 }
 
 if (import.meta.url === pathToFileURL(process.argv[1] || "").href) {
   const bridge = startNiBridge({ url: process.argv[2] });
+  bridge.ready.catch((error) => {
+    console.error(`NI bridge could not start: ${error.message}. Run npm run ni:build first.`);
+    process.exitCode = 1;
+  });
   process.once("SIGINT", bridge.close);
   process.once("SIGTERM", bridge.close);
 }

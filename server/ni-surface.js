@@ -6,6 +6,7 @@ const NOTE_NAMES = ["C", "C♯", "D", "D♯", "E", "F", "F♯", "G", "G♯", "A"
 const SEQUENCER_TYPES = { mono: "Mono", poly: "Poly", drum: "Drum", cc: "Control Change", mdtonal: "MDTonal" };
 const LENGTHS = [16, 32, 48, 64];
 const PATTERN_SCALES = [1, 2, 4];
+const NUDGE_DIRECTIONS = { left: [-1, 0], right: [1, 0], up: [0, -1], down: [0, 1] };
 
 const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
 const pitchClass = (value) => ((value % 12) + 12) % 12;
@@ -26,13 +27,17 @@ export function niSurfaceSnapshot(state, frame, clockSource, { uiMode = true, mi
   const mdtonal = track.sequencerType === "mdtonal";
   const noteEdit = state.getHeldNoteEdit();
   const rowLabels = [];
+  let rootNoteRow = null;
   if (!state.patternControlMode && !state.isIsomorphicMode(page) && track.sequencerType !== "cc") {
     const intervals = state.getScaleIntervals(state.scale.mode);
     for (let y = 0; y < 8; y += 1) {
       const row = state.getRowInfo(y, { uiMode });
       if (!row.stepRow) rowLabels.push("");
       else if (track.sequencerType === "drum") rowLabels.push(String(state.getDrumPitch(track, row.degree, row.octaveOffset)));
-      else rowLabels.push(NOTE_NAMES[pitchClass(state.scale.root + (intervals[row.degree] ?? 0))]);
+      else {
+        rowLabels.push(NOTE_NAMES[pitchClass(state.scale.root + (intervals[row.degree] ?? 0))]);
+        if (row.degree === 0 && row.octaveOffset === 0) rootNoteRow = y;
+      }
     }
   }
   return {
@@ -46,6 +51,7 @@ export function niSurfaceSnapshot(state, frame, clockSource, { uiMode = true, mi
       canOctave: state.isOctaveShiftingEnabled() && noteEdit.info.seqType !== "drum"
     } : null,
     rowLabels,
+    rootNoteRow,
     slots: state.deviceOrder.map((device, index) => ({
       number: index + 1,
       page: device,
@@ -85,7 +91,7 @@ export function niSurfaceSnapshot(state, frame, clockSource, { uiMode = true, mi
 }
 
 export function niControlCommand(state, data, clockSource, midiOutputs = []) {
-  const { slot, pattern: patternSlot, dial, knob, steps, transposeOctave, setupPage } = data;
+  const { slot, pattern: patternSlot, dial, nudge, knob, steps, transposeOctave, setupPage } = data;
   if (Number.isInteger(slot) && slot >= 1 && slot <= 8) {
     const page = state.deviceOrder[slot - 1];
     return { type: "set_page", page };
@@ -107,6 +113,13 @@ export function niControlCommand(state, data, clockSource, midiOutputs = []) {
       page: state.currentPage,
       offset: state.getNoteViewOffset() + dial
     };
+  }
+  if (typeof nudge === "string" && Object.hasOwn(NUDGE_DIRECTIONS, nudge)) {
+    if (state.getHeldNoteEdit()) return null;
+    const [dx, dy] = NUDGE_DIRECTIONS[nudge];
+    const page = state.currentPage;
+    const pattern = state.pages[page].active_pattern;
+    return { type: "shift_pattern", page, pattern, bar: state.getPattern().barView || 0, dx, dy };
   }
   if (!Number.isInteger(steps) || steps === 0 || Math.abs(steps) > 64) return null;
   const page = state.currentPage;

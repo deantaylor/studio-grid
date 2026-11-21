@@ -11,8 +11,8 @@ studio:grid is a MIDI step sequencer for hardware synths and drum machines. Buil
 
 ## Screens
 
-![Desktop sequencer showing a 303 pattern in a project with SH-101, Pad, Lead, Bass and other tracks](docs/screens/sequencer.png)
+![Desktop sequencer playing measure two of a 303 pattern, with measure progress under each track](docs/screens/sequencer.png)
 
-![Desktop Pattern Launcher showing which patterns are active or available on eight tracks](docs/screens/pattern-launcher.png)
+![Desktop Pattern Launcher showing active patterns across eight tracks during playback](docs/screens/pattern-launcher.png)
 
-![Dual NI controller displays showing the SH-101 track and its sequence grid](docs/screens/ni-controller.png)
+![Dual NI controller displays showing the SH-101 pattern, root-note dot, playhead, and active measure](docs/screens/ni-controller.png)

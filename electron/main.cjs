@@ -9,6 +9,7 @@ const fs = require("node:fs/promises");
 const net = require("node:net");
 const path = require("node:path");
 const { pathToFileURL } = require("node:url");
+const { createNiSettings } = require("./ni-settings.cjs");
 
 // The renderer owns Web MIDI and the internal clock, even when its window is hidden.
 app.commandLine.appendSwitch("disable-renderer-backgrounding");
@@ -21,7 +22,8 @@ let isQuitting = false;
 let allowQuit = false;
 let rendererDirty = false;
 let cleaningUp = false;
-let niBridge = null;
+const niSettings = createNiSettings(app);
+const niServerUrl = () => `ws://127.0.0.1:${chosenPort}`;
 let playbackBlocker = null;
 let pauseLedOutput = () => {};
 const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -326,15 +328,8 @@ function createWindow() {
 app.whenReady().then(async () => {
   await ensureServer();
   Menu.setApplicationMenu(buildAppMenu());
+  await niSettings.start(niServerUrl());
   createWindow();
-  if (process.env.STUDIO_GRID_NI === "1") {
-    try {
-      const { startNiBridge } = await import(pathToFileURL(path.join(__dirname, "..", "bridges", "ni", "bridge.mjs")));
-      niBridge = startNiBridge({ url: `ws://127.0.0.1:${chosenPort}` });
-    } catch (error) {
-      console.error("NI bridge could not start:", error);
-    }
-  }
 
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
@@ -362,6 +357,11 @@ ipcMain.on("dirty-changed", (_event, payload) => {
   rendererDirty = !!payload?.dirty;
 });
 
+ipcMain.handle("get-ni-bridge-setting", () => niSettings.status());
+ipcMain.handle("set-ni-bridge-setting", (_event, enabled) =>
+  cleaningUp ? niSettings.status() : niSettings.setEnabled(niServerUrl(), enabled)
+);
+
 ipcMain.handle("save-set", async (_event, payload) => {
   const data = payload?.data;
   if (!data || typeof data !== "object") {
@@ -377,9 +377,9 @@ ipcMain.handle("save-set", async (_event, payload) => {
 });
 
 async function cleanupAndQuit() {
-  niBridge?.close();
   if (cleaningUp) return;
   cleaningUp = true;
+  await niSettings.stop();
   keepPlaybackActive(false);
   try {
     pauseLedOutput(true);
