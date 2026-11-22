@@ -16,3 +16,7 @@ studio:grid is a MIDI step sequencer for hardware synths and drum machines. Buil
 ![Desktop Pattern Launcher showing active patterns across eight tracks during playback](docs/screens/pattern-launcher.png)
 
 ![Dual NI controller displays showing the SH-101 pattern, root-note dot, playhead, and active measure](docs/screens/ni-controller.png)
+
+## License
+
+Studio Grid is licensed under the [GNU General Public License, version 3 or later](LICENSE). The [NOTICE](NOTICE) file preserves the MIT notice for portions previously released under that license.
