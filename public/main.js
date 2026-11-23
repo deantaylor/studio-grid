@@ -1498,7 +1498,10 @@ function connectWS() {
         gateLength = normalizeGateLength(msg.gateLength);
         applyGateLengthUI();
       }
-      midiSettings = msg.midi || midiSettings;
+      if (Array.isArray(msg.midi)) {
+        midiSettings = msg.midi;
+        lastSentState.midiSettings = msg.midi.map((cfg) => ({ ...cfg }));
+      }
       if (typeof msg.monoSlidePad === "number") {
         monoSlidePad = Math.max(0, Math.min(0.5, Number(msg.monoSlidePad)));
       }
@@ -1675,7 +1678,7 @@ function connectWS() {
       if (msg.page >= 1 && msg.page <= 8 && msg.cfg) {
         if (midiSettings[msg.page]?.outId !== msg.cfg.outId) panicAll();
         midiSettings[msg.page] = msg.cfg;
-        lastSentState.midiSettings[msg.page] = msg.cfg;
+        lastSentState.midiSettings[msg.page] = { ...msg.cfg };
         if (msg.page === currentPage) applyPageMidi();
       }
     } else if (msg.type === "seq_type") {
