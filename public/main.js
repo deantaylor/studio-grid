@@ -159,7 +159,6 @@ let serverCurrentPage = currentPage;
 let currentPattern = 1;
 let selectedDevicePage = currentPage;
 let activeUiPage = currentPage; // 1-8 device pages, 0 = pattern launcher
-let lastFocusedDevice = currentPage;
 let pendingLauncherExitPage = null;
 let deviceToolbarBaseHeight = null;
 let baseDivision = 16; // base step division (1/16)
@@ -881,6 +880,7 @@ let frameReady = Array(9).fill(false);
 let isomorphicModes = Array(9).fill(false);
 let isomorphicLayout = { base: 48, stepX: 1, stepY: 3 };
 const BLANK_FRAME = new Array(WIDTH * HEIGHT).fill(0);
+let launcherFrame = BLANK_FRAME;
 let suppressFrameUntilNext = Array(9).fill(false);
 let overlays = Array.from({ length: 9 }, () => []);
 const octaveAnchors = Array.from({ length: 9 }, () => new Set());
@@ -1259,20 +1259,30 @@ function sendGateLedBoostIfChanged(enabled) {
 
 function sendPatternControlToggleFromUI(action) {
   if (!ws || ws.readyState !== WebSocket.OPEN) return;
-  const sendLauncherKey = (s) => ws.send(JSON.stringify({
-    type: "grid_key", x: PATTERN_CONTROL_GRID_X, y: PATTERN_CONTROL_GRID_Y, s, patternLauncher: true
+  ws.send(JSON.stringify({
+    type: "grid_key", x: PATTERN_CONTROL_GRID_X, y: PATTERN_CONTROL_GRID_Y,
+    s: action === "exit" && !patternControlLatch ? 0 : 1, patternLauncher: true
   }));
-  if (action === "enter") {
-    sendLauncherKey(1);
-    return;
+}
+
+function setPatternLauncherActive(enabled) {
+  if (patternControlActive === enabled) return;
+  patternControlActive = enabled;
+  if (enabled) {
+    activeUiPage = 0;
+    selectedDevicePage = 0;
+    cancelSelectionActions();
+    resetOctaveOverlayUI();
+    closeAllCustomSelects();
+    closeDeviceMenu();
+    closeNoteMenu();
+    closePatternLengthMenu();
+    closeSeqModal();
+    pendingSeqType = null;
+    if (confirmModal && !confirmModal.classList.contains("hidden")) showConfirmModal(false);
+  } else {
+    launcherFrame = BLANK_FRAME;
   }
-  if (action === "exit") {
-    // Send both press+release so exit works regardless of latch setting.
-    sendLauncherKey(1);
-    sendLauncherKey(0);
-    return;
-  }
-  sendLauncherKey(patternControlLatch ? 1 : (patternControlActive ? 0 : 1));
 }
 
 function sendBaseDivisionIfChanged(division) {
@@ -1472,7 +1482,9 @@ function connectWS() {
       if (!Number.isFinite(targetPage) || targetPage < 1 || targetPage > 8) {
         targetPage = currentPage;
       }
-      if (Array.isArray(incoming)) {
+      if (msg.patternControlMode) {
+        if (Array.isArray(incoming)) launcherFrame = incoming;
+      } else if (Array.isArray(incoming)) {
         frames[targetPage] = incoming.slice();
         octaveAnchors[targetPage] = new Set(msg.octaveAnchors || []);
         frameReady[targetPage] = true;
@@ -1483,7 +1495,7 @@ function connectWS() {
       if (Array.isArray(msg.octaveOverlays)) {
         applyOctaveOverlaysSnapshot(msg.octaveOverlays);
       }
-      if (targetPage === currentPage) {
+      if (patternControlActive || (!msg.patternControlMode && targetPage === currentPage)) {
         renderFrame(frames[currentPage]);
       }
       renderDeviceTabProgressFrame();
@@ -1491,6 +1503,7 @@ function connectWS() {
       if (msg.scale) scale = msg.scale;
       applyScaleUI();
     } else if (msg.type === "state") {
+      if (typeof msg.patternControlMode === "boolean") setPatternLauncherActive(msg.patternControlMode);
       tempo = msg.tempo || tempo;
       swing = msg.swing || swing;
       baseDivision = msg.baseDivision || baseDivision;
@@ -1810,31 +1823,22 @@ function connectWS() {
         if (msg.page === currentPage) renderFrame(frames[currentPage]);
       }
     } else if (msg.type === "pattern_control") {
-      const wasActive = patternControlActive;
-      patternControlActive = !!msg.enabled;
-      if (patternControlActive) {
-        if (!wasActive) lastFocusedDevice = currentPage;
-        activeUiPage = 0;
-        selectedDevicePage = 0;
+      setPatternLauncherActive(!!msg.enabled);
+      if (!patternControlActive) {
+        const requestedPage = pendingLauncherExitPage;
         pendingLauncherExitPage = null;
-      } else {
-        const nextPage = pendingLauncherExitPage || lastFocusedDevice || currentPage;
-        pendingLauncherExitPage = null;
-        activeUiPage = nextPage;
-        selectedDevicePage = nextPage;
-        updatePage(nextPage, { fromServer: false });
+        updatePage(requestedPage || currentPage, { fromServer: !requestedPage });
       }
       applyPatternLauncherTypeUI();
       renderTabs();
       renderDeviceTabProgressFrame();
-      if (msg.enabled) {
-        clearNumericOverlays(currentPage);
-        resetOctaveOverlayUI();
-        renderFrame(frames[currentPage]);
-      } else if (Array.isArray(msg.octaveOverlays)) {
+      if (Array.isArray(msg.octaveOverlays)) {
         applyOctaveOverlaysSnapshot(msg.octaveOverlays);
-        renderFrame(frames[currentPage]);
       }
+      renderFrame(frames[currentPage]);
+    } else if (msg.type === "pattern_control_latch") {
+      patternControlLatch = !!msg.enabled;
+      applyPatternControlLatchUI();
     } else if (msg.type === "bar_playhead") {
       if (typeof msg.page === "number" && typeof msg.pattern === "number") {
         if (!barPlayheads[msg.page]) barPlayheads[msg.page] = [];
@@ -2459,7 +2463,7 @@ function sendMidiClockTransport(kind) {
 }
 
 function renderFrame(frame) {
-  const safeFrame = Array.isArray(frame) ? frame : new Array(WIDTH * HEIGHT).fill(0);
+  const safeFrame = patternControlActive ? launcherFrame : (Array.isArray(frame) ? frame : BLANK_FRAME);
   const displayFrame = safeFrame.slice();
   const patIdx = activePatterns[currentPage] || 1;
   const len = (patternLengths[currentPage] && patternLengths[currentPage][patIdx]) || 16;
@@ -2467,7 +2471,7 @@ function renderFrame(frame) {
   const bar = (barViews[currentPage] && barViews[currentPage][patIdx]) || 0;
   const rem = len % 16;
   const lastBar = Math.max(0, bars - 1);
-  if (rem > 0 && bar === lastBar) {
+  if (!patternControlActive && rem > 0 && bar === lastBar) {
     const dimLevel = Math.max(1, clampLedLevel((ledLevels.pattern_inactive || 4) * 0.5));
     const rows = getStepRows();
     for (let x = rem; x < 16; x++) {
@@ -2477,7 +2481,7 @@ function renderFrame(frame) {
       }
     }
   }
-  if (!Array.isArray(frame)) frames[currentPage] = safeFrame;
+  if (!patternControlActive && !Array.isArray(frame)) frames[currentPage] = safeFrame;
   ctx.clearRect(0, 0, canvas.width, canvas.height);
   displayFrame.forEach((level, idx) => {
     const x = idx % WIDTH;
@@ -2493,6 +2497,7 @@ function renderFrame(frame) {
       ctx.fillRect(px, py, CELL_SIZE, CELL_SIZE);
     }
   });
+  if (patternControlActive) return;
 
   const selection = selectionByPage[currentPage];
   const surfaceColor = resolveCssColorVar("--surface") || resolveCssColorVar("--panel-strong") || resolveCssColorVar("--bg");
@@ -2629,7 +2634,7 @@ function renderFrame(frame) {
 }
 
 function renderFrameIfReady() {
-  if (!frameReady[currentPage] || suppressFrameUntilNext[currentPage]) return;
+  if (!patternControlActive && (!frameReady[currentPage] || suppressFrameUntilNext[currentPage])) return;
   renderFrame(frames[currentPage]);
 }
 
@@ -4551,6 +4556,7 @@ function renderTabs({ force = false } = {}) {
       deviceTabHoldFired.delete(page);
       const timer = setTimeout(() => {
         deviceTabHoldTimers.delete(page);
+        if (patternControlActive) return;
         deviceTabHoldFired.add(page);
         ws?.readyState === WebSocket.OPEN &&
           ws.send(JSON.stringify({ type: "set_isomorphic_mode", page, enabled: !isomorphicModes[page] }));
@@ -4578,11 +4584,12 @@ function renderTabs({ force = false } = {}) {
     btn.oncontextmenu = (e) => {
       e.preventDefault();
       e.stopPropagation();
+      if (patternControlActive) return;
       focusPage();
       menuTargetPage = page;
       openDeviceMenu(e.clientX, e.clientY);
     };
-    btn.draggable = true;
+    btn.draggable = !patternControlActive;
     btn.addEventListener("dragstart", (e) => {
       draggedDevicePage = page;
       btn.classList.add("dragging");
@@ -4621,7 +4628,6 @@ function renderTabs({ force = false } = {}) {
   launcherBtn.onclick = (e) => {
     e.preventDefault();
     if (activeUiPage === 0 || patternControlActive) return;
-    lastFocusedDevice = currentPage;
     sendPatternControlToggleFromUI("enter");
   };
   tabs.append(launcherBtn);
@@ -4880,7 +4886,7 @@ function renderBarRow() {
     if (isPlaying) btn.classList.add("playing");
     const enabled = i < bars;
     if (i === currentBar) btn.classList.add("active");
-    if (!enabled) {
+    if (!enabled || patternControlActive) {
       btn.classList.add("disabled");
       btn.disabled = true;
     } else {
@@ -4932,7 +4938,6 @@ function updatePage(page, { fromServer = false, deferFrame = false } = {}) {
   if (!page || page < 1 || page > 8) return;
   const prevPage = currentPage;
   currentPage = page;
-  if (!patternControlActive) lastFocusedDevice = page;
   if (!patternControlActive) activeUiPage = page;
   selectedDevicePage = activeUiPage;
   if (prevPage !== page) {
@@ -4990,7 +4995,7 @@ function updateTd3ExportVisibility() {
   const cfg = midiSettings[currentPage] || {};
   const out = cfg.outId && midiAccess?.outputs.get(cfg.outId);
   const isTd3 = !!(out && TD3_NAME_REGEX.test(out.name || ""));
-  const show = isTd3 && type === "mono";
+  const show = !patternControlActive && isTd3 && type === "mono";
   exportTd3Btn.classList.toggle("hidden", !show);
 }
 
@@ -5020,20 +5025,18 @@ function applyPageTranspose() {
   const val = transposes[currentPage] ?? 0;
   const oct = Math.max(-2, Math.min(2, Math.round(val / 12)));
   const type = sequencerTypes[currentPage] || "mono";
-  const disableTranspose = type === "drum" || type === "cc";
+  const disableTranspose = patternControlActive || type === "drum" || type === "cc";
   if (transposeDisplay) transposeDisplay.textContent = `${oct}`;
   if (transposeDec) transposeDec.disabled = disableTranspose || oct <= -2;
   if (transposeInc) transposeInc.disabled = disableTranspose || oct >= 2;
   const transposeWrap = document.querySelector(".transpose-switch");
-  if (transposeWrap) transposeWrap.classList.toggle("hidden", type === "cc");
+  if (transposeWrap) transposeWrap.classList.toggle("hidden", patternControlActive || type === "cc");
 }
 
 function applySeqTypeUI({ deferFrame = false } = {}) {
   if (!seqTypeSel) return;
   const type = sequencerTypes[currentPage] || "mono";
   seqTypeSel.value = type;
-  const transposeWrap = document.querySelector(".transpose-switch");
-  if (transposeWrap) transposeWrap.classList.toggle("hidden", false);
   if (midiChan) {
     const disableChan = type === "mdtonal";
     midiChan.dataset.readonly = disableChan ? "true" : "false";
@@ -5046,12 +5049,7 @@ function applySeqTypeUI({ deferFrame = false } = {}) {
       midiChan.removeAttribute("tabindex");
     }
   }
-  applyPageTranspose();
-  applyDrumNotesUI();
   applyScaleNotesUI();
-  applyCCUI();
-  applyMDTonalUI();
-  updateTd3ExportVisibility();
   applyDeviceBadge();
   applyPatternLauncherTypeUI();
   const hasOverride = deviceColorOverrides[currentPage];
@@ -5062,6 +5060,11 @@ function applySeqTypeUI({ deferFrame = false } = {}) {
 function applyPatternLauncherTypeUI() {
   if (!seqTypeWrap || !patternLauncherType) return;
   renderNoteScrollbar();
+  applyDrumNotesUI();
+  applyCCUI();
+  applyMDTonalUI();
+  applyPageTranspose();
+  updateTd3ExportVisibility();
   const showLauncher = activeUiPage === 0;
   const type = sequencerTypes[currentPage] || "mono";
   seqTypeWrap.classList.toggle("hidden", showLauncher);
@@ -5070,10 +5073,6 @@ function applyPatternLauncherTypeUI() {
   if (scaleNotesWrap) {
     const showScaleNotes = type === "mono" || type === "poly" || type === "mdtonal" || type === "cc";
     scaleNotesWrap.classList.toggle("hidden", showLauncher || !showScaleNotes);
-  }
-  const transposeWrap = document.querySelector(".transpose-switch");
-  if (transposeWrap) {
-    transposeWrap.classList.toggle("hidden", showLauncher || type === "cc");
   }
   if (midiSel) {
     const midiLabel = midiSel.closest("label");
@@ -5084,21 +5083,11 @@ function applyPatternLauncherTypeUI() {
     if (chanLabel) chanLabel.classList.toggle("hidden", showLauncher);
   }
   if (midiChanLabel) midiChanLabel.classList.toggle("hidden", showLauncher || type === "mdtonal");
-  const mdWrap = document.getElementById("md-config");
-  if (mdWrap) mdWrap.classList.toggle("hidden", showLauncher || type !== "mdtonal");
-  const ccWrap = document.getElementById("cc-config");
-  if (ccWrap) ccWrap.classList.toggle("hidden", showLauncher || type !== "cc");
-  if (exportTd3Btn) {
-    if (showLauncher) exportTd3Btn.classList.add("hidden");
-    else updateTd3ExportVisibility();
-  }
   const disableControls = (el) => {
     if (!el) return;
     el.disabled = showLauncher;
   };
   disableControls(seqTypeSel);
-  disableControls(transposeDec);
-  disableControls(transposeInc);
   disableControls(midiSel);
   disableControls(midiChan);
   disableControls(patternSelect);
@@ -5126,7 +5115,7 @@ function applyDrumNotesUI() {
   const type = sequencerTypes[currentPage] || "mono";
   const drumWrap = document.getElementById("drum-notes");
   if (drumWrap) {
-    drumWrap.classList.toggle("hidden", type !== "drum");
+    drumWrap.classList.toggle("hidden", patternControlActive || type !== "drum");
     drumWrap.classList.toggle("full-scale-extra", fullScaleMode && type === "drum");
     drumWrap.classList.toggle("compact", !fullScaleMode && type === "drum");
   }
@@ -5142,7 +5131,7 @@ function applyDrumNotesUI() {
       const val = map[row] ?? DEFAULT_DRUMS[row] ?? 36;
       const allowExtra = fullScaleMode && type === "drum";
       const isExtra = row === 7;
-      const disabled = type !== "drum" || (isExtra && !allowExtra);
+      const disabled = patternControlActive || type !== "drum" || (isExtra && !allowExtra);
       input.disabled = disabled;
       if (disabled) editingDrumInputs.delete(input);
       if (disabled || !editingDrumInputs.has(input)) {
@@ -5156,7 +5145,7 @@ function applyScaleNotesUI() {
   renderNoteScrollbar();
   if (!scaleNotesWrap) return;
   const type = sequencerTypes[currentPage] || "mono";
-  const show = type === "mono" || type === "poly" || type === "mdtonal" || type === "cc";
+  const show = !patternControlActive && (type === "mono" || type === "poly" || type === "mdtonal" || type === "cc");
   scaleNotesWrap.classList.toggle("hidden", !show);
   if (!show) return;
 
@@ -5212,24 +5201,26 @@ function applyScaleNotesUI() {
 function applyCCUI() {
   const type = sequencerTypes[currentPage] || "mono";
   const ccWrap = document.getElementById("cc-config");
-  if (ccWrap) ccWrap.classList.toggle("hidden", type !== "cc");
+  const enabled = !patternControlActive && type === "cc";
+  if (ccWrap) ccWrap.classList.toggle("hidden", !enabled);
   const raw = ccNumbers[currentPage];
   const safe = Math.max(0, Math.min(127, Number.isFinite(raw) ? raw : DEFAULT_CC));
   if (ccNumberInput) {
     // avoid wiping in-progress edits
     if (!ccNumberEditing) ccNumberInput.value = safe;
-    ccNumberInput.disabled = type !== "cc";
+    ccNumberInput.disabled = !enabled;
   }
 }
 
 function applyMDTonalUI() {
   const type = sequencerTypes[currentPage] || "mono";
   const wrap = document.getElementById("md-config");
-  if (wrap) wrap.classList.toggle("hidden", type !== "mdtonal");
+  const enabled = !patternControlActive && type === "mdtonal";
+  if (wrap) wrap.classList.toggle("hidden", !enabled);
   if (mdTrackSel) {
     const current = Math.max(1, Math.min(16, Math.round(mdTracks[currentPage] || 1)));
     mdTrackSel.value = `${current}`;
-    mdTrackSel.disabled = type !== "mdtonal";
+    mdTrackSel.disabled = !enabled;
   }
 }
 
@@ -5242,13 +5233,11 @@ function sendGridTapFromClient(clientX, clientY) {
     closeNoteMenu();
   }
   // send a full press+release tap so mouse input only toggles notes on/off
-  if (ws?.readyState === WebSocket.OPEN) {
-    ws.send(JSON.stringify({ type: "grid_key", x, y, s: 1 }));
-    ws.send(JSON.stringify({ type: "grid_key", x, y, s: 0 }));
-  }
+  toggleGridCell(x, y);
 }
 
 function handleCanvasContextMenu(clientX, clientY) {
+  if (patternControlActive) return;
   const rect = canvas.getBoundingClientRect();
   const x = Math.floor((clientX - rect.left) / (rect.width / WIDTH));
   const y = Math.floor((clientY - rect.top) / (rect.height / HEIGHT));
@@ -5441,8 +5430,9 @@ function isPlayableCell(hit) {
 
 function toggleGridCell(x, y) {
   if (ws?.readyState !== WebSocket.OPEN) return;
-  ws.send(JSON.stringify({ type: "grid_key", x, y, s: 1 }));
-  ws.send(JSON.stringify({ type: "grid_key", x, y, s: 0 }));
+  const key = { type: "grid_key", x, y, patternControlMode: patternControlActive };
+  ws.send(JSON.stringify({ ...key, s: 1 }));
+  ws.send(JSON.stringify({ ...key, s: 0 }));
 }
 
 function requestStepsState(steps, callback) {
@@ -5728,7 +5718,7 @@ function applySelectionSlide(nextVal) {
 }
 
 canvas.addEventListener("mousemove", (e) => {
-  if (gridPointerActive || octaveAnchorPress) return;
+  if (patternControlActive || gridPointerActive || octaveAnchorPress) return;
   const rect = canvas.getBoundingClientRect();
   const scaleX = rect.width / CANVAS_WIDTH;
   const scaleY = rect.height / CANVAS_HEIGHT;
@@ -5811,6 +5801,10 @@ canvas.addEventListener("pointerdown", (e) => {
   if (e.button !== 0 || octaveAnchorPress) return;
   const hit = getGridHit(e.clientX, e.clientY);
   if (!hit.inBounds) return;
+  if (patternControlActive) {
+    if (hit.inCell) toggleGridCell(hit.x, hit.y);
+    return;
+  }
   const playable = isPlayableCell(hit);
   if (playable && octaveAnchors[currentPage].has(hit.y * WIDTH + hit.x)) {
     resetOctaveOverlayUI();
@@ -5979,7 +5973,7 @@ canvas.addEventListener("pointercancel", (e) => {
 const selectionDragRoots = [gridWrap, gridPanel, mainPanel, document.body].filter(Boolean);
 selectionDragRoots.forEach((root) => {
   root.addEventListener("pointerdown", (e) => {
-    if (e.button !== 0) return;
+    if (e.button !== 0 || patternControlActive) return;
     if (e.target === canvas) return;
     if (e.target.closest("button, input, select, textarea")) return;
     if (gridPanel) {
@@ -6539,6 +6533,7 @@ function sendScale() {
 }
 
 const adjustTranspose = (delta) => {
+  if (patternControlActive) return;
   const type = sequencerTypes[currentPage] || "mono";
   if (type === "drum" || type === "cc") return;
   const current = transposes[currentPage] ?? 0;
@@ -6551,6 +6546,7 @@ const adjustTranspose = (delta) => {
 };
 
 function setNoteViewOffsetFromUI(offset) {
+  if (patternControlActive) return;
   const type = sequencerTypes[currentPage] || "mono";
   if (type === "cc") return;
   if (ws?.readyState !== WebSocket.OPEN) return;
@@ -7438,6 +7434,7 @@ if (drumInputs.length) {
       editingDrumInputs.delete(input);
     });
     input.addEventListener("change", () => {
+      if (patternControlActive) return;
       const row = Number(input.dataset.row);
       if (!Number.isFinite(row)) return;
       if (row === 7 && !fullScaleMode) return;
@@ -7453,6 +7450,7 @@ if (drumInputs.length) {
 
 if (ccNumberInput) {
   const commitCcNumber = () => {
+    if (patternControlActive) return;
     const val = Math.max(0, Math.min(127, Math.round(Number(ccNumberInput.value) || DEFAULT_CC)));
     ccNumbers[currentPage] = val;
     ccNumberInput.value = val;
@@ -7688,6 +7686,7 @@ document.addEventListener("keydown", (e) => {
     toggleTransport();
     return;
   }
+  if (patternControlActive) return;
   if (e.shiftKey && (e.key === "ArrowLeft" || e.key === "ArrowRight" || e.key === "ArrowUp" || e.key === "ArrowDown")) {
     if (isTypingTarget(e.target)) return;
     const selection = selectionByPage[currentPage];

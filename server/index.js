@@ -314,6 +314,12 @@ function dispatchGridEvents(events) {
       broadcast({ type: "follow", enabled: followEnabled });
     } else if (ev.type === "pattern_control") {
       if (ev.enabled) {
+        state.liveNoteHolds.forEach((notes, page) => {
+          for (const note of notes) {
+            state.setLiveNote(page, note, false);
+            broadcast({ type: "live_note", page, note, on: false });
+          }
+        });
         broadcast({ type: "octave_overlay", page: state.currentPage, clearAll: true });
         broadcast({ type: "pattern_control", enabled: true });
       } else {
@@ -340,6 +346,7 @@ wss.on("connection", (ws, request) => {
   }
   ws.send(JSON.stringify({ type: "hello", message: "sgrid web" }));
   broadcastState(ws);
+  broadcastLedUIFrame(ws);
   ws.on("close", () => {
     niSurfaces.delete(ws);
     niUiClients.delete(ws);
@@ -449,6 +456,7 @@ function broadcastState(ws = null) {
     gateLedBoost: !!state.gateLedBoost,
     midi: state.midi,
     currentPage: state.currentPage,
+    patternControlMode: state.patternControlMode,
     scale: state.scale,
     setName: state.setName,
     transposes,
@@ -565,6 +573,7 @@ function handleClientMessage(ws, data) {
       break;
     case "grid_key":
       {
+        if (typeof data.patternControlMode === "boolean" && data.patternControlMode !== state.patternControlMode) break;
         const patternLauncher = data.patternLauncher === true && data.x === PATTERN_CONTROL_GRID_X && data.y === PATTERN_CONTROL_GRID_Y;
         const resp = state.handleGridKey(data.x, data.y, data.s, { uiMode: fullScaleMode, patternLauncher });
         const events = Array.isArray(resp) ? resp : (resp ? [resp] : []);
@@ -1500,16 +1509,19 @@ function pushNiSurface() {
   }
 }
 
-function broadcastLedUIFrame() {
+function broadcastLedUIFrame(ws) {
   const inPatternControl = state.patternControlMode || state.patternControlHeld || state.patternHeld;
-  broadcast({
+  const message = {
     type: "led_frame",
+    patternControlMode: state.patternControlMode,
     frame: getLedUIFrame(),
     octaveAnchors: inPatternControl ? [] : state.octaveAnchorCells({ uiMode: fullScaleMode }),
     octaveOverlays: inPatternControl ? Array.from({ length: 9 }, () => []) : state.octaveOverlaySnapshot({ uiMode: fullScaleMode }),
     deviceHasData: state.pages.map((p, idx) => (idx === 0 ? null : state.deviceHasData(idx))),
     deviceStopped: state.pages.map((p, idx) => (idx === 0 ? null : !!p?.sequencerStopped))
-  });
+  };
+  if (ws) ws.send(JSON.stringify(message));
+  else broadcast(message);
 }
 
 function pushTrackActivity() {

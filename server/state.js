@@ -338,7 +338,6 @@ export class SGridState {
     this.pendingStopTick = Array(9).fill(null);
     this.pendingPatternTick = Array(9).fill(null);
     this.tickCount = 0;
-    this.patternControlMode = false;
     this.pendingOctaveOverlays = [];
     this.holdTimers.forEach((t) => clearTimeout(t));
     this.holdTimers.clear();
@@ -674,6 +673,8 @@ export class SGridState {
     this.patternHeld = false;
     this.consumedControlKeys.clear();
     this.patternControlHeld = false;
+    this.patternControlMode = false;
+    this.forceLedRefresh = true;
     this.resetTickCounters();
     this.pageTickPos = Array(9).fill(-1);
   }
@@ -1533,6 +1534,8 @@ export class SGridState {
     if (opts.forcePatternControl) return this.handlePatternControlKey(x, y, s);
     const uiMode = !!opts.uiMode;
     const patternLauncher = !!opts.patternLauncher;
+    const launcherKey = y === 7 && x === PATTERN_CONTROL_BUTTON;
+    if (this.patternControlMode && !launcherKey) return this.handlePatternControlKey(x, y, s);
     const page = this.pages[this.currentPage];
     const pat = this.getPattern();
     const heldKey = this.heldStep ? `${this.heldStep.x},${this.heldStep.y}` : null;
@@ -1589,12 +1592,12 @@ export class SGridState {
       }
     }
     const allowPatternControlKey = patternLauncher || !uiMode || this.patternControlMode;
-    if (allowPatternControlKey && y === 7 && x === PATTERN_CONTROL_BUTTON) {
+    if (allowPatternControlKey && launcherKey) {
       if (this.patternControlLatch) {
         if (s === 1) {
-          this.patternControlMode = !this.patternControlMode;
-          this.patternHeld = false;
-          this.patternControlHeld = false;
+          const opening = !this.patternControlMode;
+          this.resetGridInput();
+          this.patternControlMode = opening;
           this.forceLedRefresh = true;
           if (!this.patternControlMode) {
             // this.pendingMuteTick = Array(9).fill(null); // legacy mute scheduling
@@ -1606,9 +1609,10 @@ export class SGridState {
         return null;
       }
       if (s === 1) {
+        if (this.patternControlMode) return null;
+        this.resetGridInput();
         this.patternControlMode = true;
         this.patternControlHeld = true;
-        this.patternHeld = false;
         this.forceLedRefresh = true;
         return { type: "pattern_control", enabled: this.patternControlMode };
       }
@@ -1624,10 +1628,6 @@ export class SGridState {
       return null;
     }
 
-    // In pattern control view, map presses to pattern/mute actions per device
-    if (this.patternControlMode) {
-      return this.handlePatternControlKey(x, y, s);
-    }
     if (heldInfo?.octaveAnchor && heldInfo.pattern !== pat) return null;
 
     const indicatorCol = this.heldStep ? octaveIndicatorColumn(this.heldStep.x) : null;
@@ -4724,6 +4724,7 @@ export class SGridState {
     const HEIGHT = 8;
     const STEP_ROWS = 7;
     const ignorePatternControl = !!opts.ignorePatternControl;
+    if (this.patternControlMode && !ignorePatternControl) return this.renderPatternControlLED();
     if (this.microtiming.active) return this.renderMicrotimingFrame(slideTimeMs, { ...opts, uiMode: true });
     const prevPatternControl = this.patternControlMode;
     if (ignorePatternControl && prevPatternControl) {
@@ -4760,9 +4761,6 @@ export class SGridState {
       return uiFrame;
     }
 
-    if (this.patternControlMode && !ignorePatternControl) {
-      return baseFrame;
-    }
     let topFrame = null;
     if (currentSeqType !== "cc") {
       const prevOffset = this.getNoteViewOffset(this.currentPage);
@@ -4963,6 +4961,7 @@ export class SGridState {
 
   // DO NOT CHANGE LOGIC: monome LED frame generation depends on this exact pipeline.
   renderLED(slideTimeMs, opts = {}) {
+    if (this.patternControlMode) return this.renderPatternControlLED();
     const ignoreIsomorphic = !!opts.ignoreIsomorphic;
     const includeOctaveHint = opts.includeOctaveHint !== false;
     const ignorePatternHoldDim = !!opts.ignorePatternHoldDim;
@@ -4993,9 +4992,6 @@ export class SGridState {
     }
     if (!ignoreIsomorphic && this.isIsomorphicMode(this.currentPage)) {
       return this.renderIsomorphicLED(slideTimeMs, opts);
-    }
-    if (this.patternControlMode) {
-      return this.renderPatternControlLED();
     }
     const pat = page?.patterns[page?.active_pattern];
     const bar = pat?.barView || 0;
