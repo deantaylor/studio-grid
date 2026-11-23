@@ -4,9 +4,9 @@
 
 The macOS Studio Grid installer includes the bridge. In Studio Grid, open
 **Settings → General** and turn on **Native Instruments bridge**. The
-setting takes effect immediately and is saved for the next launch. Leave the
-Native Instruments hardware service running and select `studiogrid` from the
-controller's instance menu.
+setting takes effect immediately and is saved for the next launch. Studio Grid
+opens the NI Host Integration Agent in the background when it is installed.
+Select `studiogrid` from the controller's instance menu.
 
 The bridge automatically registers `studiogrid` on every connected NI
 controller with two 480 × 272 displays and an Encdr instance route. You can

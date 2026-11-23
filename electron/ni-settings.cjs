@@ -1,6 +1,21 @@
+const { execFile } = require("node:child_process");
 const fs = require("node:fs/promises");
 const path = require("node:path");
 const { pathToFileURL } = require("node:url");
+const { promisify } = require("node:util");
+
+const run = promisify(execFile);
+const hostAgent = "/Library/Application Support/Native Instruments/Hardware/NIHostIntegrationAgent.app";
+
+async function startNiHostAgent() {
+  try {
+    await fs.access(hostAgent);
+    await run("/usr/bin/open", ["-g", "-a", hostAgent], { timeout: 3000 });
+  } catch (cause) {
+    // Some controllers use NIHardwareAgent instead.
+    if (cause.code !== "ENOENT") console.warn("NI Host Integration Agent could not start:", cause.message);
+  }
+}
 
 function createNiSettings(app) {
   const supported = process.platform === "darwin";
@@ -29,6 +44,7 @@ function createNiSettings(app) {
       await fs.access(binary, fs.constants.X_OK);
       const entry = path.join(app.getAppPath(), "bridges", "ni", "bridge.mjs");
       const { startNiBridge } = await import(pathToFileURL(entry));
+      await startNiHostAgent();
       const current = startNiBridge({ url, binary });
       bridge = current;
       current.closed.then(() => {
