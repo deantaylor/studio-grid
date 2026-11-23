@@ -5,7 +5,8 @@
 - Remove an active step by pressing it again.
 - Hover over an active step and click ↑ or ↓ to shift its octave (Mono, Poly, and MDTonal).
 - The original cell stays dim after a shift. Hold it to adjust the same note again. The Monome control row is hidden while the dim key is in note edit.
-- On a Monome with the control row enabled, hold a note and press a lit octave button on the opposite edge of the grid. With the control row hidden, hold the note and press the cell immediately above or below it.
+- On a Monome, hold a note to show the octave buttons on the right edge. For a note in the rightmost column, the buttons appear on the left edge. With the control row hidden, you can also use a neighboring cell above or below the held note when that cell is outside the timing strip.
+- The microtiming strip appears on the top row. For a note in the top row, the strip appears on the bottom row.
 - Use ↑ and ↓ on the keyboard to scroll to notes that move outside the visible grid.
 - Right-click active steps for accent/slide options where supported.
 - Hold an active note and press the step to the right to set slide.

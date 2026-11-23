@@ -81,16 +81,9 @@ GRID USAGE (MONOME)
 Grid paging, pattern length, and step indices are irrelevant while in this mode.
 
 
-ACTIVE MICROTIMITING ROW SELECTION
-Based on the vertical position of the edited note:
-
-- If the note is in the top half of the grid:
-  - the top row is used for microtiming selection
-
-- If the note is in the bottom half of the grid:
-  - the bottom row is used for microtiming selection
-  - all other monome controls are temporarily hidden or disabled
-  - microtiming mode takes over the entire control surface
+ACTIVE MICROTIMING ROW SELECTION
+- The top row is used for microtiming selection.
+- If the edited note is in the top row, the bottom row is used for microtiming selection and the usual bottom-row controls yield to the timing strip.
 
 
 MICROTIMITING VALUE SPACE

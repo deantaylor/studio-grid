@@ -41,9 +41,9 @@ test("releasing a scroll key after the modifier leaves the unlatched launcher al
 test("scrolling and microtiming use the bottom keys according to which mode started first", async () => {
   const state = new SGridState();
   const step = state.getPattern().steps[2];
-  Object.assign(step, { on: true, degree: 5 });
+  Object.assign(step, { on: true, degree: state.getRowInfo(0).degree });
   state.handleGridKey(14, 7, 1);
-  state.handleGridKey(2, 1, 1);
+  state.handleGridKey(2, 0, 1);
   await setTimeout(175);
 
   assert.equal(state.microtiming.active, true);
@@ -51,16 +51,18 @@ test("scrolling and microtiming use the bottom keys according to which mode star
   assert.equal(step.micro, 0);
   state.handleGridKey(14, 7, 0);
   assert.equal(state.handleGridKey(15, 7, 0), null);
-  state.handleGridKey(2, 1, 0);
+  state.handleGridKey(2, 0, 0);
 
-  state.handleGridKey(2, 2, 1);
+  const { degree, octaveOffset } = state.getRowInfo(0);
+  Object.assign(state.getPattern().steps[3], { on: true, degree, octave: octaveOffset });
+  state.handleGridKey(3, 0, 1);
   await setTimeout(175);
   assert.equal(state.handleGridKey(14, 7, 1)?.type, "micro");
   assert.equal(state.handleGridKey(15, 7, 1)?.type, "micro");
   assert.equal(state.getNoteViewOffset(), 1);
   state.handleGridKey(14, 7, 0);
   state.handleGridKey(15, 7, 0);
-  state.handleGridKey(2, 2, 0);
+  state.handleGridKey(3, 0, 0);
 });
 
 test("the app launcher and eighth-row note at the same coordinates remain independent", () => {
@@ -108,25 +110,31 @@ test("the eighth-row layout shows notes on its top row at the upper scroll limit
   assert.ok(state.renderUIFrame()[1] > 0);
 });
 
-test("eight-row note edit keeps the held key and microtiming strip in place at both edges", async () => {
-  const options = { uiMode: true };
-  for (const row of [0, 7]) {
+test("Monome note edit uses the right column and top row unless the held note occupies that edge", async () => {
+  for (const [x, row, uiMode] of [[14, 1, false], [15, 0, false], [15, 0, true], [2, 7, true]]) {
     const state = new SGridState();
+    const options = { uiMode };
     state.pages[1].sequencerStopped = true;
     const { degree, octaveOffset } = state.getRowInfo(row, options);
-    const step = state.getPattern().steps[2];
+    const step = state.getPattern().steps[x];
     Object.assign(step, { on: true, degree, octave: octaveOffset });
-    state.handleGridKey(2, row, 1, options);
+    state.handleGridKey(x, row, 1, options);
     await setTimeout(175);
     assert.ok(state.getHeldNoteEdit());
-    assert.equal(state.microtiming.active, true);
     const timingRow = row === 0 ? 7 : 0;
-    const frame = state.renderUIFrame();
-    assert.ok(frame[row * 16 + 2] > 0);
+    const octaveColumn = x === 15 ? 0 : 15;
+    const twoOctavesUpRow = 2;
+    const frame = uiMode ? state.renderUIFrame() : state.renderLED();
+    assert.equal(state.microtiming.row, timingRow);
+    assert.ok(frame[row * 16 + x] > 0);
     assert.ok(frame[timingRow * 16 + 7] > frame[timingRow * 16 + 6]);
+    assert.ok(frame[twoOctavesUpRow * 16 + octaveColumn] > 0);
+    assert.equal(frame[twoOctavesUpRow * 16 + (15 - octaveColumn)], 0);
     assert.equal(state.handleGridKey(8, timingRow, 1, options)?.microOffset, 1);
     state.handleGridKey(8, timingRow, 0, options);
-    state.handleGridKey(2, row, 0, options);
+    assert.equal(state.handleGridKey(octaveColumn, twoOctavesUpRow, 1, options)?.octave, 2);
+    state.handleGridKey(octaveColumn, twoOctavesUpRow, 0, options);
+    state.handleGridKey(x, row, 0, options);
     assert.equal(state.microtiming.active, false);
     assert.equal(state.getHeldNoteEdit(), null);
     assert.equal(step.on, true);

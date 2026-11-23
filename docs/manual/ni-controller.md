@@ -30,7 +30,7 @@ on both the screen and the hardware, following the Monome pattern selector.
 open Studio Grid's Pattern Launcher. Both follow the app's **Latch pattern
 launch page** setting, and the button LED stays bright while the launcher is open.
 
-Press and hold the main dial while turning it to scroll the note grid. Tilt
+Turn the main dial to scroll the note grid vertically. Tilt
 the dial left, right, up, or down to move the current bar's notes one step or
 scale row in that direction. Turn the eight display knobs to edit the values
 shown beneath the grid and track details.
