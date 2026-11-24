@@ -20,7 +20,7 @@ export function startNiBridge({
   }
 
   const child = spawn(binary, [controller, ...(visible ? ["--visible"] : [])], {
-    env: { ...process.env, STUDIO_GRID_NI_BACKGROUND: "1" },
+    env: visible ? process.env : { ...process.env, STUDIO_GRID_NI_BACKGROUND: "1" },
     stdio: ["pipe", "pipe", "inherit"]
   });
   const ready = new Promise((resolve, reject) => {

@@ -1,11 +1,53 @@
 --- a/src/webview_macos.rs
 +++ b/src/webview_macos.rs
-@@ -12,2 +12,4 @@
- use crate::bridge;
-+
+@@ -2,2 +2,3 @@
+ use std::cell::{Cell, RefCell};
++use std::rc::Rc;
+ use std::sync::{Arc, Mutex};
+@@ -9,3 +10,3 @@
+ use tao::platform::macos::{ActivationPolicy, EventLoopExtMacOS};
+-use tao::window::WindowBuilder;
++use tao::window::{Window, WindowBuilder};
+
+@@ -13,2 +14,32 @@
+
 +pub type WindowTarget = tao::event_loop::EventLoopWindowTarget<()>;
- 
-@@ -62,2 +64,8 @@
++
++pub struct PreviewWindow {
++    window: Rc<Window>,
++    right_position: (u32, u32),
++}
++
++impl PreviewWindow {
++    pub fn new(target: &WindowTarget, (width, height): (u32, u32)) -> Result<Self, String> {
++        let gap = 12;
++        let pair_width = 2 * width + gap;
++        let stacked = target.primary_monitor().is_some_and(|monitor| {
++            monitor.size().to_logical::<u32>(monitor.scale_factor()).width < pair_width
++        });
++        let (size, right_position) = if stacked {
++            ((width, 2 * height + gap), (0, height + gap))
++        } else {
++            ((pair_width, height), (width + gap, 0))
++        };
++        let window = WindowBuilder::new()
++            .with_title("Studio Grid NI Displays")
++            .with_inner_size(tao::dpi::LogicalSize::new(size.0, size.1))
++            .with_background_color((0, 0, 0, 255))
++            .with_resizable(false)
++            .build(target)
++            .map_err(|error| format!("Failed to create preview window: {error}"))?;
++        Ok(Self { window: Rc::new(window), right_position })
++    }
++}
++
+ // Thread-local event loop shared across all ManagedWebView instances.
+@@ -47,3 +78,3 @@
+     pub webview: wry::WebView,
+-    _window: tao::window::Window,
++    _window: Rc<Window>,
+     pub width: u32,
+@@ -62,2 +93,30 @@
      pub fn new(width: u32, height: u32, html: &str, visible: bool) -> Result<Self, String> {
 +        with_event_loop(|event_loop| Self::new_on_target(event_loop, width, height, html, visible))
 +    }
@@ -13,9 +55,31 @@
 +    pub fn new_on_target(
 +        target: &WindowTarget, width: u32, height: u32, html: &str, visible: bool,
 +    ) -> Result<Self, String> {
++        let window = WindowBuilder::new()
++            .with_visible(visible)
++            .with_inner_size(tao::dpi::LogicalSize::new(width, height))
++            .with_decorations(visible)
++            .with_resizable(false)
++            .with_title(if visible { "encdr-view" } else { "" })
++            .build(target)
++            .map_err(|error| format!("Failed to create window: {error}"))?;
++        Self::build(Rc::new(window), width, height, html, None)
++    }
++
++    pub fn new_preview(
++        preview: &PreviewWindow, width: u32, height: u32, html: &str, right: bool,
++    ) -> Result<Self, String> {
++        let position = if right { preview.right_position } else { (0, 0) };
++        Self::build(Rc::clone(&preview.window), width, height, html, Some(position))
++    }
++
++    fn build(
++        window: Rc<Window>, width: u32, height: u32, html: &str,
++        child_position: Option<(u32, u32)>,
++    ) -> Result<Self, String> {
          let frame_ready = Arc::new(Mutex::new(false));
-@@ -74,13 +82,10 @@
- 
+@@ -74,13 +133,2 @@
+
 -        // Tao supports creating windows before run(). Do not enter/exit NSApplication
 -        // to construct each view: Exit is sticky on macOS, making later run_return
 -        // calls unreliable and leaving the caller trapped in AppKit's event wait.
@@ -27,16 +91,31 @@
 -                .with_title(if visible {"encdr-view"} else {""})
 -                .build(&*event_loop).map_err(|e|format!("Failed to create window: {e}"))
 -        })?;
-+        let window = WindowBuilder::new()
-+            .with_visible(visible)
-+            .with_inner_size(tao::dpi::LogicalSize::new(width as f64, height as f64))
-+            .with_decorations(visible)
-+            .with_resizable(false)
-+            .with_title(if visible { "encdr-view" } else { "" })
-+            .build(target)
-+            .map_err(|e| format!("Failed to create window: {e}"))?;
          let fr = frame_ready_ipc.clone();
-@@ -200,5 +205,10 @@
+@@ -88,3 +136,4 @@
+         let script_error=script_callback.clone();
+-        let webview = wry::WebViewBuilder::new()
++        let (x, y) = child_position.unwrap_or((0, 0));
++        let builder = wry::WebViewBuilder::new()
+             // These hidden views are live hardware renderers, not background
+@@ -124,3 +173,3 @@
+                 position: wry::dpi::Position::Logical(
+-                    wry::dpi::LogicalPosition::new(0.0, 0.0),
++                    wry::dpi::LogicalPosition::new(f64::from(x), f64::from(y)),
+                 ),
+@@ -130,4 +179,9 @@
+                 )),
+-            })
+-            .build(&window).map_err(|e|format!("Failed to create WebView: {e}"))?;
++            });
++        let webview = if child_position.is_some() {
++            builder.build_as_child(window.as_ref())
++        } else {
++            builder.build(window.as_ref())
++        }
++        .map_err(|error| format!("Failed to create WebView: {error}"))?;
+
+@@ -200,5 +254,10 @@
  pub fn run_event_loop(mut tick: impl FnMut()->bool) {
 +    run_event_loop_with_target(|_| tick());
 +}
@@ -48,15 +127,16 @@
 -        event_loop.run_return(|event,_,control_flow| {
 +        event_loop.run_return(|event,target,control_flow| {
              match event {
-@@ -209,3 +219,3 @@
+@@ -209,3 +268,3 @@
                  Event::MainEventsCleared => {
 -                    if objc2::rc::autoreleasepool(|_|tick()){*control_flow=ControlFlow::WaitUntil(std::time::Instant::now()+std::time::Duration::from_millis(2));}
 +                    if objc2::rc::autoreleasepool(|_|tick(target)){*control_flow=ControlFlow::WaitUntil(std::time::Instant::now()+std::time::Duration::from_millis(2));}
                      else{*control_flow=ControlFlow::Exit;}
 --- a/src/lib.rs
 +++ b/src/lib.rs
-@@ -106,2 +106,23 @@
-     }
+@@ -105,3 +105,43 @@
+         Self::with_size(DeviceId::default(),screen_name,size,content,visible)
++    }
 +    /// Create a screen from the active AppKit event loop after hotplug.
 +    #[cfg(target_os = "macos")]
 +    pub fn new_on_target(
@@ -77,5 +157,24 @@
 +            screen_name: screen_name.to_string(),
 +        })
 +    }
++
++    /// Render one panel as a child of the shared preview window.
++    #[cfg(target_os = "macos")]
++    pub fn new_preview(
++        window: &webview_macos::PreviewWindow,
++        screen_name: &str,
++        (width, height): (u32, u32),
++        content: ScreenContent,
++    ) -> Result<Self, String> {
++        let inner = webview_macos::ManagedWebView::new_preview(
++            window, width, height, &content.to_html()?, screen_name == "right",
++        )?;
++        Ok(Self {
++            inner,
++            capture: std::cell::RefCell::new(capture_macos::AsyncCapture::default()),
++            device_id: DeviceId::default(),
++            screen_name: screen_name.to_string(),
++        })
+     }
 +
      fn with_size(device_id:DeviceId,screen_name:&str,(width,height):(u32,u32),content:ScreenContent,visible:bool)->Result<Self,String>{

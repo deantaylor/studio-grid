@@ -71,6 +71,8 @@ const server = http.createServer(async (req, res) => {
 
 const wss = new WebSocketServer({ server });
 const niSurfaces = new Map();
+let hardwareChainPreview = null;
+const gridNotePresses = new WeakMap();
 const activeNiSurfaces = new Map();
 let lastTrackActivityMask = 0;
 let trackActivityTimer;
@@ -130,6 +132,7 @@ let frontFrame = new Array(GRID_SIZE).fill(0);
 let backFrame = frontFrame.slice();
 let dirtyFrame = false;
 let lastNoteViewPitches = null;
+let lastNoteChainView = null;
 let forceNextSend = false;
 let ledPaused = false;
 let slideAnimTimer = null;
@@ -299,6 +302,8 @@ function dispatchGridEvents(events) {
       broadcast({ type: "accent_overlay", page: state.currentPage, ...ev });
     } else if (ev.type === "slide") {
       broadcast({ type: "slide_overlay", page: state.currentPage, ...ev });
+    } else if (ev.type === "note_chain_created") {
+      broadcastNoteChainCreated(ev);
     } else if (ev.type === "isomorphic_note") {
       state.setLiveNote(ev.page, ev.note, !!ev.on);
       broadcast({ type: "live_note", page: ev.page, note: ev.note, on: !!ev.on });
@@ -351,6 +356,7 @@ wss.on("connection", (ws, request) => {
     niSurfaces.delete(ws);
     niUiClients.delete(ws);
     updateNiOwnership(ws, null, false);
+    if (clearHardwareChainPreview(ws)) renderAndPush();
   });
 
   ws.on("message", (msg) => {
@@ -374,7 +380,7 @@ serial.on("grid_key", (evt) => {
   const isPrimary = !primaryId || evt.deviceId === primaryId;
   const isLarge = (cols > 8 || rows > 8);
   const useUiMode = isPrimary && isLarge && !monomeControlsEnabled();
-  const resp = state.handleGridKey(evt.x, evt.y, evt.s, { forcePatternControl, uiMode: useUiMode });
+  const resp = state.handleGridKey(evt.x, evt.y, evt.s, { forcePatternControl, uiMode: useUiMode, monome: true });
   const events = Array.isArray(resp) ? resp : (resp ? [resp] : []);
   dispatchGridEvents(events);
   renderAndPush();
@@ -652,10 +658,93 @@ function handleClientMessage(ws, data) {
         }
       }
       break;
+    case "begin_note_press":
+      {
+        gridNotePresses.delete(ws);
+        if (!isCurrentChainView(data.view) || state.patternControlMode || state.microtiming.active
+            || state.isIsomorphicMode()) break;
+        const { x, y } = data;
+        const pattern = state.getPattern();
+        const view = noteChainView();
+        const type = state.pages[view.page]?.sequencerType;
+        if (type !== "mono" && type !== "poly") break;
+        if (!Number.isInteger(x) || !Number.isInteger(y) || x < 0 || x >= 16
+            || view.bar * 16 + x >= pattern.length_steps) break;
+        const opts = { uiMode: fullScaleMode };
+        const anchor = state.getStepInfo(x, y, opts);
+        if (!anchor.exists || anchor.octaveAnchor) break;
+        gridNotePresses.set(ws, { x, y, view, pattern, wasOn: anchor.on });
+        if (!anchor.on) {
+          tapGridNote(x, y, opts);
+          ws.send(JSON.stringify({ type: "grid_note_edited" }));
+          renderAndPush();
+        }
+      }
+      break;
+    case "finish_note_press":
+      {
+        const press = takeGridNotePress(ws, data.x, data.y, data.view);
+        if (!press || !Array.isArray(data.paintSteps)) break;
+        const opts = { uiMode: fullScaleMode };
+        const removeAnchor = press.wasOn && state.getStepInfo(press.x, press.y, opts).on;
+        if (removeAnchor) tapGridNote(press.x, press.y, opts);
+        const painted = paintGridNoteSteps(data.paintSteps, press, opts);
+        if (removeAnchor || painted) {
+          ws.send(JSON.stringify({ type: "grid_note_edited" }));
+          renderAndPush();
+        }
+      }
+      break;
+    case "preview_shorten_chain":
+      {
+        if (data.range == null) {
+          if (clearHardwareChainPreview(ws)) renderAndPush();
+          break;
+        }
+        const { startX, fromX, endX, y } = data.range;
+        if (!isCurrentChainView(data.view)
+            || !state.canShortenNoteChain(startX, fromX, endX, y, { uiMode: fullScaleMode })) break;
+        hardwareChainPreview = {
+          owner: ws, view: noteChainView(), pattern: state.getPattern(), range: { startX, fromX, endX, y }
+        };
+        renderAndPush();
+      }
+      break;
+    case "shorten_chain":
+      {
+        gridNotePresses.delete(ws);
+        const cleared = clearHardwareChainPreview(ws);
+        const { startX, fromX, endX, y } = data.range || {};
+        const shortened = isCurrentChainView(data.view)
+          && state.shortenNoteChain(startX, fromX, endX, y, { uiMode: fullScaleMode });
+        if (cleared || shortened) renderAndPush();
+      }
+      break;
+    case "drag_note":
     case "create_chain":
       {
-        const res = state.createChainFromSelection(data.steps, { uiMode: fullScaleMode });
+        const opts = { uiMode: fullScaleMode };
+        let res;
+        if (data.range) {
+          if (!isCurrentChainView(data.view)) break;
+          const { startX, endX, y } = data.range;
+          if (data.type === "drag_note") {
+            const press = takeGridNotePress(ws, startX, y, data.view);
+            if (!press) break;
+            if (!press.wasOn) {
+              if (paintGridNoteSteps(data.paintSteps, press, opts)) renderAndPush();
+              break;
+            }
+            if (!state.getStepInfo(startX, y, opts).on) break;
+          } else {
+            gridNotePresses.delete(ws);
+          }
+          res = state.createChainFromRange(startX, endX, y, opts);
+        } else if (data.type === "create_chain") {
+          res = state.createChainFromSelection(data.steps, opts);
+        }
         if (res?.ok) {
+          broadcastNoteChainCreated(res);
           renderAndPush();
         }
       }
@@ -1235,9 +1324,7 @@ function renderAndPush(force = false) {
   manageLedAnimation();
   maybeBroadcastPage();
   const ignorePatternControl = !monomeControlsEnabled() && !state.patternControlMode;
-  const frame = fullScaleMode
-    ? state.renderUIFrame(Date.now(), { ignorePatternControl })
-    : state.renderLED(Date.now(), { ignorePatternControl, includeMicroHint: false });
+  const frame = state.renderMonomeFrame(Date.now(), { uiMode: fullScaleMode, ignorePatternControl, includeMicroHint: false });
   const forceRefresh = state.consumeForceRefresh?.() || false;
   enqueueLedFrame(frame, force || forceRefresh);
 }
@@ -1298,10 +1385,9 @@ function broadcastEvents(events) {
 
 function processTick({ tick, externalStepMs = null }) {
   const { midiEvents, patternSwitches, barChanges, barPlayheadChanges } = state.tick(followEnabled, externalStepMs, tick);
+  if (!slideAnimTimer) manageLedAnimation();
   const ignorePatternControl = !monomeControlsEnabled() && !state.patternControlMode;
-  const frame = fullScaleMode
-    ? state.renderUIFrame(Date.now(), { ignorePatternControl })
-    : state.renderLED(Date.now(), { ignorePatternControl, includeMicroHint: false });
+  const frame = state.renderMonomeFrame(Date.now(), { uiMode: fullScaleMode, ignorePatternControl, includeMicroHint: false });
   enqueueLedFrame(frame);
   if (patternSwitches?.length) {
     patternSwitches.forEach((sw) => broadcastPatternStatus(sw.page));
@@ -1460,9 +1546,7 @@ function manageLedAnimation(forceStop = false) {
         return;
       }
       const ignorePatternControl = !monomeControlsEnabled() && !state.patternControlMode;
-      const frame = fullScaleMode
-        ? state.renderUIFrame(Date.now(), { ignorePatternControl })
-        : state.renderLED(Date.now());
+      const frame = state.renderMonomeFrame(Date.now(), { uiMode: fullScaleMode, ignorePatternControl: fullScaleMode && ignorePatternControl });
       enqueueLedFrame(frame);
     }, SLIDE_ANIM_INTERVAL);
   } else if (slideAnimTimer) {
@@ -1497,7 +1581,7 @@ function getLedUIFrame() {
 
 function pushNiSurface() {
   if (!niSurfaces.size) return;
-  const frame = state.patternControlMode ? state.renderPatternControlLED() : getLedUIFrame();
+  const frame = state.patternControlMode ? state.renderPatternControlLED() : applyHardwareChainPreview(getLedUIFrame());
   const [, ui] = getNiUiClient();
   const payload = JSON.stringify({ type: "ni_surface", ...niSurfaceSnapshot(state, frame, clockSource, {
     uiMode: fullScaleMode, midiOutputs: ui?.midiOutputs
@@ -1509,12 +1593,91 @@ function pushNiSurface() {
   }
 }
 
-function broadcastLedUIFrame(ws) {
+function noteChainView() {
+  const page = state.currentPage;
+  return {
+    page,
+    pattern: state.pages[page]?.active_pattern,
+    bar: state.getPattern()?.barView || 0,
+    offset: state.getNoteViewOffset(page),
+    uiMode: fullScaleMode
+  };
+}
+
+function isCurrentChainView(view) {
+  return Object.entries(noteChainView()).every(([key, value]) => view?.[key] === value);
+}
+
+function takeGridNotePress(ws, x, y, view) {
+  const press = gridNotePresses.get(ws);
+  gridNotePresses.delete(ws);
+  if (!press || press.x !== x || press.y !== y || press.pattern !== state.getPattern()
+      || !isCurrentChainView(view) || !isCurrentChainView(press.view)
+      || state.patternControlMode || state.microtiming.active || state.isIsomorphicMode()) return null;
+  return press;
+}
+
+function tapGridNote(x, y, opts) {
+  for (const s of [1, 0]) {
+    const event = state.handleGridKey(x, y, s, opts);
+    dispatchGridEvents(Array.isArray(event) ? event : [event]);
+  }
+}
+
+function paintGridNoteSteps(steps, press, opts) {
+  if (!Array.isArray(steps)) return false;
+  const visited = new Set([press.y * 16 + press.x]);
+  let painted = false;
+  for (const step of steps.slice(0, 128)) {
+    const { x, y } = step || {};
+    if (!Number.isInteger(x) || !Number.isInteger(y) || x < 0 || x >= 16
+        || press.view.bar * 16 + x >= press.pattern.length_steps || !state.getRowInfo(y, opts).stepRow) continue;
+    const key = y * 16 + x;
+    if (visited.has(key)) continue;
+    visited.add(key);
+    tapGridNote(x, y, opts);
+    painted = true;
+  }
+  return painted;
+}
+
+function clearHardwareChainPreview(ws) {
+  if (hardwareChainPreview?.owner !== ws) return false;
+  hardwareChainPreview = null;
+  return true;
+}
+
+function applyHardwareChainPreview(frame) {
+  if (!hardwareChainPreview) return frame;
+  const { view, pattern, range: { startX, fromX, endX, y } } = hardwareChainPreview;
+  if (pattern !== state.getPattern() || state.patternHeld || state.patternControlHeld || !isCurrentChainView(view)
+      || !state.canShortenNoteChain(startX, fromX, endX, y, { uiMode: fullScaleMode })) {
+    hardwareChainPreview = null;
+    return frame;
+  }
+  const preview = frame.slice();
+  for (let x = endX + 1; x <= fromX; x++) preview[y * 16 + x] = 0;
+  return preview;
+}
+
+function broadcastNoteChainCreated({ startX, endX, degree, octave }) {
+  const y = state.rowForNote(degree, octave, { uiMode: fullScaleMode });
+  if (y == null) return;
+  broadcast({ type: "note_chain_created", view: noteChainView(), startX, endX, y });
+}
+
+function getNoteChainFrame() {
+  const opts = { uiMode: fullScaleMode };
+  return { ...noteChainView(), spans: state.noteChainSpans(opts), activeCells: state.noteViewActiveCells(opts) };
+}
+
+function broadcastLedUIFrame(ws, noteChains = getNoteChainFrame()) {
   const inPatternControl = state.patternControlMode || state.patternControlHeld || state.patternHeld;
   const message = {
     type: "led_frame",
     patternControlMode: state.patternControlMode,
     frame: getLedUIFrame(),
+    noteChains,
     octaveAnchors: inPatternControl ? [] : state.octaveAnchorCells({ uiMode: fullScaleMode }),
     octaveOverlays: inPatternControl ? Array.from({ length: 9 }, () => []) : state.octaveOverlaySnapshot({ uiMode: fullScaleMode }),
     deviceHasData: state.pages.map((p, idx) => (idx === 0 ? null : state.deviceHasData(idx))),
@@ -1548,21 +1711,27 @@ function frameTick() {
     lastNoteViewPitches = pitchKey;
     broadcast({ type: "note_view_pitches", page, pitches });
   }
-  if (framesEqual(backFrame, frontFrame) && !forceNextSend) {
+  const noteChains = getNoteChainFrame();
+  const chainViewKey = JSON.stringify(noteChains);
+  const noteChainsChanged = chainViewKey !== lastNoteChainView;
+  lastNoteChainView = chainViewKey;
+  const displayFrame = applyHardwareChainPreview(backFrame);
+  if (framesEqual(displayFrame, frontFrame) && !forceNextSend) {
     dirtyFrame = false;
+    if (noteChainsChanged) broadcastLedUIFrame(null, noteChains);
     return;
   }
   dirtyFrame = false;
-  const changes = countFrameChanges(backFrame, frontFrame);
+  const changes = countFrameChanges(displayFrame, frontFrame);
   const useDiff = changes > 0 && changes <= SMALL_DIFF_THRESHOLD;
   if (useDiff) {
-    serial.sendLEDDiff(backFrame);
+    serial.sendLEDDiff(displayFrame);
   } else {
-    serial.sendLEDFrame(backFrame);
+    serial.sendLEDFrame(displayFrame);
   }
-  frontFrame = backFrame.slice();
+  frontFrame = displayFrame.slice();
   forceNextSend = false;
-  broadcastLedUIFrame();
+  broadcastLedUIFrame(null, noteChains);
   const patternDevices = patternControllerDevices();
   if (patternDevices.length) {
     const patternFrame = state.renderPatternControlLED();

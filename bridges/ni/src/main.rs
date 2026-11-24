@@ -2,7 +2,7 @@ mod controls;
 
 use controls::{Controls, Profile, DISPLAY_BUTTONS};
 use encdr::{ControllerFilter, DeviceDescriptor, DeviceId, Encdr, EncdrConfig, Event, LedValue};
-use encdr_view::webview_macos::run_event_loop_with_target;
+use encdr_view::webview_macos::{run_event_loop_with_target, PreviewWindow};
 use encdr_view::{ScreenContent, ScreenView};
 use serde_json::{json, Value};
 use std::{
@@ -52,10 +52,16 @@ struct Displays([ScreenView; 2]);
 
 impl Displays {
     fn new(
+        preview_only: bool,
         mut make_screen: impl FnMut(&str, ScreenContent) -> Result<ScreenView, String>,
     ) -> Result<Self, String> {
-        let mut screen =
-            |side| make_screen(side, ScreenContent::Html(PANEL.replace("__SIDE__", side)));
+        let mut screen = |side| {
+            let html = PANEL.replace("__SIDE__", side).replace(
+                "__PREVIEW_ONLY__",
+                if preview_only { "true" } else { "false" },
+            );
+            make_screen(side, ScreenContent::Html(html))
+        };
         Ok(Self([screen("left")?, screen("right")?]))
     }
 
@@ -193,6 +199,7 @@ impl Surface {
         active_page: u64,
         active_slot: Option<usize>,
         track_activity: u8,
+        preview: Option<&Displays>,
     ) {
         let Some(displays) = &self.displays else {
             return;
@@ -213,11 +220,17 @@ impl Surface {
                 view["buttonColors"] = json!(controls.display_button_colors(profile, state));
                 view["clearHeld"] = json!(controls.clear_held(profile));
                 view["clearConfirm"] = json!(controls.clear_confirm);
+                if let Some(preview) = preview {
+                    preview.send(view.clone());
+                }
                 displays.send(view);
                 self.update_lamps(encdr, id, profile, state, track_activity);
             }
         } else if self.dirty && !state.is_null() {
             send_track_view(displays, state);
+            if let Some(preview) = preview {
+                send_track_view(preview, state);
+            }
         }
         self.dirty = false;
         if let Some(displays) = &self.displays {
@@ -262,6 +275,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         ..Default::default()
     })?;
     let mut preview = None;
+    let mut preview_device = None;
     let (sender, updates) = mpsc::channel();
     thread::spawn(move || {
         for line in io::stdin().lock().lines().map_while(Result::ok) {
@@ -282,6 +296,20 @@ fn main() -> Result<(), Box<dyn Error>> {
     eprintln!("Waiting for compatible NI controllers ({controller})");
 
     run_event_loop_with_target(|target| {
+        if visible && preview.is_none() {
+            let result = PreviewWindow::new(target, SCREEN_SIZE).and_then(|window| {
+                Displays::new(true, |side, content| {
+                    ScreenView::new_preview(&window, side, SCREEN_SIZE, content)
+                })
+            });
+            match result {
+                Ok(displays) => preview = Some(displays),
+                Err(error) => {
+                    eprintln!("Could not create preview displays: {error}");
+                    return false;
+                }
+            }
+        }
         let connected = encdr.connected_devices();
         let mut running = true;
         surfaces.retain(|id, surface| {
@@ -308,8 +336,8 @@ fn main() -> Result<(), Box<dyn Error>> {
             surface.lamps.clear();
             surface.dirty = true;
             if owned && surface.displays.is_none() {
-                match Displays::new(|side, content| {
-                    ScreenView::new_on_target(target, id, side, SCREEN_SIZE, content, visible)
+                match Displays::new(false, |side, content| {
+                    ScreenView::new_on_target(target, id, side, SCREEN_SIZE, content, false)
                 }) {
                     Ok(displays) => surface.displays = Some(displays),
                     Err(error) => eprintln!("{id}: could not create displays: {error}"),
@@ -380,38 +408,36 @@ fn main() -> Result<(), Box<dyn Error>> {
                 Err(mpsc::TryRecvError::Disconnected) => return false,
             }
         }
-        for (&id, surface) in surfaces.iter_mut().filter(|(_, surface)| surface.owned) {
-            surface.render(&encdr, id, &state, active_page, active_slot, track_activity);
-        }
-        if visible && !surfaces.values().any(|surface| surface.displays.is_some()) {
-            if preview.is_none() {
-                match Displays::new(|side, content| {
-                    ScreenView::new_on_target(
-                        target,
-                        DeviceId::default(),
-                        side,
-                        SCREEN_SIZE,
-                        content,
-                        true,
-                    )
-                }) {
-                    Ok(displays) => {
-                        preview = Some(displays);
-                        state_changed = true;
-                    }
-                    Err(error) => {
-                        eprintln!("Could not create preview displays: {error}");
-                        return false;
-                    }
-                }
-            }
-            if state_changed && !state.is_null() {
-                if let Some(displays) = &preview {
+        if let Some(displays) = &preview {
+            if !preview_device.is_some_and(|id| {
+                surfaces
+                    .get(&id)
+                    .is_some_and(|surface| surface.owned && surface.displays.is_some())
+            }) {
+                let previous_device = preview_device;
+                preview_device = surfaces
+                    .iter()
+                    .find(|(_, surface)| surface.owned && surface.displays.is_some())
+                    .map(|(&id, _)| id);
+                if let Some(surface) = preview_device.and_then(|id| surfaces.get_mut(&id)) {
+                    surface.dirty = true;
+                } else if (state_changed || previous_device.is_some()) && !state.is_null() {
                     send_track_view(displays, &state);
                 }
             }
-        } else {
-            preview = None;
+            displays.poll(&encdr);
+        }
+        for (&id, surface) in surfaces.iter_mut().filter(|(_, surface)| surface.owned) {
+            let mirrored = preview.as_ref().filter(|_| preview_device == Some(id));
+            surface.render(
+                &encdr,
+                id,
+                &state,
+                active_page,
+                active_slot,
+                track_activity,
+                mirrored,
+            );
         }
         true
     });

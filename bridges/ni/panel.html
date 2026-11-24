@@ -57,7 +57,7 @@
   .toast[hidden] { display: none; }
   .toast span { max-width: 85%; padding: 16px; border-radius: 4px; background: #000; color: #eceae5; font-size: 12px; text-align: center; }
 </style>
-<body data-side="__SIDE__">
+<body data-side="__SIDE__" data-preview-only="__PREVIEW_ONLY__">
   <div class="tabs"></div>
   <main></main>
   <div class="parameters"></div>
@@ -184,8 +184,11 @@
           footerFade = { start: animationStart, from: footerOpacity, to: showLauncher ? 0 : 1 };
           footer.setAttribute("aria-hidden", String(showLauncher));
         }
-        if (window.ipc) window.ipc.postMessage("__encdr_animate:210");
-        else if (previewFrame == null) previewFrame = requestAnimationFrame(previewAnimation);
+        if (window.ipc && document.body.dataset.previewOnly !== "true") {
+          window.ipc.postMessage("__encdr_animate:210");
+        } else if (previewFrame == null) {
+          previewFrame = requestAnimationFrame(previewAnimation);
+        }
       }
       slots.forEach((element, index) => {
         const slot = localSlots[index];

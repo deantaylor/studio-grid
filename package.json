@@ -13,6 +13,7 @@
     "dev": "node server/index.js",
     "electron": "electron .",
     "electron:ni": "STUDIO_GRID_NI=1 electron .",
+    "electron:ni:preview": "STUDIO_GRID_NI=1 STUDIO_GRID_NI_PREVIEW=1 electron .",
     "ni:build": "node bridges/ni/build.mjs",
     "ni:bridge": "node bridges/ni/bridge.mjs",
     "dist": "electron-builder -mwl",

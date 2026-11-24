@@ -21,8 +21,17 @@ sources included in the repository. For an unpackaged app, run
 **Settings → General**. The [NI controller guide](ni-controller.md) lists the
 supported models.
 
-For a standalone preview against a development server, run
-`STUDIO_GRID_NI_PREVIEW=1 npm run ni:bridge -- ws://127.0.0.1:3000`.
+### Live NI display preview
+
+On macOS, run `npm run ni:build` and then `npm run electron:ni:preview`.
+One window shows the two 480 × 272 NI displays side by side. On narrow screens
+the panels stack. The preview follows the controller Studio Grid owns, or
+shows a live track view as you edit or play when no controller is owned.
+
+For the browser version, start `npm run dev` in one terminal and run
+`STUDIO_GRID_NI_PREVIEW=1 npm run ni:bridge -- ws://127.0.0.1:3000`
+in another. Closing the preview window stops that session’s NI bridge.
+
 Set `STUDIO_GRID_NI_CONTROLLER` to limit discovery to one model
 (`s49`, `s61`, `s88`, `maschine-mk3`, `maschine-plus`, `maschine-studio`,
 `kontrol-s5`, or `kontrol-s8`).

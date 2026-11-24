@@ -5,6 +5,7 @@ const WIDTH = 16;
 const HEIGHT = 8;
 const CELL_SIZE = 40; //32
 const CELL_GAP = 16; //12
+const CHAIN_HANDLE_WIDTH_PX = 6;
 const CANVAS_WIDTH = WIDTH * CELL_SIZE + (WIDTH - 1) * CELL_GAP;
 const CANVAS_HEIGHT = HEIGHT * CELL_SIZE + (HEIGHT - 1) * CELL_GAP;
 const BASE_WINDOW_WIDTH = 1080;
@@ -781,6 +782,11 @@ let selectionCopyActive = false;
 let dragPaintActive = false;
 let dragPaintVisited = new Set();
 let gridPointerActive = false;
+let gridPointerId = null;
+let gridHoverHit = null;
+let pendingGridNote = null;
+let hardwareChainPreviewEnd = null;
+let suppressChainContextMenu = false;
 let pendingStepsStateId = 1;
 const pendingStepsStateRequests = new Map();
 let pendingMoveStepsId = 1;
@@ -876,6 +882,10 @@ logMissingDom([
 ]);
 
 let frames = Array.from({ length: 9 }, () => new Array(WIDTH * HEIGHT).fill(0));
+let noteChainFrame = null;
+let noteChainFlashes = [];
+let noteChainRaf = null;
+const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
 let frameReady = Array(9).fill(false);
 let isomorphicModes = Array(9).fill(false);
 let isomorphicLayout = { base: 48, stepX: 1, stepY: 3 };
@@ -968,6 +978,9 @@ const NON_DIRTY_WS_TYPES = new Set([
   "clockTicks",
   "get_step_state",
   "get_steps_state",
+  "begin_note_press",
+  "finish_note_press",
+  "preview_shorten_chain",
   "copy_bar",
   "copy_pattern",
   "copy_steps",
@@ -1432,6 +1445,7 @@ function connectWS() {
     console.error(e);
   };
   ws.onclose = () => {
+    hardwareChainPreviewEnd = null;
     if (wsStatus) wsStatus.textContent = "WS: closed";
     applyTrackActivity(0);
     log("WS closed; retrying");
@@ -1486,6 +1500,7 @@ function connectWS() {
         if (Array.isArray(incoming)) launcherFrame = incoming;
       } else if (Array.isArray(incoming)) {
         frames[targetPage] = incoming.slice();
+        noteChainFrame = msg.noteChains;
         octaveAnchors[targetPage] = new Set(msg.octaveAnchors || []);
         frameReady[targetPage] = true;
         suppressFrameUntilNext[targetPage] = false;
@@ -1667,6 +1682,16 @@ function connectWS() {
       handleAccentOverlayMessage(msg);
     } else if (msg.type === "slide_overlay") {
       handleSlideOverlayMessage(msg);
+    } else if (msg.type === "grid_note_edited") {
+      if (receivedStateOnce) {
+        setDirty(true);
+        queueUndoSnapshot();
+      }
+    } else if (msg.type === "note_chain_created") {
+      if (!reducedMotion.matches && isCurrentNoteChainView(msg.view)) {
+        noteChainFlashes.push({ ...msg, receivedAt: performance.now(), startedAt: null });
+        renderFrameIfReady();
+      }
     } else if (msg.type === "step_state") {
       handleStepStateMessage(msg);
     } else if (msg.type === "steps_state") {
@@ -2462,7 +2487,140 @@ function sendMidiClockTransport(kind) {
   sendMIDISafe(out, [status], window.performance.now());
 }
 
+function currentNoteChainView() {
+  const pattern = activePatterns[currentPage] || 1;
+  return {
+    page: currentPage,
+    pattern,
+    bar: barViews[currentPage]?.[pattern] || 0,
+    offset: noteViewOffsets[currentPage],
+    uiMode: fullScaleMode
+  };
+}
+
+function isCurrentNoteChainView(view) {
+  const current = currentNoteChainView();
+  return !patternControlActive && !isomorphicModes[currentPage]
+    && Object.keys(current).every((key) => current[key] === view?.[key]);
+}
+
+function currentNoteChainSpans() {
+  return isCurrentNoteChainView(noteChainFrame) ? noteChainFrame.spans : [];
+}
+
+function isNoteChainCell(x, y) {
+  return !!noteChainAt(x, y);
+}
+
+function noteChainAt(x, y) {
+  return currentNoteChainSpans().find((span) => span.y === y && span.startX <= x && x <= span.endX);
+}
+
+function isActiveGridNote(x, y) {
+  return isCurrentNoteChainView(noteChainFrame) && !!noteChainFrame.activeCells?.includes(y * WIDTH + x);
+}
+
+function updateGridNoteCursor() {
+  const hit = gridHoverHit;
+  const { page, pattern, bar } = currentNoteChainView();
+  const length = patternLengths[page]?.[pattern] || WIDTH;
+  const editable = !gridPointerActive && !octaveAnchorPress && isPlayableCell(hit)
+    && isCurrentNoteChainView(noteChainFrame) && Array.isArray(noteChainFrame.activeCells)
+    && bar * WIDTH + hit.x < length;
+  const active = editable && noteChainFrame.activeCells.includes(hit.y * WIDTH + hit.x);
+  const type = sequencerTypes[page] || "mono";
+  const span = active && noteChainAt(hit.x, hit.y);
+  const handle = active && (type === "mono" || type === "poly")
+    && (!span || (span.endX === hit.x && !span.continuesRight))
+    && ((span && span.startX < hit.x) || (hit.x < WIDTH - 1 && bar * WIDTH + hit.x + 1 < length))
+    && ((hit.x * (CELL_SIZE + CELL_GAP) + CELL_SIZE) - hit.relX) * hit.scaleX <= CHAIN_HANDLE_WIDTH_PX;
+  canvas.classList.toggle("chain-handle-hover", handle);
+  canvas.classList.toggle("note-cell-hover", editable && !handle);
+}
+
+function chainShorteningPreview() {
+  const press = pendingGridNote;
+  const endX = press?.drag?.endX;
+  if (press?.chainStartX == null || endX == null || endX >= press.x || !isCurrentNoteChainView(press.view)) return null;
+  const span = noteChainAt(press.x, press.y);
+  return span?.startX === press.chainStartX && span.endX === press.x ? { span, endX } : null;
+}
+
+function isShortenedChainCell(preview, x, y) {
+  return preview && y === preview.span.y && x > preview.endX && x <= preview.span.endX;
+}
+
+function drawNoteChains(shortening) {
+  const now = performance.now();
+  const fadeMs = 360;
+  noteChainFlashes = noteChainFlashes.filter((flash) => {
+    if (reducedMotion.matches || !isCurrentNoteChainView(flash.view)) return false;
+    if (flash.startedAt == null) return now - flash.receivedAt < 500;
+    return now - flash.startedAt < flash.sweepMs + 70 + fadeMs;
+  });
+  const spans = currentNoteChainSpans();
+  if (!spans.length) return;
+
+  const stride = CELL_SIZE + CELL_GAP;
+  let animating = false;
+  ctx.save();
+  ctx.fillStyle = "#fff";
+  ctx.strokeStyle = "#fff";
+  ctx.lineWidth = 1;
+  for (const span of spans) {
+    const { startX, y } = span;
+    const endX = shortening?.span === span ? shortening.endX : span.endX;
+    if (shortening?.span === span && startX === endX && !span.continuesLeft) continue;
+    const px = startX * stride;
+    const py = y * stride;
+    const width = (endX - startX) * stride + CELL_SIZE;
+    const flash = noteChainFlashes.findLast((entry) =>
+      entry.y === y && startX <= entry.startX && endX >= entry.endX
+    );
+    let strokeAlpha = 0.28;
+    if (flash) {
+      flash.startedAt ??= now;
+      flash.sweepMs ??= Math.min(480, 120 + 25 * (flash.endX - flash.startX + 1));
+      animating = true;
+      const elapsed = now - flash.startedAt;
+      const travel = Math.min(1, elapsed / flash.sweepMs);
+      const fade = Math.max(0, 1 - Math.max(0, elapsed - flash.sweepMs - 70) / fadeMs) ** 2;
+      const flashWidth = (flash.endX - flash.startX) * stride + CELL_SIZE;
+      const edge = flash.startX * stride + flashWidth * travel;
+      strokeAlpha += 0.26 * travel * fade;
+      ctx.save();
+      ctx.globalAlpha = (0.72 + 0.28 * travel) * fade;
+      ctx.beginPath();
+      ctx.rect(flash.startX * stride, py, flashWidth * travel, CELL_SIZE);
+      ctx.clip();
+      ctx.beginPath();
+      for (let x = flash.startX; x <= flash.endX && x * stride < edge; x++) {
+        ctx.roundRect(x * stride, py, CELL_SIZE, CELL_SIZE, 2);
+      }
+      ctx.fill();
+      ctx.restore();
+    }
+    const left = Math.max(1, px - 3);
+    const top = Math.max(1, py - 3);
+    const right = Math.min(CANVAS_WIDTH - 1, px + width + 3);
+    const bottom = Math.min(CANVAS_HEIGHT - 1, py + CELL_SIZE + 3);
+    ctx.globalAlpha = strokeAlpha;
+    ctx.beginPath();
+    ctx.roundRect(left, top, right - left, bottom - top, 5);
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+  }
+  ctx.restore();
+  if (animating && noteChainRaf == null) {
+    noteChainRaf = requestAnimationFrame(() => {
+      noteChainRaf = null;
+      renderFrameIfReady();
+    });
+  }
+}
+
 function renderFrame(frame) {
+  updateGridNoteCursor();
   const safeFrame = patternControlActive ? launcherFrame : (Array.isArray(frame) ? frame : BLANK_FRAME);
   const displayFrame = safeFrame.slice();
   const patIdx = activePatterns[currentPage] || 1;
@@ -2482,13 +2640,14 @@ function renderFrame(frame) {
     }
   }
   if (!patternControlActive && !Array.isArray(frame)) frames[currentPage] = safeFrame;
+  const shortening = chainShorteningPreview();
   ctx.clearRect(0, 0, canvas.width, canvas.height);
   displayFrame.forEach((level, idx) => {
     const x = idx % WIDTH;
     const y = Math.floor(idx / WIDTH);
     const px = x * (CELL_SIZE + CELL_GAP);
     const py = y * (CELL_SIZE + CELL_GAP);
-    ctx.fillStyle = getLedColor(level);
+    ctx.fillStyle = getLedColor(isShortenedChainCell(shortening, x, y) ? 0 : level);
     if (typeof ctx.roundRect === "function") {
       ctx.beginPath();
       ctx.roundRect(px, py, CELL_SIZE, CELL_SIZE, 2);
@@ -2550,6 +2709,8 @@ function renderFrame(frame) {
     });
     ctx.restore();
   }
+
+  drawNoteChains(shortening);
 
   // overlays
   const now = Date.now();
@@ -2618,6 +2779,7 @@ function renderFrame(frame) {
   });
   overlayRenderList.push(...singleOverlays);
   overlayRenderList.forEach((o) => {
+    if (isShortenedChainCell(shortening, o.x, o.drawY)) return;
     ctx.save();
     const px = o.x * (CELL_SIZE + CELL_GAP);
     const py = o.drawY * (CELL_SIZE + CELL_GAP);
@@ -5224,18 +5386,6 @@ function applyMDTonalUI() {
   }
 }
 
-function sendGridTapFromClient(clientX, clientY) {
-  const rect = canvas.getBoundingClientRect();
-  const x = Math.floor((clientX - rect.left) / (rect.width / WIDTH));
-  const y = Math.floor((clientY - rect.top) / (rect.height / HEIGHT));
-  if (x < 0 || x >= WIDTH || y < 0 || y >= HEIGHT) return;
-  if (noteMenu && !noteMenu.classList.contains("hidden") && noteMenuTarget && noteMenuTarget.x === x && noteMenuTarget.y === y) {
-    closeNoteMenu();
-  }
-  // send a full press+release tap so mouse input only toggles notes on/off
-  toggleGridCell(x, y);
-}
-
 function handleCanvasContextMenu(clientX, clientY) {
   if (patternControlActive) return;
   const rect = canvas.getBoundingClientRect();
@@ -5314,8 +5464,10 @@ function cancelSelectionActions() {
   selectionDragActive = false;
   selectionRenderOffset = null;
   selectionBoxStart = null;
-  selectionBoxPreviewCells.clear();
+  clearGridNoteDragPreview();
   gridPointerActive = false;
+  gridPointerId = null;
+  pendingGridNote = null;
   dragPaintActive = false;
   dragPaintVisited.clear();
   hideSelectionRect();
@@ -5719,6 +5871,18 @@ function applySelectionSlide(nextVal) {
 
 canvas.addEventListener("mousemove", (e) => {
   if (patternControlActive || gridPointerActive || octaveAnchorPress) return;
+  if (canvas.classList.contains("chain-handle-hover")) {
+    clearTimeout(octaveHoverTimer);
+    octaveHoverTimer = null;
+    pendingOctaveHover = null;
+    return;
+  }
+  // Keep the controls open while the pointer crosses the gaps between the buttons.
+  if (hoveredStep && [octaveControls, microControls].some((controls) => {
+    if (controls.style.display !== "flex") return false;
+    const rect = controls.getBoundingClientRect();
+    return e.clientX >= rect.left && e.clientX <= rect.right && e.clientY >= rect.top && e.clientY <= rect.bottom;
+  })) return;
   const rect = canvas.getBoundingClientRect();
   const scaleX = rect.width / CANVAS_WIDTH;
   const scaleY = rect.height / CANVAS_HEIGHT;
@@ -5755,17 +5919,7 @@ canvas.addEventListener("mousemove", (e) => {
     return;
   }
 
-  const frame = frames[currentPage] || [];
-  const val = frame[y * WIDTH + x] || 0;
-  const playVal = ledLevels.playhead || 0;
-  if (!running && playVal > 0 && val === playVal && !octaveAnchors[currentPage].has(y * WIDTH + x)) {
-    hoveredStep = null;
-    if (!isOverOctaveControls) octaveControls.style.display = "none";
-    if (!isOverMicroControls) microControls.style.display = "none";
-    updateSelectionPopover();
-    return;
-  }
-  if (val <= 0) {
+  if (!isActiveGridNote(x, y) && !octaveAnchors[currentPage].has(y * WIDTH + x)) {
     hoveredStep = null;
     if (!isOverOctaveControls) octaveControls.style.display = "none";
     if (!isOverMicroControls) microControls.style.display = "none";
@@ -5797,10 +5951,122 @@ canvas.addEventListener("mousemove", (e) => {
   }, 500);
 });
 
+function finishGridNotePress() {
+  const press = pendingGridNote;
+  pendingGridNote = null;
+  if (press?.drag) {
+    clearGridNoteDragPreview();
+    renderFrameIfReady();
+  }
+  if (!press || !isCurrentNoteChainView(press.view) || ws?.readyState !== WebSocket.OPEN) return false;
+  ws.send(JSON.stringify({
+    type: "finish_note_press", x: press.x, y: press.y, view: press.view,
+    paintSteps: Array.from(press.cells, parseCellKey)
+  }));
+  return true;
+}
+
+function sendGridNoteChain(press, endX) {
+  if (!isCurrentNoteChainView(press.view) || ws?.readyState !== WebSocket.OPEN) return false;
+  if (press.chainStartX != null) {
+    if (endX == null || endX === press.x) return false;
+    if (endX < press.x) {
+      ws.send(JSON.stringify({
+        type: "shorten_chain", view: press.view,
+        range: { startX: press.chainStartX, fromX: press.x, endX, y: press.y }
+      }));
+      hardwareChainPreviewEnd = null;
+      return true;
+    }
+  }
+  const range = { startX: press.x, endX, y: press.y };
+  const paintSteps = press.drag && !press.drag.held ? Array.from(press.cells, parseCellKey) : null;
+  if (endX == null && !paintSteps) return false;
+  ws.send(JSON.stringify({
+    type: paintSteps ? "drag_note" : "create_chain", range, view: press.view, paintSteps
+  }));
+  return true;
+}
+
+function extendGridNotePress(hit) {
+  const press = pendingGridNote;
+  if (!press || !isPlayableCell(hit)) return false;
+  if (performance.now() - press.startedAt < NOTE_EDIT_HOLD_MS) return false;
+  if (hit.y !== press.y || hit.x <= press.x || !sendGridNoteChain(press, hit.x)) return false;
+  pendingGridNote = null;
+  clearGridNoteDragPreview();
+  renderFrameIfReady();
+  return true;
+}
+
+function gridNoteDragEnd(press, hit) {
+  if (!hit.inBounds || hit.y !== press.y) return null;
+  const length = patternLengths[press.view.page]?.[press.view.pattern] || WIDTH;
+  const endX = Math.min(hit.x, length - press.view.bar * WIDTH - 1);
+  if (press.chainStartX != null) return Math.max(press.chainStartX, endX);
+  return endX > press.x ? endX : null;
+}
+
+function syncHardwareChainPreview(shortening = null) {
+  const endX = shortening?.endX ?? null;
+  if (hardwareChainPreviewEnd === endX) return;
+  hardwareChainPreviewEnd = endX;
+  if (ws?.readyState !== WebSocket.OPEN) return;
+  const span = shortening?.span;
+  ws.send(JSON.stringify({
+    type: "preview_shorten_chain",
+    view: span ? pendingGridNote.view : undefined,
+    range: span ? { startX: span.startX, fromX: span.endX, endX, y: span.y } : null
+  }));
+}
+
+function clearGridNoteDragPreview() {
+  selectionBoxPreviewCells.clear();
+  canvas.classList.remove("chain-dragging");
+  syncHardwareChainPreview();
+}
+
+function previewGridNoteDrag(press, hit) {
+  const current = isCurrentNoteChainView(press.view);
+  const endX = current ? gridNoteDragEnd(press, hit) : null;
+  press.drag.endX = endX;
+  syncHardwareChainPreview(chainShorteningPreview());
+  const showRange = press.drag.held || press.anchorOn;
+  canvas.classList.toggle("chain-dragging", current && showRange);
+  selectionBoxPreviewCells.clear();
+  if (showRange) {
+    if (endX != null) {
+      for (let x = press.chainStartX ?? press.x; x <= endX; x++) selectionBoxPreviewCells.add(cellKey(x, press.y));
+    }
+  } else {
+    for (const key of press.cells) selectionBoxPreviewCells.add(key);
+  }
+  renderFrameIfReady();
+}
+
 canvas.addEventListener("pointerdown", (e) => {
+  if (e.button === 2) suppressChainContextMenu = false;
   if (e.button !== 0 || octaveAnchorPress) return;
   const hit = getGridHit(e.clientX, e.clientY);
   if (!hit.inBounds) return;
+  if (gridPointerActive) {
+    if (e.pointerId === gridPointerId || !isPlayableCell(hit)) return;
+    if (pendingGridNote?.drag && pendingGridNote.chainStartX != null) return;
+    if (extendGridNotePress(hit)) {
+      e.preventDefault();
+      return;
+    }
+    if (pendingGridNote) dragPaintActive = finishGridNotePress();
+    if (dragPaintActive) {
+      const key = cellKey(hit.x, hit.y);
+      if (!dragPaintVisited.has(key)) {
+        dragPaintVisited.add(key);
+        toggleGridCell(hit.x, hit.y);
+      }
+      e.preventDefault();
+    }
+    return;
+  }
   if (patternControlActive) {
     if (hit.inCell) toggleGridCell(hit.x, hit.y);
     return;
@@ -5826,6 +6092,8 @@ canvas.addEventListener("pointerdown", (e) => {
   const mode = e.shiftKey ? "add" : (e.metaKey || e.ctrlKey ? "remove" : "replace");
 
   gridPointerActive = true;
+  gridPointerId = e.pointerId;
+  updateGridNoteCursor();
   try {
     canvas.setPointerCapture(e.pointerId);
   } catch (err) {
@@ -5860,9 +6128,25 @@ canvas.addEventListener("pointerdown", (e) => {
   }
 
   if (playable) {
-    dragPaintActive = true;
     dragPaintVisited = new Set([key]);
-    toggleGridCell(hit.x, hit.y);
+    const type = sequencerTypes[currentPage] || "mono";
+    if ((type === "mono" || type === "poly") && !isomorphicModes[currentPage]) {
+      const span = noteChainAt(hit.x, hit.y);
+      pendingGridNote = {
+        x: hit.x, y: hit.y, view: currentNoteChainView(), startedAt: performance.now(),
+        cells: dragPaintVisited, drag: null,
+        anchorOn: isActiveGridNote(hit.x, hit.y),
+        chainStartX: span?.endX === hit.x && !span.continuesRight ? span.startX : null
+      };
+      if (ws?.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({
+          type: "begin_note_press", x: hit.x, y: hit.y, view: pendingGridNote.view
+        }));
+      }
+    } else {
+      dragPaintActive = true;
+      toggleGridCell(hit.x, hit.y);
+    }
     e.preventDefault();
     return;
   }
@@ -5881,9 +6165,44 @@ for (const eventName of ["pointerup", "pointercancel", "lostpointercapture"]) {
   });
 }
 
+function trackGridNoteHover(e) {
+  if (e.pointerType === "touch" || gridPointerActive) return;
+  gridHoverHit = getGridHit(e.clientX, e.clientY);
+  updateGridNoteCursor();
+}
+
+canvas.addEventListener("pointerenter", trackGridNoteHover);
 canvas.addEventListener("pointermove", (e) => {
-  if (!gridPointerActive) return;
+  if (!gridPointerActive) {
+    trackGridNoteHover(e);
+    return;
+  }
+  if (e.pointerId !== gridPointerId) return;
   const hit = getGridHit(e.clientX, e.clientY);
+  if (pendingGridNote) {
+    const press = pendingGridNote;
+    if (e.pointerType === "mouse" && e.button === 2 && (e.buttons & 1) && extendGridNotePress(hit)) {
+      suppressChainContextMenu = true;
+      e.preventDefault();
+      return;
+    }
+    if (press.drag) {
+      if (isPlayableCell(hit)) press.cells.add(cellKey(hit.x, hit.y));
+      previewGridNoteDrag(press, hit);
+      return;
+    }
+    if (!isPlayableCell(hit)) return;
+    const key = cellKey(hit.x, hit.y);
+    if (dragPaintVisited.has(key)) return;
+    if (hit.y === press.y && (hit.x > press.x || press.chainStartX != null)) {
+      const held = performance.now() - press.startedAt >= NOTE_EDIT_HOLD_MS;
+      press.drag = { held };
+      press.cells.add(key);
+      previewGridNoteDrag(press, hit);
+      return;
+    }
+    dragPaintActive = finishGridNotePress();
+  }
   if (dragPaintActive && isPlayableCell(hit)) {
     const key = cellKey(hit.x, hit.y);
     if (!dragPaintVisited.has(key)) {
@@ -5903,7 +6222,7 @@ canvas.addEventListener("pointermove", (e) => {
     const frame = frames[currentPage] || [];
     selectionBoxPreviewCells = new Set();
     boxCells.forEach(({ x, y }) => {
-      if ((frame[y * WIDTH + x] || 0) > 0) {
+      if ((frame[y * WIDTH + x] || 0) > 0 || isNoteChainCell(x, y)) {
         selectionBoxPreviewCells.add(cellKey(x, y));
       }
     });
@@ -5921,7 +6240,19 @@ canvas.addEventListener("pointermove", (e) => {
 });
 
 canvas.addEventListener("pointerup", (e) => {
-  if (!gridPointerActive) return;
+  if (!gridPointerActive || e.pointerId !== gridPointerId) return;
+  const press = pendingGridNote;
+  if (press?.drag) {
+    pendingGridNote = null;
+    const hit = getGridHit(e.clientX, e.clientY);
+    if (isPlayableCell(hit)) press.cells.add(cellKey(hit.x, hit.y));
+    const endX = gridNoteDragEnd(press, hit);
+    const sent = sendGridNoteChain(press, endX);
+    clearGridNoteDragPreview();
+    if (!sent || press.chainStartX == null || endX >= press.x) renderFrameIfReady();
+  } else {
+    finishGridNotePress();
+  }
   if (dragPaintActive) {
     dragPaintActive = false;
     dragPaintVisited.clear();
@@ -5945,6 +6276,9 @@ canvas.addEventListener("pointerup", (e) => {
     selectionCopyActive = false;
   }
   gridPointerActive = false;
+  gridPointerId = null;
+  trackGridNoteHover(e);
+  dragPaintVisited.clear();
   try {
     canvas.releasePointerCapture(e.pointerId);
   } catch (err) {
@@ -5952,22 +6286,41 @@ canvas.addEventListener("pointerup", (e) => {
   }
 });
 
-canvas.addEventListener("pointercancel", (e) => {
+function cancelGridPointer(e) {
+  if (e.pointerId !== gridPointerId) return;
+  if (e.type === "lostpointercapture" && pendingGridNote && (e.buttons & 1)) {
+    try {
+      canvas.setPointerCapture(e.pointerId);
+      if (canvas.hasPointerCapture(e.pointerId)) return;
+    } catch {
+      // The pointer may already have ended.
+    }
+  }
+  pendingGridNote = null;
+  gridPointerId = null;
+  gridHoverHit = null;
   dragPaintActive = false;
   selectionBoxActive = false;
   selectionDragActive = false;
   selectionRenderOffset = null;
   selectionBoxStart = null;
   dragPaintVisited.clear();
-  selectionBoxPreviewCells.clear();
+  clearGridNoteDragPreview();
   gridPointerActive = false;
   hideSelectionRect();
+  renderFrameIfReady();
   selectionCopyActive = false;
   try {
     canvas.releasePointerCapture(e.pointerId);
   } catch (err) {
     // ignore if not captured
   }
+}
+canvas.addEventListener("pointercancel", cancelGridPointer);
+canvas.addEventListener("lostpointercapture", cancelGridPointer);
+canvas.addEventListener("pointerleave", () => {
+  gridHoverHit = null;
+  updateGridNoteCursor();
 });
 
 const selectionDragRoots = [gridWrap, gridPanel, mainPanel, document.body].filter(Boolean);
@@ -6047,6 +6400,10 @@ canvas.addEventListener("mouseleave", () => {
 });
 canvas.addEventListener("contextmenu", (e) => {
   e.preventDefault();
+  if (suppressChainContextMenu) {
+    suppressChainContextMenu = false;
+    return;
+  }
   handleCanvasContextMenu(e.clientX, e.clientY);
 });
 
@@ -6061,6 +6418,14 @@ function nudgeStepMicro(delta) {
   const target = hoveredStep || lastOctaveTarget;
   if (!target) return;
   applySelectionDelta(target, "micro", delta);
+}
+
+function noteOverlayButtonLayout(scaleX) {
+  const cellWidth = CELL_SIZE * scaleX;
+  const usableWidth = Math.max(1, cellWidth - CHAIN_HANDLE_WIDTH_PX - 1);
+  const size = Math.min(24 * scaleX, usableWidth);
+  const inset = Math.min((cellWidth - size) / 2, usableWidth - size);
+  return { size, inset };
 }
 
 function showOctaveControls(hover) {
@@ -6081,16 +6446,15 @@ function showOctaveControls(hover) {
     return;
   }
   const atEdge = y === 0 || y === getStepRows() - 1;
-  const btnSize = 24 * scaleX;
+  const { size: btnSize, inset } = noteOverlayButtonLayout(scaleX);
   const rowHeight = (CELL_SIZE + CELL_GAP) * scaleY;
-  const columnGap = 4 * scaleX;
-  const width = atEdge ? 2 * btnSize + columnGap : btnSize;
-  const centerX = rectLeft + (x * (CELL_SIZE + CELL_GAP) + CELL_SIZE / 2) * scaleX;
+  const columnWidth = (CELL_SIZE + CELL_GAP) * scaleX;
   const topRow = y === 0 ? 1 : y - 1;
   const top = rectTop + topRow * rowHeight + (CELL_SIZE * scaleY - btnSize) / 2;
-  const left = Math.max(rectLeft, Math.min(centerX - width / 2, rectLeft + CANVAS_WIDTH * scaleX - width));
+  const firstColumn = atEdge ? Math.min(x, WIDTH - 2) : x;
+  const left = rectLeft + firstColumn * columnWidth + inset;
   octaveControls.style.flexDirection = atEdge ? "row" : "column";
-  octaveControls.style.columnGap = `${columnGap}px`;
+  octaveControls.style.columnGap = `${columnWidth - btnSize}px`;
   octaveControls.style.rowGap = `${Math.max(0, 2 * rowHeight - btnSize)}px`;
   [octaveUpBtn, octaveDownBtn].forEach((btn) => {
     btn.style.width = `${btnSize}px`;
@@ -6114,7 +6478,7 @@ function showMicroControls(hover) {
     if (!isOverMicroControls) microControls.style.display = "none";
     return;
   }
-  const btnSize = 24 * scaleX;
+  const { size: btnSize, inset } = noteOverlayButtonLayout(scaleX);
   const distX = (CELL_SIZE + CELL_GAP) * scaleX;
   const count = (hasLeft ? 1 : 0) + (hasRight ? 1 : 0);
   const gapPx = count > 1 ? Math.max(0, 2 * distX - btnSize) : 0;
@@ -6127,10 +6491,9 @@ function showMicroControls(hover) {
   });
   if (microLeftBtn) microLeftBtn.style.display = hasLeft ? "flex" : "none";
   if (microRightBtn) microRightBtn.style.display = hasRight ? "flex" : "none";
-  const rowWidth = btnSize * count + gapPx * Math.max(0, count - 1);
-  const centerX = rectLeft + (x * (CELL_SIZE + CELL_GAP) + CELL_SIZE / 2) * scaleX;
+  const firstColumn = hasLeft ? x - 1 : x + 1;
   const centerY = rectTop + (y * (CELL_SIZE + CELL_GAP) + CELL_SIZE / 2) * scaleY;
-  microControls.style.left = `${centerX - rowWidth / 2}px`;
+  microControls.style.left = `${rectLeft + firstColumn * distX + inset}px`;
   microControls.style.top = `${centerY - btnSize / 2}px`;
   microControls.style.display = "flex";
 }
@@ -6183,17 +6546,9 @@ octaveControls.addEventListener("mouseleave", () => {
     if (!hoveredStep) microControls.style.display = "none";
   }, 150);
 });
-octaveControls.addEventListener("click", (e) => {
-  if (e.target !== octaveControls) return;
-  sendGridTapFromClient(e.clientX, e.clientY);
-});
 octaveControls.addEventListener("contextmenu", (e) => {
   e.preventDefault();
   handleCanvasContextMenu(e.clientX, e.clientY);
-});
-microControls.addEventListener("click", (e) => {
-  if (e.target !== microControls) return;
-  sendGridTapFromClient(e.clientX, e.clientY);
 });
 microControls.addEventListener("contextmenu", (e) => {
   e.preventDefault();
@@ -6247,6 +6602,7 @@ window.addEventListener("resize", () => {
 updateSetTitle(setName);
 
 function patternHasData(page) {
+  if (page === currentPage && currentNoteChainSpans().length) return true;
   const frame = frames[page] || [];
   // Only consider step rows (exclude bottom device row)
   const playVal = ledLevels.playhead || 0;
@@ -6803,6 +7159,7 @@ function showConfirmModal(show) {
 }
 
 function isCurrentPatternEmpty() {
+  if (currentNoteChainSpans().length) return false;
   const snap = frames[currentPage] || [];
   const rows = getStepRows();
   for (let y = 0; y < rows; y++) {
@@ -6816,6 +7173,7 @@ function isCurrentPatternEmpty() {
 }
 
 function isCurrentBarEmpty() {
+  if (currentNoteChainSpans().length) return false;
   const snap = frames[currentPage] || [];
   const rows = getStepRows();
   for (let y = 0; y < rows; y++) {
