@@ -125,7 +125,7 @@ impl Surface {
                 action?
             }
             Event::Encoder { name, delta, .. } if name == profile.dial => {
-                controls.dial_turn(profile, delta)?
+                controls.dial_turn(delta)?
             }
             Event::EncoderFine { name, delta, .. }
                 if !controls.launcher_active && delta.is_finite() =>

@@ -400,9 +400,8 @@ impl Controls {
         }
     }
 
-    pub fn dial_turn(&self, profile: Profile, delta: i32) -> Option<Value> {
-        (!self.launcher_active && self.pressed.contains(profile.dial_press()) && delta != 0)
-            .then(|| json!({ "kind": "dial", "dial": delta }))
+    pub fn dial_turn(&self, delta: i32) -> Option<Value> {
+        (!self.launcher_active && delta != 0).then(|| json!({ "kind": "dial", "dial": delta }))
     }
 
     pub fn bright(&self, profile: Profile, name: &str) -> bool {
@@ -425,11 +424,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn dial_turn_scrolls_while_held_and_direction_presses_nudge_notes() {
+    fn dial_turn_scrolls_without_pressing_and_direction_presses_nudge_notes() {
         for controller in ["s49", "s61", "s88", "maschine-mk3", "maschine-plus"] {
             let profile = Profile::for_name(controller).unwrap();
             let mut controls = Controls::default();
-            assert!(controls.dial_turn(profile, 1).is_none());
+            for delta in [-2, 1] {
+                assert_eq!(
+                    controls.dial_turn(delta),
+                    Some(json!({ "kind": "dial", "dial": delta }))
+                );
+            }
+            assert!(controls.dial_turn(0).is_none());
             for (button, direction) in profile
                 .dial_directions()
                 .into_iter()
@@ -456,17 +461,13 @@ mod tests {
             let up = profile.dial_directions()[2];
             assert!(controls.button(profile, up, true).is_none());
             assert!(controls.button(profile, up, false).is_none());
-            for delta in [-2, 1] {
-                assert_eq!(
-                    controls.dial_turn(profile, delta),
-                    Some(json!({ "kind": "dial", "dial": delta }))
-                );
-            }
-            controls.launcher_active = true;
-            assert!(controls.dial_turn(profile, 1).is_none());
+            let scroll = Some(json!({ "kind": "dial", "dial": 1 }));
+            assert_eq!(controls.dial_turn(1), scroll);
             assert!(controls.button(profile, press, false).is_none());
+            controls.launcher_active = true;
+            assert!(controls.dial_turn(1).is_none());
             controls.launcher_active = false;
-            assert!(controls.dial_turn(profile, 1).is_none());
+            assert_eq!(controls.dial_turn(1), scroll);
         }
     }
 
